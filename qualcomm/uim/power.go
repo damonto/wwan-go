@@ -10,7 +10,7 @@ import (
 )
 
 func (r *Reader) Reset(ctx context.Context) error {
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMReset, nil, DefaultRequestTimeout)
+	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMReset, nil)
 	if err != nil {
 		return fmt.Errorf("resetting QMI UIM service: %w", err)
 	}
@@ -27,7 +27,7 @@ func (r *Reader) PowerOffSIM(ctx context.Context, slot uint8) error {
 
 	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMPowerOffSIM, tlv.TLVs{
 		tlv.Uint(0x01, slot),
-	}, DefaultRequestTimeout)
+	})
 	if err != nil {
 		return fmt.Errorf("powering off QMI UIM SIM slot %d: %w", slot, err)
 	}
@@ -47,12 +47,40 @@ func (r *Reader) PowerOnSIM(ctx context.Context, req PowerOnSIMRequest) error {
 		tlvs = append(tlvs, tlv.Uint(0x10, uint8(1)))
 	}
 
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMPowerOnSIM, tlvs, DefaultRequestTimeout)
+	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMPowerOnSIM, tlvs)
 	if err != nil {
 		return fmt.Errorf("powering on QMI UIM SIM slot %d: %w", req.Slot, err)
 	}
 	if err := resultOK(resp); err != nil {
 		return fmt.Errorf("powering on QMI UIM SIM slot %d: %w", req.Slot, err)
+	}
+	return nil
+}
+
+func (r *Reader) ChangeProvisioningSession(ctx context.Context, req ChangeProvisioningSessionRequest) error {
+	if len(req.AID) > 0xff {
+		return fmt.Errorf("changing QMI UIM provisioning session: AID length %d exceeds 255", len(req.AID))
+	}
+
+	activate := uint8(0)
+	if req.Activate {
+		activate = 1
+	}
+	tlvs := tlv.TLVs{
+		tlv.Bytes(0x01, []byte{byte(req.Session), activate}),
+	}
+	if req.Slot != 0 || len(req.AID) > 0 {
+		app := []byte{req.Slot, byte(len(req.AID))}
+		app = append(app, req.AID...)
+		tlvs = append(tlvs, tlv.Bytes(0x10, app))
+	}
+
+	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMChangeProvisioningSession, tlvs)
+	if err != nil {
+		return fmt.Errorf("changing QMI UIM provisioning session: %w", err)
+	}
+	if err := resultOK(resp); err != nil {
+		return fmt.Errorf("changing QMI UIM provisioning session: %w", err)
 	}
 	return nil
 }

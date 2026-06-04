@@ -1,6 +1,7 @@
 package uim
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -93,6 +94,58 @@ func TestReaderPowerPrimitives(t *testing.T) {
 			},
 			wantErr: "slot is zero",
 		},
+		{
+			name: "change provisioning session",
+			run: func(ctx context.Context, r *Reader) error {
+				return r.ChangeProvisioningSession(ctx, ChangeProvisioningSessionRequest{
+					Session:  SessionPrimaryGWProvisioning,
+					Activate: true,
+				})
+			},
+			check: func(t *testing.T, req qualcomm.Request) {
+				t.Helper()
+				if req.MessageID != qualcomm.QMIUIMChangeProvisioningSession {
+					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.QMIUIMChangeProvisioningSession)
+				}
+				assertTLV(t, req.TLVs, 0x01, []byte{byte(SessionPrimaryGWProvisioning), 0x01})
+				if _, ok := tlv.Value(req.TLVs, 0x10); ok {
+					t.Fatal("ChangeProvisioningSession() includes application information TLV, want omitted")
+				}
+			},
+			resp: successResponse(qualcomm.QMIUIMChangeProvisioningSession),
+		},
+		{
+			name: "change provisioning session with application information",
+			run: func(ctx context.Context, r *Reader) error {
+				return r.ChangeProvisioningSession(ctx, ChangeProvisioningSessionRequest{
+					Session:  SessionPrimaryGWProvisioning,
+					Activate: true,
+					Slot:     2,
+					AID:      []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02},
+				})
+			},
+			check: func(t *testing.T, req qualcomm.Request) {
+				t.Helper()
+				if req.MessageID != qualcomm.QMIUIMChangeProvisioningSession {
+					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.QMIUIMChangeProvisioningSession)
+				}
+				assertTLV(t, req.TLVs, 0x01, []byte{byte(SessionPrimaryGWProvisioning), 0x01})
+				assertTLV(t, req.TLVs, 0x10, []byte{0x02, 0x07, 0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02})
+			},
+			resp: successResponse(qualcomm.QMIUIMChangeProvisioningSession),
+		},
+		{
+			name: "change provisioning session rejects long aid",
+			run: func(ctx context.Context, r *Reader) error {
+				return r.ChangeProvisioningSession(ctx, ChangeProvisioningSessionRequest{
+					Session:  SessionPrimaryGWProvisioning,
+					Activate: true,
+					Slot:     2,
+					AID:      bytes.Repeat([]byte{0xA0}, 256),
+				})
+			},
+			wantErr: "AID length 256 exceeds 255",
+		},
 	}
 
 	for _, tt := range tests {
@@ -104,6 +157,7 @@ func TestReaderPowerPrimitives(t *testing.T) {
 						if req.Service != qualcomm.QMIServiceUIM || req.ClientID != 7 {
 							t.Fatalf("request = service %#x client %d, want UIM client 7", req.Service, req.ClientID)
 						}
+						assertRequestTimeout(t, req, DefaultRequestTimeout)
 						tt.check(t, req)
 					},
 					resp: tt.resp,

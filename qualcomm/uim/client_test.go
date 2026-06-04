@@ -542,6 +542,13 @@ func assertTLV(t *testing.T, tlvs tlv.TLVs, typ byte, want []byte) {
 	}
 }
 
+func assertRequestTimeout(t *testing.T, req qualcomm.Request, want time.Duration) {
+	t.Helper()
+	if req.Timeout != want {
+		t.Fatalf("Timeout = %v, want %v", req.Timeout, want)
+	}
+}
+
 func successResponse(id qualcomm.MessageID, tlvs ...tlv.TLV) qualcomm.Response {
 	return qualcomm.Response{
 		Service:   qualcomm.QMIServiceUIM,

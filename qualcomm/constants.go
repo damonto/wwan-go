@@ -38,32 +38,34 @@ const (
 	QMICtlInternalProxyOpen   MessageID = 0xFF00
 
 	// UIM service commands
-	QMIUIMReset               MessageID = 0x0000
-	QMIUIMReadTransparent     MessageID = 0x0020
-	QMIUIMReadRecord          MessageID = 0x0021
-	QMIUIMGetFileAttributes   MessageID = 0x0024
-	QMIUIMPowerOffSIM         MessageID = 0x0030
-	QMIUIMPowerOnSIM          MessageID = 0x0031
-	QMIUIMSendAPDU            MessageID = 0x003B
-	QMIUIMOpenLogicalChannel  MessageID = 0x0042
-	QMIUIMCloseLogicalChannel MessageID = 0x003F
-	QMIUIMSwitchSlot          MessageID = 0x0046
-	QMIUIMGetSlotStatus       MessageID = 0x0047
-	QMIUIMGetCardStatus       MessageID = 0x002F
-	QMIUIMAuthenticate        MessageID = 0x0034
+	QMIUIMReset                     MessageID = 0x0000
+	QMIUIMReadTransparent           MessageID = 0x0020
+	QMIUIMReadRecord                MessageID = 0x0021
+	QMIUIMGetFileAttributes         MessageID = 0x0024
+	QMIUIMPowerOffSIM               MessageID = 0x0030
+	QMIUIMPowerOnSIM                MessageID = 0x0031
+	QMIUIMChangeProvisioningSession MessageID = 0x0038
+	QMIUIMSendAPDU                  MessageID = 0x003B
+	QMIUIMOpenLogicalChannel        MessageID = 0x0042
+	QMIUIMCloseLogicalChannel       MessageID = 0x003F
+	QMIUIMSwitchSlot                MessageID = 0x0046
+	QMIUIMGetSlotStatus             MessageID = 0x0047
+	QMIUIMGetCardStatus             MessageID = 0x002F
+	QMIUIMAuthenticate              MessageID = 0x0034
 
 	// CAT/CAT2 service commands
 	QMICATSendEnvelope MessageID = 0x0022
 
-	MessageReadTransparent = QMIUIMReadTransparent
-	MessageReadRecord      = QMIUIMReadRecord
-	MessageGetFileAttrs    = QMIUIMGetFileAttributes
-	MessageGetCardStatus   = QMIUIMGetCardStatus
-	MessageAuthenticate    = QMIUIMAuthenticate
-	MessageSwitchSlot      = QMIUIMSwitchSlot
-	MessageGetSlotStatus   = QMIUIMGetSlotStatus
-	MessagePowerOffSIM     = QMIUIMPowerOffSIM
-	MessagePowerOnSIM      = QMIUIMPowerOnSIM
+	MessageReadTransparent           = QMIUIMReadTransparent
+	MessageReadRecord                = QMIUIMReadRecord
+	MessageGetFileAttrs              = QMIUIMGetFileAttributes
+	MessageGetCardStatus             = QMIUIMGetCardStatus
+	MessageAuthenticate              = QMIUIMAuthenticate
+	MessageSwitchSlot                = QMIUIMSwitchSlot
+	MessageGetSlotStatus             = QMIUIMGetSlotStatus
+	MessagePowerOffSIM               = QMIUIMPowerOffSIM
+	MessagePowerOnSIM                = QMIUIMPowerOnSIM
+	MessageChangeProvisioningSession = QMIUIMChangeProvisioningSession
 )
 
 // QMUX header constants

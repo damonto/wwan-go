@@ -17,6 +17,7 @@ func TestReaderSlotPrimitives(t *testing.T) {
 					if req.MessageID != qualcomm.QMIUIMGetSlotStatus {
 						t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.QMIUIMGetSlotStatus)
 					}
+					assertRequestTimeout(t, req, slotStatusTimeout)
 					if len(req.TLVs) != 0 {
 						t.Fatalf("TLVs = %+v, want empty", req.TLVs)
 					}
@@ -28,6 +29,7 @@ func TestReaderSlotPrimitives(t *testing.T) {
 					if req.MessageID != qualcomm.QMIUIMSwitchSlot {
 						t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.QMIUIMSwitchSlot)
 					}
+					assertRequestTimeout(t, req, DefaultRequestTimeout)
 					assertTLV(t, req.TLVs, 0x01, []byte{0x01})
 					assertTLV(t, req.TLVs, 0x02, []byte{0x02, 0x00, 0x00, 0x00})
 				},
@@ -38,6 +40,7 @@ func TestReaderSlotPrimitives(t *testing.T) {
 					if req.MessageID != qualcomm.QMIUIMGetCardStatus {
 						t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.QMIUIMGetCardStatus)
 					}
+					assertRequestTimeout(t, req, DefaultRequestTimeout)
 					if len(req.TLVs) != 0 {
 						t.Fatalf("TLVs = %+v, want empty", req.TLVs)
 					}

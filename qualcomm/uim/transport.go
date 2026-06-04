@@ -27,7 +27,7 @@ func (r *Reader) releaseClientID(ctx context.Context) error {
 func (r *Reader) allocateServiceClientID(ctx context.Context, service qualcomm.ServiceType) (uint8, error) {
 	resp, err := r.request(ctx, qualcomm.QMIServiceControl, 0, qualcomm.QMICtlCmdAllocateClientID, tlv.TLVs{
 		tlv.Uint(0x01, service),
-	}, DefaultRequestTimeout)
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -45,7 +45,7 @@ func (r *Reader) allocateServiceClientID(ctx context.Context, service qualcomm.S
 func (r *Reader) allocateServiceClientIDLocked(ctx context.Context, service qualcomm.ServiceType) (uint8, error) {
 	resp, err := r.requestLocked(ctx, qualcomm.QMIServiceControl, 0, qualcomm.QMICtlCmdAllocateClientID, tlv.TLVs{
 		tlv.Uint(0x01, service),
-	}, DefaultRequestTimeout)
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -63,7 +63,7 @@ func (r *Reader) allocateServiceClientIDLocked(ctx context.Context, service qual
 func (r *Reader) releaseServiceClientID(ctx context.Context, service qualcomm.ServiceType, clientID uint8) error {
 	resp, err := r.request(ctx, qualcomm.QMIServiceControl, 0, qualcomm.QMICtlCmdReleaseClientID, tlv.TLVs{
 		tlv.Bytes(0x01, []byte{byte(service), clientID}),
-	}, DefaultRequestTimeout)
+	})
 	if err != nil {
 		return err
 	}
@@ -73,7 +73,7 @@ func (r *Reader) releaseServiceClientID(ctx context.Context, service qualcomm.Se
 func (r *Reader) releaseServiceClientIDLocked(ctx context.Context, service qualcomm.ServiceType, clientID uint8) error {
 	resp, err := r.requestLocked(ctx, qualcomm.QMIServiceControl, 0, qualcomm.QMICtlCmdReleaseClientID, tlv.TLVs{
 		tlv.Bytes(0x01, []byte{byte(service), clientID}),
-	}, DefaultRequestTimeout)
+	})
 	if err != nil {
 		return err
 	}
@@ -86,6 +86,16 @@ func (r *Reader) request(
 	clientID uint8,
 	id qualcomm.MessageID,
 	tlvs tlv.TLVs,
+) (qualcomm.Response, error) {
+	return r.requestWithTimeout(ctx, service, clientID, id, tlvs, DefaultRequestTimeout)
+}
+
+func (r *Reader) requestWithTimeout(
+	ctx context.Context,
+	service qualcomm.ServiceType,
+	clientID uint8,
+	id qualcomm.MessageID,
+	tlvs tlv.TLVs,
 	timeout time.Duration,
 ) (qualcomm.Response, error) {
 	r.mu.Lock()
@@ -93,10 +103,20 @@ func (r *Reader) request(
 	if r.closed || r.transport == nil {
 		return qualcomm.Response{}, errReaderClosed
 	}
-	return r.requestLocked(ctx, service, clientID, id, tlvs, timeout)
+	return r.requestLockedWithTimeout(ctx, service, clientID, id, tlvs, timeout)
 }
 
 func (r *Reader) requestLocked(
+	ctx context.Context,
+	service qualcomm.ServiceType,
+	clientID uint8,
+	id qualcomm.MessageID,
+	tlvs tlv.TLVs,
+) (qualcomm.Response, error) {
+	return r.requestLockedWithTimeout(ctx, service, clientID, id, tlvs, DefaultRequestTimeout)
+}
+
+func (r *Reader) requestLockedWithTimeout(
 	ctx context.Context,
 	service qualcomm.ServiceType,
 	clientID uint8,

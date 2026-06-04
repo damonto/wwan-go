@@ -28,7 +28,7 @@ func (r *Reader) transparentResponse(
 		tlv.Bytes(0x01, putSessionValue(file.Session, file.AID)),
 		tlv.Bytes(0x02, fileValue),
 		tlv.Bytes(0x03, info),
-	}, DefaultRequestTimeout)
+	})
 	if err != nil {
 		return qualcomm.Response{}, err
 	}
@@ -57,7 +57,7 @@ func (r *Reader) recordResponse(
 		tlv.Bytes(0x01, putSessionValue(file.Session, file.AID)),
 		tlv.Bytes(0x02, fileValue),
 		tlv.Bytes(0x03, recordValue),
-	}, DefaultRequestTimeout)
+	})
 	if err != nil {
 		return qualcomm.Response{}, err
 	}
@@ -79,7 +79,7 @@ func (r *Reader) fileAttributesResponse(
 	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMGetFileAttributes, tlv.TLVs{
 		tlv.Bytes(0x01, putSessionValue(file.Session, file.AID)),
 		tlv.Bytes(0x02, fileValue),
-	}, DefaultRequestTimeout)
+	})
 	if err != nil {
 		return qualcomm.Response{}, err
 	}
@@ -101,7 +101,7 @@ func (r *Reader) authenticateResponse(
 	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMAuthenticate, tlv.TLVs{
 		tlv.Bytes(0x01, putSessionValue(req.Session, req.AID)),
 		tlv.Bytes(0x02, value),
-	}, DefaultRequestTimeout)
+	})
 	if err != nil {
 		return qualcomm.Response{}, err
 	}

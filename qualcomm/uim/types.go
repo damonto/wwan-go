@@ -57,6 +57,13 @@ type PowerOnSIMRequest struct {
 	IgnoreHotSwapSwitch bool
 }
 
+type ChangeProvisioningSessionRequest struct {
+	Session  Session
+	Activate bool
+	Slot     uint8
+	AID      []byte
+}
+
 type OpenLogicalChannelRequest struct {
 	AID []byte
 }

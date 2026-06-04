@@ -28,7 +28,7 @@ func (r *Reader) SendEnvelope(ctx context.Context, envelope []byte) (EnvelopeRes
 	if service == qualcomm.QMIServiceCAT2 {
 		tlvs = append(tlvs, tlv.Uint(0x10, r.slot))
 	}
-	resp, err := r.request(ctx, service, clientID, qualcomm.QMICATSendEnvelope, tlvs, DefaultRequestTimeout)
+	resp, err := r.request(ctx, service, clientID, qualcomm.QMICATSendEnvelope, tlvs)
 	if err != nil {
 		return EnvelopeResponse{}, fmt.Errorf("running QMI CAT envelope: %w", err)
 	}
@@ -117,7 +117,7 @@ func (r *Reader) catServiceTypeLocked(ctx context.Context) (qualcomm.ServiceType
 }
 
 func (r *Reader) serviceVersions(ctx context.Context) ([]serviceVersion, error) {
-	resp, err := r.request(ctx, qualcomm.QMIServiceControl, 0, qualcomm.QMICtlCmdGetVersionInfo, nil, DefaultRequestTimeout)
+	resp, err := r.request(ctx, qualcomm.QMIServiceControl, 0, qualcomm.QMICtlCmdGetVersionInfo, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func (r *Reader) serviceVersions(ctx context.Context) ([]serviceVersion, error) 
 }
 
 func (r *Reader) serviceVersionsLocked(ctx context.Context) ([]serviceVersion, error) {
-	resp, err := r.requestLocked(ctx, qualcomm.QMIServiceControl, 0, qualcomm.QMICtlCmdGetVersionInfo, nil, DefaultRequestTimeout)
+	resp, err := r.requestLocked(ctx, qualcomm.QMIServiceControl, 0, qualcomm.QMICtlCmdGetVersionInfo, nil)
 	if err != nil {
 		return nil, err
 	}
