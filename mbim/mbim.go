@@ -27,40 +27,6 @@ type Reader struct {
 	closed bool
 }
 
-const (
-	FileStructureTransparent = 0x41
-	FileStructureLinearFixed = 0x42
-)
-
-type Application struct {
-	AID   []byte
-	Label string
-}
-
-type FileRef struct {
-	AID  []byte
-	Path []byte
-}
-
-type FileAttributes struct {
-	FileStructure byte
-	FileType      byte
-	RecordSize    uint16
-	RecordCount   uint16
-	FileSize      uint16
-}
-
-type TransparentRead struct {
-	File   FileRef
-	Offset uint16
-	Length uint16
-}
-
-type RecordRead struct {
-	File   FileRef
-	Record uint16
-}
-
 func (r *Reader) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
 	defer cancel()

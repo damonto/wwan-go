@@ -27,46 +27,46 @@ type simFile struct {
 
 func (t *simTransport) Do(_ context.Context, req qualcomm.Request) (qualcomm.Response, error) {
 	switch req.MessageID {
-	case qualcomm.QMIUIMGetFileAttributes:
+	case qualcomm.MessageGetFileAttributes:
 		session, aid := decodeSessionTLV(req.TLVs)
 		path := decodeFileTLV(req.TLVs)
 		file, ok := t.files[simFileKey(session, aid, path)]
 		if !ok {
-			return errorResponse(qualcomm.QMIUIMGetFileAttributes, qualcomm.QMIErrorSimFileNotFound), nil
+			return errorResponse(qualcomm.MessageGetFileAttributes, qualcomm.QMIErrorSimFileNotFound), nil
 		}
-		return successResponse(qualcomm.QMIUIMGetFileAttributes,
+		return successResponse(qualcomm.MessageGetFileAttributes,
 			tlv.Bytes(0x10, []byte{0x90, 0x00}),
-			tlv.Bytes(0x11, encodeFileAttributes(file.attrs.FileSize, file.attrs.FileID, file.attrs.FileType, file.attrs.RecordSize, file.attrs.RecordCount, file.attrs.Raw)),
+			tlv.Bytes(0x11, encodeFileAttributes(file.attrs.FileSize, file.attrs.FileID, byte(file.attrs.FileType), file.attrs.RecordSize, file.attrs.RecordCount, file.attrs.Raw)),
 		), nil
-	case qualcomm.QMIUIMReadTransparent:
+	case qualcomm.MessageReadTransparent:
 		session, aid := decodeSessionTLV(req.TLVs)
 		path := decodeFileTLV(req.TLVs)
 		file, ok := t.files[simFileKey(session, aid, path)]
 		if !ok || len(file.data) == 0 {
-			return errorResponse(qualcomm.QMIUIMReadTransparent, qualcomm.QMIErrorSimFileNotFound), nil
+			return errorResponse(qualcomm.MessageReadTransparent, qualcomm.QMIErrorSimFileNotFound), nil
 		}
-		return successResponse(qualcomm.QMIUIMReadTransparent,
+		return successResponse(qualcomm.MessageReadTransparent,
 			tlv.Bytes(0x10, []byte{0x90, 0x00}),
 			tlv.Bytes(0x11, encodeLengthPrefixed(file.data)),
 		), nil
-	case qualcomm.QMIUIMReadRecord:
+	case qualcomm.MessageReadRecord:
 		session, aid := decodeSessionTLV(req.TLVs)
 		path := decodeFileTLV(req.TLVs)
 		record := decodeRecordTLV(req.TLVs)
 		file, ok := t.files[simFileKey(session, aid, path)]
 		if !ok {
-			return errorResponse(qualcomm.QMIUIMReadRecord, qualcomm.QMIErrorSimFileNotFound), nil
+			return errorResponse(qualcomm.MessageReadRecord, qualcomm.QMIErrorSimFileNotFound), nil
 		}
 		row, ok := file.rows[record]
 		if !ok {
-			return errorResponse(qualcomm.QMIUIMReadRecord, qualcomm.QMIErrorSimFileNotFound), nil
+			return errorResponse(qualcomm.MessageReadRecord, qualcomm.QMIErrorSimFileNotFound), nil
 		}
-		return successResponse(qualcomm.QMIUIMReadRecord,
+		return successResponse(qualcomm.MessageReadRecord,
 			tlv.Bytes(0x10, []byte{0x90, 0x00}),
 			tlv.Bytes(0x11, encodeLengthPrefixed(row)),
 		), nil
-	case qualcomm.QMIUIMAuthenticate:
-		return successResponse(qualcomm.QMIUIMAuthenticate,
+	case qualcomm.MessageAuthenticate:
+		return successResponse(qualcomm.MessageAuthenticate,
 			tlv.Bytes(0x10, []byte{0x90, 0x00}),
 			tlv.Bytes(0x11, encodeLengthPrefixed(t.auth)),
 		), nil
@@ -315,7 +315,7 @@ func simFileKey(session uim.Session, aid, path []byte) string {
 	return fmt.Sprintf("%d:%s:%s", session, hex.EncodeToString(aid), hex.EncodeToString(path))
 }
 
-func makeAttrs(fileSize, fileID uint16, fileType byte, recordSize, recordCount uint16, rawHex string) uim.RawFileAttributes {
+func makeAttrs(fileSize, fileID uint16, fileType uim.QMIFileType, recordSize, recordCount uint16, rawHex string) uim.RawFileAttributes {
 	return uim.RawFileAttributes{
 		FileSize:    fileSize,
 		FileID:      fileID,
@@ -353,7 +353,7 @@ func smscRecord(size int, toa byte, digits ...byte) []byte {
 
 func successResponse(id qualcomm.MessageID, tlvs ...tlv.TLV) qualcomm.Response {
 	return qualcomm.Response{
-		Service:   qualcomm.QMIServiceUIM,
+		Service:   qualcomm.ServiceUIM,
 		ClientID:  1,
 		MessageID: id,
 		TLVs: append(tlv.TLVs{
@@ -364,7 +364,7 @@ func successResponse(id qualcomm.MessageID, tlvs ...tlv.TLV) qualcomm.Response {
 
 func errorResponse(id qualcomm.MessageID, err qualcomm.QMIError) qualcomm.Response {
 	return qualcomm.Response{
-		Service:   qualcomm.QMIServiceUIM,
+		Service:   qualcomm.ServiceUIM,
 		ClientID:  1,
 		MessageID: id,
 		TLVs: tlv.TLVs{

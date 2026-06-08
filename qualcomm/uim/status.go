@@ -15,7 +15,7 @@ import (
 type RawFileAttributes struct {
 	FileSize    uint16
 	FileID      uint16
-	FileType    byte
+	FileType    QMIFileType
 	RecordSize  uint16
 	RecordCount uint16
 	Raw         []byte
@@ -27,8 +27,8 @@ type SlotStatus struct {
 }
 
 type Slot struct {
-	PhysicalCardStatus uint32
-	PhysicalSlotStatus uint32
+	PhysicalCardStatus PhysicalCardState
+	PhysicalSlotStatus SlotState
 	LogicalSlot        uint8
 	ICCID              []byte
 }
@@ -42,27 +42,27 @@ type CardStatus struct {
 }
 
 type Card struct {
-	State        byte
-	UPINState    byte
+	State        CardState
+	UPINState    PINState
 	UPINRetries  byte
 	UPUKRetries  byte
-	ErrorCode    byte
+	ErrorCode    CardError
 	Applications []CardApplication
 }
 
 type CardApplication struct {
-	Type                          byte
-	State                         byte
-	PersonalizationState          byte
-	PersonalizationFeature        byte
+	Type                          ApplicationType
+	State                         ApplicationState
+	PersonalizationState          PersonalizationState
+	PersonalizationFeature        PersonalizationFeature
 	PersonalizationRetries        byte
 	PersonalizationUnblockRetries byte
 	AID                           []byte
 	UPINReplacesPIN1              byte
-	PIN1State                     byte
+	PIN1State                     PINState
 	PIN1Retries                   byte
 	PUK1Retries                   byte
-	PIN2State                     byte
+	PIN2State                     PINState
 	PIN2Retries                   byte
 	PUK2Retries                   byte
 }
@@ -84,8 +84,8 @@ func decodeSlotStatus(resp qualcomm.Response) (SlotStatus, error) {
 	}
 	for i := range count {
 		slot := Slot{
-			PhysicalCardStatus: payload.Uint32(),
-			PhysicalSlotStatus: payload.Uint32(),
+			PhysicalCardStatus: PhysicalCardState(payload.Uint32()),
+			PhysicalSlotStatus: SlotState(payload.Uint32()),
 			LogicalSlot:        payload.Uint8(),
 			ICCID:              payload.Bytes8(),
 		}
@@ -94,7 +94,7 @@ func decodeSlotStatus(resp qualcomm.Response) (SlotStatus, error) {
 		}
 
 		status.Slots = append(status.Slots, slot)
-		if slot.PhysicalSlotStatus == 1 {
+		if slot.PhysicalSlotStatus == SlotStateActive {
 			status.ActiveSlot = uint8(i + 1)
 		}
 	}
@@ -122,11 +122,11 @@ func decodeCardStatus(resp qualcomm.Response) (CardStatus, error) {
 	status.Cards = make([]Card, 0, cardCount)
 	for range cardCount {
 		entry := Card{
-			State:       payload.Uint8(),
-			UPINState:   payload.Uint8(),
+			State:       CardState(payload.Uint8()),
+			UPINState:   PINState(payload.Uint8()),
 			UPINRetries: payload.Uint8(),
 			UPUKRetries: payload.Uint8(),
-			ErrorCode:   payload.Uint8(),
+			ErrorCode:   CardError(payload.Uint8()),
 		}
 		appCount := payload.Uint8()
 		if err := payload.Err(); err != nil {
@@ -136,19 +136,19 @@ func decodeCardStatus(resp qualcomm.Response) (CardStatus, error) {
 		entry.Applications = make([]CardApplication, 0, appCount)
 		for range appCount {
 			app := CardApplication{
-				Type:                          payload.Uint8(),
-				State:                         payload.Uint8(),
-				PersonalizationState:          payload.Uint8(),
-				PersonalizationFeature:        payload.Uint8(),
+				Type:                          ApplicationType(payload.Uint8()),
+				State:                         ApplicationState(payload.Uint8()),
+				PersonalizationState:          PersonalizationState(payload.Uint8()),
+				PersonalizationFeature:        PersonalizationFeature(payload.Uint8()),
 				PersonalizationRetries:        payload.Uint8(),
 				PersonalizationUnblockRetries: payload.Uint8(),
 			}
 			app.AID = payload.Bytes8()
 			app.UPINReplacesPIN1 = payload.Uint8()
-			app.PIN1State = payload.Uint8()
+			app.PIN1State = PINState(payload.Uint8())
 			app.PIN1Retries = payload.Uint8()
 			app.PUK1Retries = payload.Uint8()
-			app.PIN2State = payload.Uint8()
+			app.PIN2State = PINState(payload.Uint8())
 			app.PIN2Retries = payload.Uint8()
 			app.PUK2Retries = payload.Uint8()
 			if err := payload.Err(); err != nil {
@@ -164,11 +164,11 @@ func decodeCardStatus(resp qualcomm.Response) (CardStatus, error) {
 
 func (s CardStatus) Ready() bool {
 	for _, card := range s.Cards {
-		if card.State != 1 {
+		if card.State != CardStatePresent {
 			continue
 		}
 		for _, app := range card.Applications {
-			if app.Type == 2 && app.State == 7 {
+			if app.Type == ApplicationTypeUSIM && app.State == ApplicationStateReady {
 				return true
 			}
 		}
@@ -184,7 +184,7 @@ func decodeFileAttributes(data []byte) (RawFileAttributes, error) {
 	attrs := RawFileAttributes{
 		FileSize:    binary.LittleEndian.Uint16(data[:2]),
 		FileID:      binary.LittleEndian.Uint16(data[2:4]),
-		FileType:    data[4],
+		FileType:    QMIFileType(data[4]),
 		RecordSize:  binary.LittleEndian.Uint16(data[5:7]),
 		RecordCount: binary.LittleEndian.Uint16(data[7:9]),
 	}

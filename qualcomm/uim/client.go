@@ -107,12 +107,12 @@ func (r *Reader) Close() error {
 
 		var releaseErr error
 		if r.catClientID != 0 {
-			releaseErr = r.releaseServiceClientIDLocked(ctx, r.catService, r.catClientID)
+			releaseErr = r.releaseServiceClientID(ctx, r.catService, r.catClientID)
 			r.catClientID = 0
 			r.catService = 0
 		}
 		if r.clientID != 0 {
-			releaseErr = errors.Join(releaseErr, r.releaseServiceClientIDLocked(ctx, qualcomm.QMIServiceUIM, r.clientID))
+			releaseErr = errors.Join(releaseErr, r.releaseServiceClientID(ctx, qualcomm.ServiceUIM, r.clientID))
 			r.clientID = 0
 		}
 

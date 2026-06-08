@@ -25,14 +25,14 @@ func TestReaderPowerPrimitives(t *testing.T) {
 			},
 			check: func(t *testing.T, req qualcomm.Request) {
 				t.Helper()
-				if req.MessageID != qualcomm.QMIUIMReset {
-					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.QMIUIMReset)
+				if req.MessageID != qualcomm.MessageReset {
+					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.MessageReset)
 				}
 				if len(req.TLVs) != 0 {
 					t.Fatalf("TLVs = %+v, want empty", req.TLVs)
 				}
 			},
-			resp: successResponse(qualcomm.QMIUIMReset),
+			resp: successResponse(qualcomm.MessageReset),
 		},
 		{
 			name: "power off sim",
@@ -41,12 +41,12 @@ func TestReaderPowerPrimitives(t *testing.T) {
 			},
 			check: func(t *testing.T, req qualcomm.Request) {
 				t.Helper()
-				if req.MessageID != qualcomm.QMIUIMPowerOffSIM {
-					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.QMIUIMPowerOffSIM)
+				if req.MessageID != qualcomm.MessagePowerOffSIM {
+					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.MessagePowerOffSIM)
 				}
 				assertTLV(t, req.TLVs, 0x01, []byte{0x02})
 			},
-			resp: successResponse(qualcomm.QMIUIMPowerOffSIM),
+			resp: successResponse(qualcomm.MessagePowerOffSIM),
 		},
 		{
 			name: "power on sim",
@@ -55,15 +55,15 @@ func TestReaderPowerPrimitives(t *testing.T) {
 			},
 			check: func(t *testing.T, req qualcomm.Request) {
 				t.Helper()
-				if req.MessageID != qualcomm.QMIUIMPowerOnSIM {
-					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.QMIUIMPowerOnSIM)
+				if req.MessageID != qualcomm.MessagePowerOnSIM {
+					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.MessagePowerOnSIM)
 				}
 				assertTLV(t, req.TLVs, 0x01, []byte{0x02})
 				if _, ok := tlv.Value(req.TLVs, 0x10); ok {
 					t.Fatal("PowerOnSIM() includes ignore hot-swap TLV, want omitted")
 				}
 			},
-			resp: successResponse(qualcomm.QMIUIMPowerOnSIM),
+			resp: successResponse(qualcomm.MessagePowerOnSIM),
 		},
 		{
 			name: "power on sim ignoring hot-swap",
@@ -72,13 +72,13 @@ func TestReaderPowerPrimitives(t *testing.T) {
 			},
 			check: func(t *testing.T, req qualcomm.Request) {
 				t.Helper()
-				if req.MessageID != qualcomm.QMIUIMPowerOnSIM {
-					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.QMIUIMPowerOnSIM)
+				if req.MessageID != qualcomm.MessagePowerOnSIM {
+					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.MessagePowerOnSIM)
 				}
 				assertTLV(t, req.TLVs, 0x01, []byte{0x02})
 				assertTLV(t, req.TLVs, 0x10, []byte{0x01})
 			},
-			resp: successResponse(qualcomm.QMIUIMPowerOnSIM),
+			resp: successResponse(qualcomm.MessagePowerOnSIM),
 		},
 		{
 			name: "power off sim rejects zero slot",
@@ -104,15 +104,15 @@ func TestReaderPowerPrimitives(t *testing.T) {
 			},
 			check: func(t *testing.T, req qualcomm.Request) {
 				t.Helper()
-				if req.MessageID != qualcomm.QMIUIMChangeProvisioningSession {
-					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.QMIUIMChangeProvisioningSession)
+				if req.MessageID != qualcomm.MessageChangeProvisioningSession {
+					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.MessageChangeProvisioningSession)
 				}
 				assertTLV(t, req.TLVs, 0x01, []byte{byte(SessionPrimaryGWProvisioning), 0x01})
 				if _, ok := tlv.Value(req.TLVs, 0x10); ok {
 					t.Fatal("ChangeProvisioningSession() includes application information TLV, want omitted")
 				}
 			},
-			resp: successResponse(qualcomm.QMIUIMChangeProvisioningSession),
+			resp: successResponse(qualcomm.MessageChangeProvisioningSession),
 		},
 		{
 			name: "change provisioning session with application information",
@@ -126,13 +126,13 @@ func TestReaderPowerPrimitives(t *testing.T) {
 			},
 			check: func(t *testing.T, req qualcomm.Request) {
 				t.Helper()
-				if req.MessageID != qualcomm.QMIUIMChangeProvisioningSession {
-					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.QMIUIMChangeProvisioningSession)
+				if req.MessageID != qualcomm.MessageChangeProvisioningSession {
+					t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qualcomm.MessageChangeProvisioningSession)
 				}
 				assertTLV(t, req.TLVs, 0x01, []byte{byte(SessionPrimaryGWProvisioning), 0x01})
 				assertTLV(t, req.TLVs, 0x10, []byte{0x02, 0x07, 0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02})
 			},
-			resp: successResponse(qualcomm.QMIUIMChangeProvisioningSession),
+			resp: successResponse(qualcomm.MessageChangeProvisioningSession),
 		},
 		{
 			name: "change provisioning session rejects long aid",
@@ -154,7 +154,7 @@ func TestReaderPowerPrimitives(t *testing.T) {
 			if tt.check != nil {
 				transport.calls = []transportCall{{
 					check: func(req qualcomm.Request) {
-						if req.Service != qualcomm.QMIServiceUIM || req.ClientID != 7 {
+						if req.Service != qualcomm.ServiceUIM || req.ClientID != 7 {
 							t.Fatalf("request = service %#x client %d, want UIM client 7", req.Service, req.ClientID)
 						}
 						assertRequestTimeout(t, req, DefaultRequestTimeout)

@@ -1,6 +1,10 @@
 package card
 
-import "context"
+import (
+	"context"
+
+	"github.com/damonto/uicc-go/usim/simfile"
+)
 
 type Application struct {
 	AID   []byte
@@ -13,8 +17,8 @@ type FileRef struct {
 }
 
 type FileAttributes struct {
-	FileStructure byte
-	FileType      byte
+	FileStructure simfile.FileStructure
+	FileType      simfile.FileType
 	RecordSize    uint16
 	RecordCount   uint16
 	FileSize      uint16

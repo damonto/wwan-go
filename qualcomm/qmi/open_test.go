@@ -161,8 +161,8 @@ func TestOpenConfiguresProxy(t *testing.T) {
 			if !bytes.Contains(frame, []byte(tt.device)) {
 				t.Fatalf("proxy open frame = % X, want device path %q", frame, tt.device)
 			}
-			if qualcomm.MessageID(frame[8])|qualcomm.MessageID(frame[9])<<8 != qualcomm.QMICtlInternalProxyOpen {
-				t.Fatalf("proxy open message = 0x%04X, want 0x%04X", qualcomm.MessageID(frame[8])|qualcomm.MessageID(frame[9])<<8, qualcomm.QMICtlInternalProxyOpen)
+			if qualcomm.MessageID(frame[8])|qualcomm.MessageID(frame[9])<<8 != qualcomm.MessageInternalProxyOpen {
+				t.Fatalf("proxy open message = 0x%04X, want 0x%04X", qualcomm.MessageID(frame[8])|qualcomm.MessageID(frame[9])<<8, qualcomm.MessageInternalProxyOpen)
 			}
 		})
 	}

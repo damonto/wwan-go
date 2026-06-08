@@ -106,8 +106,8 @@ func TestUICCChannelRequestData(t *testing.T) {
 			req: (&APDURequest{
 				TransactionID:   1,
 				Channel:         3,
-				SecureMessaging: uiccSecureMessagingNone,
-				ClassByteType:   uiccClassByteTypeInterIndustry,
+				SecureMessaging: UiccSecureMessagingNone,
+				ClassByteType:   UiccClassByteTypeInterIndustry,
 				Command:         []byte{0x00, 0x88, 0x00, 0x81},
 			}).Request(),
 			commandID: CIDUiccAPDU,
@@ -245,8 +245,8 @@ func TestReaderUICCChannelTransmitsAPDU(t *testing.T) {
 		wantRequest := apdu.Request{CLA: 0x00, INS: 0x88, P1: 0x00, P2: 0x81, Data: data}
 		wantAPDU := wantRequest.APDU()
 		wantAPDUData := binary.LittleEndian.AppendUint32(nil, 3)
-		wantAPDUData = binary.LittleEndian.AppendUint32(wantAPDUData, uiccSecureMessagingNone)
-		wantAPDUData = binary.LittleEndian.AppendUint32(wantAPDUData, uiccClassByteTypeInterIndustry)
+		wantAPDUData = binary.LittleEndian.AppendUint32(wantAPDUData, uint32(UiccSecureMessagingNone))
+		wantAPDUData = binary.LittleEndian.AppendUint32(wantAPDUData, uint32(UiccClassByteTypeInterIndustry))
 		wantAPDUData = binary.LittleEndian.AppendUint32(wantAPDUData, uint32(len(wantAPDU)))
 		wantAPDUData = binary.LittleEndian.AppendUint32(wantAPDUData, 20)
 		wantAPDUData = append(wantAPDUData, wantAPDU...)
@@ -306,8 +306,8 @@ func TestRequestTransmitAcceptsResponseLargerThanControlTransfer(t *testing.T) {
 	request := (&APDURequest{
 		TransactionID:   1,
 		Channel:         3,
-		SecureMessaging: uiccSecureMessagingNone,
-		ClassByteType:   uiccClassByteTypeInterIndustry,
+		SecureMessaging: UiccSecureMessagingNone,
+		ClassByteType:   UiccClassByteTypeInterIndustry,
 		Command:         []byte{0x00, 0x88, 0x00, 0x81},
 	}).Request()
 
@@ -335,7 +335,7 @@ func TestRequestTransmitContinuesAfterDeadlineExceeded(t *testing.T) {
 }
 
 func TestRequestTransmitSkipsMismatchedCommandDone(t *testing.T) {
-	payload := subscriberReadyPayload(t, SubscriberReadyStateInitialized, "001010123456789", "89014103211118510720", 0)
+	payload := subscriberReadyPayload(t, SubscriberReadyStateInitialized, "001010123456789", "89014103211118510720", ReadyInfoNone)
 	mismatchedFrames, err := fragmentedMessage{
 		data:         mbimCommandDone(1, ServiceBasicConnect, CIDUiccAPDU, bytes.Repeat([]byte{0xAA}, 80)),
 		maxFrameSize: 64,
@@ -422,12 +422,12 @@ func TestSubscriberReadyStatusResponseUnmarshalBinary(t *testing.T) {
 	}{
 		{
 			name: "ready",
-			data: subscriberReadyPayload(t, SubscriberReadyStateInitialized, "001010123456789", "89014103211118510720", 1, "+15551234567"),
+			data: subscriberReadyPayload(t, SubscriberReadyStateInitialized, "001010123456789", "89014103211118510720", ReadyInfoProtectUniqueID, "+15551234567"),
 			want: SubscriberReadyStatusResponse{
 				ReadyState:            SubscriberReadyStateInitialized,
 				SubscriberID:          "001010123456789",
 				SIMICCID:              "89014103211118510720",
-				ReadyInfo:             1,
+				ReadyInfo:             ReadyInfoProtectUniqueID,
 				TelephoneNumbersCount: 1,
 				TelephoneNumbers:      []string{"+15551234567"},
 			},
@@ -548,15 +548,15 @@ func TestFileStatusResponseUnmarshalBinary(t *testing.T) {
 	if got.Version != 1 ||
 		got.StatusWord1 != 0x90 ||
 		got.StatusWord2 != 0x00 ||
-		got.FileAccessibility != 2 ||
+		got.FileAccessibility != UiccFileAccessibilityShareable ||
 		got.FileType != UiccFileTypeWorkingEF ||
 		got.FileStructure != UiccFileStructureLinear ||
 		got.FileItemCount != 4 ||
 		got.FileItemSize != 9 ||
-		got.AccessConditionRead != 1 ||
-		got.AccessConditionUpdate != 2 ||
-		got.AccessConditionActivate != 3 ||
-		got.AccessConditionDeactivate != 4 {
+		got.AccessConditionRead != PinTypeCustom ||
+		got.AccessConditionUpdate != PinTypePIN1 ||
+		got.AccessConditionActivate != PinTypePIN2 ||
+		got.AccessConditionDeactivate != PinTypeDeviceSIM {
 		t.Fatalf("UnmarshalBinary() = %+v", got)
 	}
 }
@@ -618,12 +618,12 @@ func slotMappingsPayload(slot uint32) []byte {
 	return data
 }
 
-func subscriberReadyPayload(t *testing.T, readyState uint32, subscriberID, iccid string, readyInfo uint32, numbers ...string) []byte {
+func subscriberReadyPayload(t *testing.T, readyState SubscriberReadyState, subscriberID, iccid string, readyInfo ReadyInfo, numbers ...string) []byte {
 	t.Helper()
 
 	headerSize := 28 + len(numbers)*8
 	data := make([]byte, 0, headerSize)
-	data = binary.LittleEndian.AppendUint32(data, readyState)
+	data = binary.LittleEndian.AppendUint32(data, uint32(readyState))
 
 	refs := make([][]byte, 0, 2+len(numbers))
 	refs = append(refs, utf16Bytes(subscriberID), utf16Bytes(iccid))
@@ -637,7 +637,7 @@ func subscriberReadyPayload(t *testing.T, readyState uint32, subscriberID, iccid
 		data = binary.LittleEndian.AppendUint32(data, uint32(len(ref)))
 		offset += uint32(len(ref))
 	}
-	data = binary.LittleEndian.AppendUint32(data, readyInfo)
+	data = binary.LittleEndian.AppendUint32(data, uint32(readyInfo))
 	data = binary.LittleEndian.AppendUint32(data, uint32(len(numbers)))
 	for _, ref := range refs[2:] {
 		data = binary.LittleEndian.AppendUint32(data, offset)
@@ -675,7 +675,7 @@ func expectMBIMCommand(conn net.Conn, transactionID, commandID uint32, wantData 
 	if got := binary.LittleEndian.Uint32(frame[36:40]); got != commandID {
 		return fmt.Errorf("command ID = %d, want %d", got, commandID)
 	}
-	if got := binary.LittleEndian.Uint32(frame[40:44]); got != CommandTypeSet {
+	if got := CommandType(binary.LittleEndian.Uint32(frame[40:44])); got != CommandTypeSet {
 		return fmt.Errorf("command type = %d, want set", got)
 	}
 	dataLength := binary.LittleEndian.Uint32(frame[44:48])

@@ -205,7 +205,7 @@ func (a App) file(path []byte) usimcard.FileRef {
 	}
 }
 
-func (a App) fileStructure(ctx context.Context, file usimcard.FileRef, action string, want byte) (usimcard.FileAttributes, error) {
+func (a App) fileStructure(ctx context.Context, file usimcard.FileRef, action string, want simfile.FileStructure) (usimcard.FileAttributes, error) {
 	attrs, err := a.Reader.FileAttributes(ctx, file)
 	if err != nil {
 		return usimcard.FileAttributes{}, err

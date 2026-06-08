@@ -24,7 +24,7 @@ func (r *Reader) transparentResponse(
 		binary.LittleEndian.AppendUint16(nil, offset),
 		binary.LittleEndian.AppendUint16(nil, length),
 	)
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMReadTransparent, tlv.TLVs{
+	resp, err := r.request(ctx, qualcomm.MessageReadTransparent, tlv.TLVs{
 		tlv.Bytes(0x01, putSessionValue(file.Session, file.AID)),
 		tlv.Bytes(0x02, fileValue),
 		tlv.Bytes(0x03, info),
@@ -53,7 +53,7 @@ func (r *Reader) recordResponse(
 		binary.LittleEndian.AppendUint16(nil, record),
 		binary.LittleEndian.AppendUint16(nil, length),
 	)
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMReadRecord, tlv.TLVs{
+	resp, err := r.request(ctx, qualcomm.MessageReadRecord, tlv.TLVs{
 		tlv.Bytes(0x01, putSessionValue(file.Session, file.AID)),
 		tlv.Bytes(0x02, fileValue),
 		tlv.Bytes(0x03, recordValue),
@@ -76,7 +76,7 @@ func (r *Reader) fileAttributesResponse(
 		return qualcomm.Response{}, err
 	}
 
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMGetFileAttributes, tlv.TLVs{
+	resp, err := r.request(ctx, qualcomm.MessageGetFileAttributes, tlv.TLVs{
 		tlv.Bytes(0x01, putSessionValue(file.Session, file.AID)),
 		tlv.Bytes(0x02, fileValue),
 	})
@@ -98,7 +98,7 @@ func (r *Reader) authenticateResponse(
 		return qualcomm.Response{}, err
 	}
 
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMAuthenticate, tlv.TLVs{
+	resp, err := r.request(ctx, qualcomm.MessageAuthenticate, tlv.TLVs{
 		tlv.Bytes(0x01, putSessionValue(req.Session, req.AID)),
 		tlv.Bytes(0x02, value),
 	})
@@ -131,24 +131,24 @@ func decodeReaderFileAttributes(resp qualcomm.Response) (FileAttributes, error) 
 	}, nil
 }
 
-func fileTypeToSIMFileStructure(fileType byte) byte {
+func fileTypeToSIMFileStructure(fileType QMIFileType) FileStructure {
 	switch fileType {
-	case 0:
+	case QMIFileTypeTransparent:
 		return FileStructureTransparent
-	case 2:
+	case QMIFileTypeLinearFixed:
 		return FileStructureLinearFixed
 	default:
 		return 0
 	}
 }
 
-func fileTypeToSIMFileType(fileType byte) byte {
+func fileTypeToSIMFileType(fileType QMIFileType) FileType {
 	switch fileType {
-	case 0, 1, 2:
-		return 0x21
-	case 3, 4:
-		return 0x38
+	case QMIFileTypeTransparent, QMIFileTypeCyclic, QMIFileTypeLinearFixed:
+		return FileTypeWorkingEF
+	case QMIFileTypeDedicated, QMIFileTypeMaster:
+		return FileTypeDFOrADF
 	default:
-		return fileType
+		return FileType(fileType)
 	}
 }

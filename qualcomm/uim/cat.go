@@ -25,10 +25,10 @@ func (r *Reader) SendEnvelope(ctx context.Context, envelope []byte) (EnvelopeRes
 	value = binary.LittleEndian.AppendUint16(value, uint16(len(envelope)))
 	value = append(value, envelope...)
 	tlvs := tlv.TLVs{tlv.Bytes(0x01, value)}
-	if service == qualcomm.QMIServiceCAT2 {
+	if service == qualcomm.ServiceCAT2 {
 		tlvs = append(tlvs, tlv.Uint(0x10, r.slot))
 	}
-	resp, err := r.request(ctx, service, clientID, qualcomm.QMICATSendEnvelope, tlvs)
+	resp, err := r.requestService(ctx, service, clientID, qualcomm.MessageSendEnvelope, tlvs)
 	if err != nil {
 		return EnvelopeResponse{}, fmt.Errorf("running QMI CAT envelope: %w", err)
 	}
@@ -65,14 +65,14 @@ func (r *Reader) catClient(ctx context.Context) (qualcomm.ServiceType, uint8, er
 		return r.catService, r.catClientID, nil
 	}
 	if r.catService == 0 {
-		service, err := r.catServiceTypeLocked(ctx)
+		service, err := r.catServiceType(ctx)
 		if err != nil {
 			return 0, 0, err
 		}
 		r.catService = service
 	}
 
-	clientID, err := r.allocateServiceClientIDLocked(ctx, r.catService)
+	clientID, err := r.allocateServiceClientID(ctx, r.catService)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -86,49 +86,20 @@ func (r *Reader) catServiceType(ctx context.Context) (qualcomm.ServiceType, erro
 		return 0, err
 	}
 	for _, version := range versions {
-		if version.Service == qualcomm.QMIServiceCAT2 {
-			return qualcomm.QMIServiceCAT2, nil
+		if version.Service == qualcomm.ServiceCAT2 {
+			return qualcomm.ServiceCAT2, nil
 		}
 	}
 	for _, version := range versions {
-		if version.Service == qualcomm.QMIServiceCAT {
-			return qualcomm.QMIServiceCAT, nil
-		}
-	}
-	return 0, errors.New("detecting QMI CAT service: CAT2/CAT service is not exposed")
-}
-
-func (r *Reader) catServiceTypeLocked(ctx context.Context) (qualcomm.ServiceType, error) {
-	versions, err := r.serviceVersionsLocked(ctx)
-	if err != nil {
-		return 0, err
-	}
-	for _, version := range versions {
-		if version.Service == qualcomm.QMIServiceCAT2 {
-			return qualcomm.QMIServiceCAT2, nil
-		}
-	}
-	for _, version := range versions {
-		if version.Service == qualcomm.QMIServiceCAT {
-			return qualcomm.QMIServiceCAT, nil
+		if version.Service == qualcomm.ServiceCAT {
+			return qualcomm.ServiceCAT, nil
 		}
 	}
 	return 0, errors.New("detecting QMI CAT service: CAT2/CAT service is not exposed")
 }
 
 func (r *Reader) serviceVersions(ctx context.Context) ([]serviceVersion, error) {
-	resp, err := r.request(ctx, qualcomm.QMIServiceControl, 0, qualcomm.QMICtlCmdGetVersionInfo, nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := resultOK(resp); err != nil {
-		return nil, err
-	}
-	return decodeServiceVersions(resp)
-}
-
-func (r *Reader) serviceVersionsLocked(ctx context.Context) ([]serviceVersion, error) {
-	resp, err := r.requestLocked(ctx, qualcomm.QMIServiceControl, 0, qualcomm.QMICtlCmdGetVersionInfo, nil)
+	resp, err := r.sendRequest(ctx, qualcomm.ServiceControl, 0, qualcomm.MessageGetVersionInfo, nil, DefaultRequestTimeout)
 	if err != nil {
 		return nil, err
 	}

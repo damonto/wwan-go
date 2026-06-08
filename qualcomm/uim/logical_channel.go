@@ -25,7 +25,7 @@ func (r *Reader) OpenLogicalChannel(ctx context.Context, aid []byte) (uint8, err
 		return 0, err
 	}
 
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMOpenLogicalChannel, tlv.TLVs{
+	resp, err := r.request(ctx, qualcomm.MessageOpenLogicalChannel, tlv.TLVs{
 		tlv.Bytes(0x10, value),
 		tlv.Uint(0x01, r.slot),
 	})
@@ -58,7 +58,7 @@ func (r *Reader) CloseLogicalChannel(ctx context.Context, channel uint8) error {
 		return err
 	}
 
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMCloseLogicalChannel, tlv.TLVs{
+	resp, err := r.request(ctx, qualcomm.MessageCloseLogicalChannel, tlv.TLVs{
 		tlv.Uint(0x01, r.slot),
 		tlv.Bytes(0x11, value),
 	})
@@ -78,7 +78,7 @@ func (r *Reader) SendAPDU(ctx context.Context, channel uint8, command []byte) ([
 		return nil, err
 	}
 
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMSendAPDU, tlv.TLVs{
+	resp, err := r.request(ctx, qualcomm.MessageSendAPDU, tlv.TLVs{
 		tlv.Uint(0x10, channel),
 		tlv.Bytes(0x02, value),
 		tlv.Uint(0x01, r.slot),

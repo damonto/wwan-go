@@ -33,34 +33,34 @@ func TestReaderLogicalChannelPrimitives(t *testing.T) {
 		calls: []transportCall{
 			{
 				check: func(req qualcomm.Request) {
-					if req.Service != qualcomm.QMIServiceUIM || req.ClientID != 7 || req.MessageID != qualcomm.QMIUIMOpenLogicalChannel {
+					if req.Service != qualcomm.ServiceUIM || req.ClientID != 7 || req.MessageID != qualcomm.MessageOpenLogicalChannel {
 						t.Fatalf("request = service %#x client %d message 0x%04X, want open logical channel", req.Service, req.ClientID, req.MessageID)
 					}
 					assertTLV(t, req.TLVs, 0x10, append([]byte{byte(len(aid))}, aid...))
 					assertTLV(t, req.TLVs, 0x01, []byte{0x02})
 				},
-				resp: successResponse(qualcomm.QMIUIMOpenLogicalChannel, tlv.Bytes(0x10, []byte{0x03})),
+				resp: successResponse(qualcomm.MessageOpenLogicalChannel, tlv.Bytes(0x10, []byte{0x03})),
 			},
 			{
 				check: func(req qualcomm.Request) {
-					if req.Service != qualcomm.QMIServiceUIM || req.ClientID != 7 || req.MessageID != qualcomm.QMIUIMSendAPDU {
+					if req.Service != qualcomm.ServiceUIM || req.ClientID != 7 || req.MessageID != qualcomm.MessageSendAPDU {
 						t.Fatalf("request = service %#x client %d message 0x%04X, want send APDU", req.Service, req.ClientID, req.MessageID)
 					}
 					assertTLV(t, req.TLVs, 0x10, []byte{0x03})
 					assertTLV(t, req.TLVs, 0x02, encodeLengthPrefixed(command))
 					assertTLV(t, req.TLVs, 0x01, []byte{0x02})
 				},
-				resp: successResponse(qualcomm.QMIUIMSendAPDU, tlv.Bytes(0x10, encodeLengthPrefixed([]byte{0x90, 0x00}))),
+				resp: successResponse(qualcomm.MessageSendAPDU, tlv.Bytes(0x10, encodeLengthPrefixed([]byte{0x90, 0x00}))),
 			},
 			{
 				check: func(req qualcomm.Request) {
-					if req.Service != qualcomm.QMIServiceUIM || req.ClientID != 7 || req.MessageID != qualcomm.QMIUIMCloseLogicalChannel {
+					if req.Service != qualcomm.ServiceUIM || req.ClientID != 7 || req.MessageID != qualcomm.MessageCloseLogicalChannel {
 						t.Fatalf("request = service %#x client %d message 0x%04X, want close logical channel", req.Service, req.ClientID, req.MessageID)
 					}
 					assertTLV(t, req.TLVs, 0x01, []byte{0x02})
 					assertTLV(t, req.TLVs, 0x11, []byte{0x03})
 				},
-				resp: successResponse(qualcomm.QMIUIMCloseLogicalChannel),
+				resp: successResponse(qualcomm.MessageCloseLogicalChannel),
 			},
 		},
 	}

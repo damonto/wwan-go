@@ -10,7 +10,7 @@ import (
 )
 
 func (r *Reader) Reset(ctx context.Context) error {
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMReset, nil)
+	resp, err := r.request(ctx, qualcomm.MessageReset, nil)
 	if err != nil {
 		return fmt.Errorf("resetting QMI UIM service: %w", err)
 	}
@@ -25,7 +25,7 @@ func (r *Reader) PowerOffSIM(ctx context.Context, slot uint8) error {
 		return errors.New("powering off QMI UIM SIM: slot is zero")
 	}
 
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMPowerOffSIM, tlv.TLVs{
+	resp, err := r.request(ctx, qualcomm.MessagePowerOffSIM, tlv.TLVs{
 		tlv.Uint(0x01, slot),
 	})
 	if err != nil {
@@ -47,7 +47,7 @@ func (r *Reader) PowerOnSIM(ctx context.Context, req PowerOnSIMRequest) error {
 		tlvs = append(tlvs, tlv.Uint(0x10, uint8(1)))
 	}
 
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMPowerOnSIM, tlvs)
+	resp, err := r.request(ctx, qualcomm.MessagePowerOnSIM, tlvs)
 	if err != nil {
 		return fmt.Errorf("powering on QMI UIM SIM slot %d: %w", req.Slot, err)
 	}
@@ -75,7 +75,7 @@ func (r *Reader) ChangeProvisioningSession(ctx context.Context, req ChangeProvis
 		tlvs = append(tlvs, tlv.Bytes(0x10, app))
 	}
 
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMChangeProvisioningSession, tlvs)
+	resp, err := r.request(ctx, qualcomm.MessageChangeProvisioningSession, tlvs)
 	if err != nil {
 		return fmt.Errorf("changing QMI UIM provisioning session: %w", err)
 	}

@@ -12,12 +12,12 @@ func TestFCIUnmarshalBinary(t *testing.T) {
 		{
 			name: "transparent file",
 			data: []byte{0x62, 0x08, 0x82, 0x02, 0x41, 0x21, 0x80, 0x02, 0x00, 0x09},
-			want: FCI{FileStructure: StructureTransparent, FileType: 0x21, FileSize: 9},
+			want: FCI{FileStructure: StructureTransparent, FileType: FileTypeWorkingEF, FileSize: 9},
 		},
 		{
 			name: "linear fixed file",
 			data: []byte{0x62, 0x0B, 0x82, 0x05, 0x42, 0x21, 0x00, 0x20, 0x03, 0x80, 0x02, 0x00, 0x60},
-			want: FCI{FileStructure: StructureLinearFixed, FileType: 0x21, RecordSize: 32, RecordCount: 3, FileSize: 96},
+			want: FCI{FileStructure: StructureLinearFixed, FileType: FileTypeWorkingEF, RecordSize: 32, RecordCount: 3, FileSize: 96},
 		},
 		{
 			name:    "missing descriptor",

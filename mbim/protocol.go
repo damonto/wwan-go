@@ -275,7 +275,7 @@ type Command struct {
 	FragmentCurrent uint32
 	ServiceID       [16]byte
 	CommandID       uint32
-	CommandType     uint32
+	CommandType     CommandType
 	Data            []byte
 }
 
@@ -285,7 +285,7 @@ func (c *Command) MarshalBinary() ([]byte, error) {
 	buf = binary.LittleEndian.AppendUint32(buf, c.FragmentCurrent)
 	buf = append(buf, c.ServiceID[:]...)
 	buf = binary.LittleEndian.AppendUint32(buf, c.CommandID)
-	buf = binary.LittleEndian.AppendUint32(buf, c.CommandType)
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(c.CommandType))
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(c.Data)))
 	buf = append(buf, c.Data...)
 	return buf, nil

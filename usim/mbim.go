@@ -9,6 +9,7 @@ import (
 	"github.com/damonto/uicc-go/mbim"
 	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/uicc-go/usim/command"
+	"github.com/damonto/uicc-go/usim/simfile"
 )
 
 type MBIM struct {
@@ -47,8 +48,8 @@ func (r *MBIM) FileAttributes(ctx context.Context, file usimcard.FileRef) (usimc
 		return usimcard.FileAttributes{}, err
 	}
 	return usimcard.FileAttributes{
-		FileStructure: attrs.FileStructure,
-		FileType:      attrs.FileType,
+		FileStructure: simfile.FileStructure(attrs.FileStructure),
+		FileType:      simfile.FileType(attrs.FileType),
 		RecordSize:    attrs.RecordSize,
 		RecordCount:   attrs.RecordCount,
 		FileSize:      attrs.FileSize,

@@ -117,7 +117,7 @@ func (r *DeviceSlotMappingsRequest) Request() *Request {
 		}
 	}
 
-	commandType := uint32(CommandTypeQuery)
+	commandType := CommandTypeQuery
 	if mapCount > 0 {
 		commandType = CommandTypeSet
 	}
@@ -190,10 +190,10 @@ func (r *SubscriberReadyStatusRequest) Request() *Request {
 }
 
 type SubscriberReadyStatusResponse struct {
-	ReadyState            uint32
+	ReadyState            SubscriberReadyState
 	SubscriberID          string
 	SIMICCID              string
-	ReadyInfo             uint32
+	ReadyInfo             ReadyInfo
 	TelephoneNumbersCount uint32
 	TelephoneNumbers      []string
 }
@@ -202,12 +202,12 @@ func (r *SubscriberReadyStatusResponse) UnmarshalBinary(data []byte) error {
 	if len(data) < 28 {
 		return errors.New("parsing MBIM subscriber ready status: payload is truncated")
 	}
-	r.ReadyState = binary.LittleEndian.Uint32(data[:4])
+	r.ReadyState = SubscriberReadyState(binary.LittleEndian.Uint32(data[:4]))
 	subscriberIDOffset := binary.LittleEndian.Uint32(data[4:8])
 	subscriberIDSize := binary.LittleEndian.Uint32(data[8:12])
 	simICCIDOffset := binary.LittleEndian.Uint32(data[12:16])
 	simICCIDSize := binary.LittleEndian.Uint32(data[16:20])
-	r.ReadyInfo = binary.LittleEndian.Uint32(data[20:24])
+	r.ReadyInfo = ReadyInfo(binary.LittleEndian.Uint32(data[20:24]))
 	r.TelephoneNumbersCount = binary.LittleEndian.Uint32(data[24:28])
 
 	var err error
@@ -261,7 +261,7 @@ func (r *ApplicationListRequest) Request() *Request {
 }
 
 type UICCApplication struct {
-	Type                 uint32
+	Type                 UiccApplicationType
 	AID                  []byte
 	Label                string
 	PinKeyReferenceCount uint32
@@ -325,7 +325,7 @@ func (a *UICCApplication) UnmarshalBinary(data []byte) error {
 	}
 
 	*a = UICCApplication{
-		Type:                 binary.LittleEndian.Uint32(data[:4]),
+		Type:                 UiccApplicationType(binary.LittleEndian.Uint32(data[:4])),
 		AID:                  aid,
 		Label:                label,
 		PinKeyReferenceCount: binary.LittleEndian.Uint32(data[20:24]),
@@ -363,15 +363,15 @@ type FileStatusResponse struct {
 	Version                   uint32
 	StatusWord1               uint32
 	StatusWord2               uint32
-	FileAccessibility         uint32
-	FileType                  uint32
-	FileStructure             uint32
+	FileAccessibility         UiccFileAccessibility
+	FileType                  UiccFileType
+	FileStructure             UiccFileStructure
 	FileItemCount             uint32
 	FileItemSize              uint32
-	AccessConditionRead       uint32
-	AccessConditionUpdate     uint32
-	AccessConditionActivate   uint32
-	AccessConditionDeactivate uint32
+	AccessConditionRead       PinType
+	AccessConditionUpdate     PinType
+	AccessConditionActivate   PinType
+	AccessConditionDeactivate PinType
 }
 
 func (r *FileStatusResponse) UnmarshalBinary(data []byte) error {
@@ -381,15 +381,15 @@ func (r *FileStatusResponse) UnmarshalBinary(data []byte) error {
 	r.Version = binary.LittleEndian.Uint32(data[:4])
 	r.StatusWord1 = binary.LittleEndian.Uint32(data[4:8])
 	r.StatusWord2 = binary.LittleEndian.Uint32(data[8:12])
-	r.FileAccessibility = binary.LittleEndian.Uint32(data[12:16])
-	r.FileType = binary.LittleEndian.Uint32(data[16:20])
-	r.FileStructure = binary.LittleEndian.Uint32(data[20:24])
+	r.FileAccessibility = UiccFileAccessibility(binary.LittleEndian.Uint32(data[12:16]))
+	r.FileType = UiccFileType(binary.LittleEndian.Uint32(data[16:20]))
+	r.FileStructure = UiccFileStructure(binary.LittleEndian.Uint32(data[20:24]))
 	r.FileItemCount = binary.LittleEndian.Uint32(data[24:28])
 	r.FileItemSize = binary.LittleEndian.Uint32(data[28:32])
-	r.AccessConditionRead = binary.LittleEndian.Uint32(data[32:36])
-	r.AccessConditionUpdate = binary.LittleEndian.Uint32(data[36:40])
-	r.AccessConditionActivate = binary.LittleEndian.Uint32(data[40:44])
-	r.AccessConditionDeactivate = binary.LittleEndian.Uint32(data[44:48])
+	r.AccessConditionRead = PinType(binary.LittleEndian.Uint32(data[32:36]))
+	r.AccessConditionUpdate = PinType(binary.LittleEndian.Uint32(data[36:40]))
+	r.AccessConditionActivate = PinType(binary.LittleEndian.Uint32(data[40:44]))
+	r.AccessConditionDeactivate = PinType(binary.LittleEndian.Uint32(data[44:48]))
 	return nil
 }
 
@@ -637,16 +637,16 @@ func (r *CloseChannelResponse) UnmarshalBinary(data []byte) error {
 type APDURequest struct {
 	TransactionID   uint32
 	Channel         uint32
-	SecureMessaging uint32
-	ClassByteType   uint32
+	SecureMessaging UiccSecureMessaging
+	ClassByteType   UiccClassByteType
 	Command         []byte
 	Response        *APDUResponse
 }
 
 func (r *APDURequest) Request() *Request {
 	data := binary.LittleEndian.AppendUint32(nil, r.Channel)
-	data = binary.LittleEndian.AppendUint32(data, r.SecureMessaging)
-	data = binary.LittleEndian.AppendUint32(data, r.ClassByteType)
+	data = binary.LittleEndian.AppendUint32(data, uint32(r.SecureMessaging))
+	data = binary.LittleEndian.AppendUint32(data, uint32(r.ClassByteType))
 	data = binary.LittleEndian.AppendUint32(data, uint32(len(r.Command)))
 	data = binary.LittleEndian.AppendUint32(data, 20)
 	data = append(data, r.Command...)
@@ -716,7 +716,7 @@ func (r *STKEnvelopeResponse) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
-func command(serviceID [16]byte, commandID, commandType uint32, data []byte) *Command {
+func command(serviceID [16]byte, commandID uint32, commandType CommandType, data []byte) *Command {
 	return &Command{
 		FragmentTotal:   1,
 		FragmentCurrent: 0,

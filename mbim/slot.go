@@ -47,7 +47,7 @@ func (r *Reader) waitForSlotReady(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, slotReadyTimeout)
 	defer cancel()
 
-	var lastReadyState uint32
+	var lastReadyState SubscriberReadyState
 	var sawReadyState bool
 	for {
 		request := SubscriberReadyStatusRequest{TransactionID: r.nextTransactionID()}

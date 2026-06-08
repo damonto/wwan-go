@@ -139,7 +139,7 @@ func fileStatusAttributes(status *FileStatusResponse) FileAttributes {
 	return attrs
 }
 
-func fileStructure(structure uint32) byte {
+func fileStructure(structure UiccFileStructure) FileStructure {
 	switch structure {
 	case UiccFileStructureTransparent:
 		return FileStructureTransparent
@@ -150,14 +150,14 @@ func fileStructure(structure uint32) byte {
 	}
 }
 
-func fileType(fileType uint32) byte {
+func fileType(fileType UiccFileType) FileType {
 	switch fileType {
 	case UiccFileTypeWorkingEF, UiccFileTypeInternalEF:
-		return 0x21
+		return FileTypeWorkingEF
 	case UiccFileTypeDFOrADF:
-		return 0x38
+		return FileTypeDFOrADF
 	default:
-		return byte(fileType)
+		return FileType(fileType)
 	}
 }
 

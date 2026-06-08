@@ -124,7 +124,7 @@ func TestResponseUnmarshalBinary(t *testing.T) {
 			service: qualcomm.ServiceControl,
 			client:  0,
 			txn:     1,
-			message: qualcomm.QMICtlInternalProxyOpen,
+			message: qualcomm.MessageInternalProxyOpen,
 		},
 	}
 

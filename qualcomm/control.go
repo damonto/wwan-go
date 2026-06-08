@@ -14,8 +14,8 @@ type InternalOpenRequest struct {
 func (r InternalOpenRequest) Request() Request {
 	return Request{
 		TransactionID: r.TransactionID,
-		MessageID:     QMICtlInternalProxyOpen,
-		Service:       QMIServiceControl,
+		MessageID:     MessageInternalProxyOpen,
+		Service:       ServiceControl,
 		TLVs: tlv.TLVs{
 			tlv.Bytes(0x01, r.DevicePath),
 		},
@@ -30,8 +30,8 @@ type AllocateClientIDRequest struct {
 func (r AllocateClientIDRequest) Request() Request {
 	return Request{
 		TransactionID: r.TransactionID,
-		MessageID:     QMICtlCmdAllocateClientID,
-		Service:       QMIServiceControl,
+		MessageID:     MessageAllocateClientID,
+		Service:       ServiceControl,
 		TLVs: tlv.TLVs{
 			tlv.Uint(0x01, r.ServiceType),
 		},
@@ -59,8 +59,8 @@ type ReleaseClientIDRequest struct {
 func (r ReleaseClientIDRequest) Request() Request {
 	return Request{
 		TransactionID: r.TransactionID,
-		MessageID:     QMICtlCmdReleaseClientID,
-		Service:       QMIServiceControl,
+		MessageID:     MessageReleaseClientID,
+		Service:       ServiceControl,
 		TLVs: tlv.TLVs{
 			tlv.Bytes(0x01, []byte{byte(r.ServiceType), r.ClientID}),
 		},

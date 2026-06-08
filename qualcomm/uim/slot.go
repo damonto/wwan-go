@@ -31,7 +31,7 @@ func (r *Reader) activateSlot(ctx context.Context) error {
 }
 
 func (r *Reader) SlotStatus(ctx context.Context) (SlotStatus, error) {
-	resp, err := r.requestWithTimeout(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMGetSlotStatus, nil, slotStatusTimeout)
+	resp, err := r.requestWithTimeout(ctx, qualcomm.MessageGetSlotStatus, nil, slotStatusTimeout)
 	if err != nil {
 		return SlotStatus{}, err
 	}
@@ -42,7 +42,7 @@ func (r *Reader) SlotStatus(ctx context.Context) (SlotStatus, error) {
 }
 
 func (r *Reader) SwitchSlot(ctx context.Context, logicalSlot uint8, physicalSlot uint32) error {
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMSwitchSlot, tlv.TLVs{
+	resp, err := r.request(ctx, qualcomm.MessageSwitchSlot, tlv.TLVs{
 		tlv.Uint(0x01, logicalSlot),
 		tlv.Uint(0x02, physicalSlot),
 	})
@@ -82,7 +82,7 @@ func (r *Reader) waitForSlotReady(ctx context.Context) error {
 }
 
 func (r *Reader) CardStatus(ctx context.Context) (CardStatus, error) {
-	resp, err := r.request(ctx, qualcomm.QMIServiceUIM, r.clientID, qualcomm.QMIUIMGetCardStatus, nil)
+	resp, err := r.request(ctx, qualcomm.MessageGetCardStatus, nil)
 	if err != nil {
 		return CardStatus{}, err
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/damonto/uicc-go/qualcomm/uim"
 	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/uicc-go/usim/command"
+	"github.com/damonto/uicc-go/usim/simfile"
 )
 
 var (
@@ -34,7 +35,7 @@ func (r *Qualcomm) ListApplications(ctx context.Context) ([]usimcard.Application
 	if err != nil {
 		return nil, fmt.Errorf("reading EF_DIR: %w", err)
 	}
-	if attrs.FileStructure != uim.FileStructureLinearFixed {
+	if attrs.FileStructure != simfile.StructureLinearFixed {
 		return nil, errors.New("reading EF_DIR: unexpected file structure")
 	}
 
@@ -70,8 +71,8 @@ func (r *Qualcomm) FileAttributes(ctx context.Context, file usimcard.FileRef) (u
 		return usimcard.FileAttributes{}, err
 	}
 	return usimcard.FileAttributes{
-		FileStructure: attrs.FileStructure,
-		FileType:      attrs.FileType,
+		FileStructure: simfile.FileStructure(attrs.FileStructure),
+		FileType:      simfile.FileType(attrs.FileType),
 		RecordSize:    attrs.RecordSize,
 		RecordCount:   attrs.RecordCount,
 		FileSize:      attrs.FileSize,

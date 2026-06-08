@@ -13,14 +13,25 @@ const (
 	tagFCI            = 0x62
 	tagFileDescriptor = 0x82
 	tagFileLength     = 0x80
+)
 
-	StructureTransparent = 0x41
-	StructureLinearFixed = 0x42
+type FileStructure byte
+
+const (
+	StructureTransparent FileStructure = 0x41
+	StructureLinearFixed FileStructure = 0x42
+)
+
+type FileType byte
+
+const (
+	FileTypeWorkingEF FileType = 0x21
+	FileTypeDFOrADF   FileType = 0x38
 )
 
 type FCI struct {
-	FileStructure byte
-	FileType      byte
+	FileStructure FileStructure
+	FileType      FileType
 	RecordSize    uint16
 	RecordCount   byte
 	FileSize      uint16
@@ -48,11 +59,11 @@ func (info *FCI) UnmarshalBinary(data []byte) error {
 			haveDescriptor = true
 			switch len(item.Value) {
 			case 2:
-				parsed.FileStructure = item.Value[0]
-				parsed.FileType = item.Value[1]
+				parsed.FileStructure = FileStructure(item.Value[0])
+				parsed.FileType = FileType(item.Value[1])
 			case 5:
-				parsed.FileStructure = item.Value[0]
-				parsed.FileType = item.Value[1]
+				parsed.FileStructure = FileStructure(item.Value[0])
+				parsed.FileType = FileType(item.Value[1])
 				parsed.RecordSize = binary.BigEndian.Uint16(item.Value[2:4])
 				parsed.RecordCount = item.Value[4]
 			default:

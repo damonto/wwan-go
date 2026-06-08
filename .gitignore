@@ -35,3 +35,8 @@ scripts/
 # AI
 .codex
 AGENTS.md
+
+# Linux Mobile Broadband
+libqmi/
+libqrtr-glib/
+libmbim/

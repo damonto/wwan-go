@@ -7,6 +7,63 @@ import (
 	"github.com/damonto/uicc-go/qualcomm/tlv"
 )
 
+// ServiceType represents QMI service types.
+type ServiceType uint8
+
+const (
+	ServiceControl ServiceType = 0x00 // Control service
+	ServiceCAT2    ServiceType = 0x0A // Card Application Toolkit service v2
+	ServiceUIM     ServiceType = 0x0B // UIM service
+	ServiceCAT     ServiceType = 0xE0 // Card Application Toolkit service v1
+)
+
+// MessageType represents QMI message types.
+type MessageType uint8
+
+const (
+	MessageTypeRequest    MessageType = 0x00
+	MessageTypeResponse   MessageType = 0x02
+	MessageTypeIndication MessageType = 0x04
+)
+
+// MessageID represents QMI command message IDs.
+type MessageID uint16
+
+const (
+	// CTL service commands
+	MessageGetVersionInfo    MessageID = 0x0021
+	MessageAllocateClientID  MessageID = 0x0022
+	MessageReleaseClientID   MessageID = 0x0023
+	MessageInternalProxyOpen MessageID = 0xFF00
+
+	// UIM service commands
+	MessageReset                     MessageID = 0x0000
+	MessageReadTransparent           MessageID = 0x0020
+	MessageReadRecord                MessageID = 0x0021
+	MessageGetFileAttributes         MessageID = 0x0024
+	MessagePowerOffSIM               MessageID = 0x0030
+	MessagePowerOnSIM                MessageID = 0x0031
+	MessageChangeProvisioningSession MessageID = 0x0038
+	MessageSendAPDU                  MessageID = 0x003B
+	MessageOpenLogicalChannel        MessageID = 0x0042
+	MessageCloseLogicalChannel       MessageID = 0x003F
+	MessageSwitchSlot                MessageID = 0x0046
+	MessageGetSlotStatus             MessageID = 0x0047
+	MessageGetCardStatus             MessageID = 0x002F
+	MessageAuthenticate              MessageID = 0x0034
+
+	// CAT/CAT2 service commands
+	MessageSendEnvelope MessageID = 0x0022
+)
+
+// QMIResult represents the result code in QMI responses.
+type QMIResult uint16
+
+const (
+	QMIResultSuccess QMIResult = 0x0000 // Success
+	QMIResultFailure QMIResult = 0x0001 // Failure
+)
+
 type Request struct {
 	Service       ServiceType
 	ClientID      uint8

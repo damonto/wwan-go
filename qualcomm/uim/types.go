@@ -1,13 +1,136 @@
 package uim
 
+type FileStructure byte
+
 const (
-	FileStructureTransparent = 0x41
-	FileStructureLinearFixed = 0x42
+	FileStructureTransparent FileStructure = 0x41
+	FileStructureLinearFixed FileStructure = 0x42
+)
+
+type FileType byte
+
+const (
+	FileTypeWorkingEF FileType = 0x21
+	FileTypeDFOrADF   FileType = 0x38
+)
+
+type CardState byte
+
+const (
+	CardStateAbsent CardState = iota
+	CardStatePresent
+	CardStateError
+)
+
+type PhysicalCardState uint32
+
+const (
+	PhysicalCardStateUnknown PhysicalCardState = iota
+	PhysicalCardStateAbsent
+	PhysicalCardStatePresent
+)
+
+type SlotState uint32
+
+const (
+	SlotStateInactive SlotState = iota
+	SlotStateActive
+)
+
+type QMIFileType byte
+
+const (
+	QMIFileTypeTransparent QMIFileType = iota
+	QMIFileTypeCyclic
+	QMIFileTypeLinearFixed
+	QMIFileTypeDedicated
+	QMIFileTypeMaster
+)
+
+type PINState byte
+
+const (
+	PINStateNotInitialized PINState = iota
+	PINStateEnabledNotVerified
+	PINStateEnabledVerified
+	PINStateDisabled
+	PINStateBlocked
+	PINStatePermanentlyBlocked
+)
+
+type CardError byte
+
+const (
+	CardErrorUnknown CardError = iota
+	CardErrorPowerDown
+	CardErrorPoll
+	CardErrorNoATRReceived
+	CardErrorVoltageMismatch
+	CardErrorParity
+	CardErrorPossiblyRemoved
+	CardErrorTechnical
+)
+
+type ApplicationType byte
+
+const (
+	ApplicationTypeUnknown ApplicationType = iota
+	ApplicationTypeSIM
+	ApplicationTypeUSIM
+	ApplicationTypeRUIM
+	ApplicationTypeCSIM
+	ApplicationTypeISIM
+)
+
+type ApplicationState byte
+
+const (
+	ApplicationStateUnknown ApplicationState = iota
+	ApplicationStateDetected
+	ApplicationStatePIN1OrUPINRequired
+	ApplicationStatePUK1OrUPINRequired
+	ApplicationStateCheckPersonalization
+	ApplicationStatePIN1Blocked
+	ApplicationStateIllegal
+	ApplicationStateReady
+)
+
+type PersonalizationState byte
+
+const (
+	PersonalizationStateUnknown PersonalizationState = iota
+	PersonalizationStateInProgress
+	PersonalizationStateReady
+	PersonalizationStateCodeRequired
+	PersonalizationStatePUKCodeRequired
+	PersonalizationStatePermanentlyBlocked
+)
+
+type PersonalizationFeature byte
+
+const (
+	PersonalizationFeatureGWNetwork PersonalizationFeature = iota
+	PersonalizationFeatureGWNetworkSubset
+	PersonalizationFeatureGWServiceProvider
+	PersonalizationFeatureGWCorporate
+	PersonalizationFeatureGWUIM
+	PersonalizationFeatureOneXNetworkType1
+	PersonalizationFeatureOneXNetworkType2
+	PersonalizationFeatureOneXHRPD
+	PersonalizationFeatureOneXServiceProvider
+	PersonalizationFeatureOneXCorporate
+	PersonalizationFeatureOneXRUIM
+	PersonalizationFeatureGWServiceProviderName
+	PersonalizationFeatureGWSPAndEHPLMN
+	PersonalizationFeatureGWICCID
+	PersonalizationFeatureGWIMPI
+	PersonalizationFeatureGWNetworkSubsetServiceProvider
+	PersonalizationFeatureGWCarrier
 )
 
 type FileAttributes struct {
-	FileStructure byte
-	FileType      byte
+	FileStructure FileStructure
+	FileType      FileType
 	RecordSize    uint16
 	RecordCount   uint16
 	FileSize      uint16

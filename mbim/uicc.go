@@ -95,8 +95,8 @@ func (r *Reader) TransmitAPDU(ctx context.Context, channel uint32, command []byt
 	request := APDURequest{
 		TransactionID:   r.nextTransactionID(),
 		Channel:         channel,
-		SecureMessaging: uiccSecureMessagingNone,
-		ClassByteType:   uiccClassByteTypeInterIndustry,
+		SecureMessaging: UiccSecureMessagingNone,
+		ClassByteType:   UiccClassByteTypeInterIndustry,
 		Command:         slices.Clone(command),
 	}
 	if err := request.Request().Transmit(ctx, r.conn); err != nil {
