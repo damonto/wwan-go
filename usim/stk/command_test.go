@@ -69,15 +69,15 @@ func TestProactiveCommandUnmarshalBinary(t *testing.T) {
 			},
 		},
 		{
-			name: "unknown command becomes simple",
+			name: "unknown command",
 			raw: proactive(t,
 				tlv.NewComprehension(tlvCommandDetails, []byte{0x03, 0x7f, 0x00}),
 				tlv.NewComprehension(tlvDeviceIDs, []byte{byte(DeviceUICC), byte(DeviceTerminal)}),
 			),
 			want: func(t *testing.T, cmd Command) {
-				got, ok := cmd.(SimpleCommand)
+				got, ok := cmd.(UnknownCommand)
 				if !ok {
-					t.Fatalf("UnmarshalBinary() command type = %T, want SimpleCommand", cmd)
+					t.Fatalf("UnmarshalBinary() command type = %T, want UnknownCommand", cmd)
 				}
 				if got.Details.Type != 0x7f {
 					t.Fatalf("command type = 0x%02X, want 0x7F", got.Details.Type)
@@ -247,6 +247,9 @@ func TestProactiveCommandUnmarshalBinary(t *testing.T) {
 				if got.Details.Type != CommandDisplayText || got.Err == nil {
 					t.Fatalf("malformed command = %+v, want display text with error", got)
 				}
+				if got.ResultCode() != ResultRequiredValuesMissing {
+					t.Fatalf("ResultCode() = 0x%02X, want 0x%02X", got.ResultCode(), ResultRequiredValuesMissing)
+				}
 			},
 		},
 		{
@@ -264,6 +267,61 @@ func TestProactiveCommandUnmarshalBinary(t *testing.T) {
 				}
 				if got.Details.Number != 0x09 || got.Err == nil {
 					t.Fatalf("malformed command = %+v, want command number 9 with error", got)
+				}
+				if got.ResultCode() != ResultCommandDataNotUnderstood {
+					t.Fatalf("ResultCode() = 0x%02X, want 0x%02X", got.ResultCode(), ResultCommandDataNotUnderstood)
+				}
+			},
+		},
+		{
+			name: "unexpected comprehension TLV becomes malformed command",
+			raw: proactive(t,
+				tlv.NewComprehension(tlvCommandDetails, []byte{0x0F, byte(CommandDisplayText), 0x00}),
+				tlv.NewComprehension(tlvDeviceIDs, []byte{byte(DeviceUICC), byte(DeviceDisplay)}),
+				tlv.NewComprehension(tlvTextString, []byte{0x04, 'H', 'i'}),
+				tlv.NewComprehension(0x7e, []byte{0x01}),
+			),
+			want: func(t *testing.T, cmd Command) {
+				got, ok := cmd.(MalformedCommand)
+				if !ok {
+					t.Fatalf("UnmarshalBinary() command type = %T, want MalformedCommand", cmd)
+				}
+				if got.ResultCode() != ResultCommandDataNotUnderstood {
+					t.Fatalf("ResultCode() = 0x%02X, want 0x%02X", got.ResultCode(), ResultCommandDataNotUnderstood)
+				}
+			},
+		},
+		{
+			name: "missing required TLV wins over unexpected comprehension TLV",
+			raw: proactive(t,
+				tlv.NewComprehension(tlvCommandDetails, []byte{0x11, byte(CommandDisplayText), 0x00}),
+				tlv.NewComprehension(tlvDeviceIDs, []byte{byte(DeviceUICC), byte(DeviceDisplay)}),
+				tlv.NewComprehension(0x7e, []byte{0x01}),
+			),
+			want: func(t *testing.T, cmd Command) {
+				got, ok := cmd.(MalformedCommand)
+				if !ok {
+					t.Fatalf("UnmarshalBinary() command type = %T, want MalformedCommand", cmd)
+				}
+				if got.ResultCode() != ResultRequiredValuesMissing {
+					t.Fatalf("ResultCode() = 0x%02X, want 0x%02X", got.ResultCode(), ResultRequiredValuesMissing)
+				}
+			},
+		},
+		{
+			name: "unexpected optional TLV marks partial comprehension",
+			raw: proactive(t,
+				tlv.NewComprehension(tlvCommandDetails, []byte{0x10, byte(CommandDisplayText), 0x00}),
+				tlv.NewComprehension(tlvDeviceIDs, []byte{byte(DeviceUICC), byte(DeviceDisplay)}),
+				tlv.NewComprehension(tlvTextString, []byte{0x04, 'H', 'i'}),
+				tlv.New(0x7e, []byte{0x01}),
+			),
+			want: func(t *testing.T, cmd Command) {
+				if _, ok := cmd.(DisplayTextCommand); !ok {
+					t.Fatalf("UnmarshalBinary() command type = %T, want DisplayTextCommand", cmd)
+				}
+				if !cmd.PartialComprehension() {
+					t.Fatal("PartialComprehension() = false, want true")
 				}
 			},
 		},

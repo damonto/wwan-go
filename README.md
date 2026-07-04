@@ -418,6 +418,54 @@ Transport notes:
 - If an operator explicitly calls QMI CAT `SetConfiguration` with a custom terminal profile, `GetConfiguration` can confirm the modem setting immediately, but the UICC may not see changed terminal-profile bits until the next UICC initialization. Some cards support additional terminal profile after activation; many real deployments still require an explicit SIM power cycle. The library does not power-cycle SIMs implicitly.
 - MBIM uses STK PAC, terminal response, and envelope CIDs. The host PAC profile is cleared when `Run` exits.
 
+### QCOM CAT2 Event Ownership
+
+On Qualcomm modems, CAT/CAT2 event registration is owned by QMI CAT client IDs. `SET_EVENT_REPORT` cannot replace another client's raw event registration; the modem returns `InvalidOperation` with a raw error mask when another CAT2 client already owns one of the requested bits.
+
+When the modem is shared with other host software, prefer `qmi-proxy` and use CAT service-state probing before taking over ownership. The safe takeover flow is:
+
+1. Allocate your CAT2 client through the normal `uim.Reader`.
+2. Try `SET_EVENT_REPORT` once.
+3. If the response reports a raw event conflict, read CAT `GET_SERVICE_STATE`.
+4. Probe candidate CAT2 CIDs with `GET_SERVICE_STATE` and check `raw_client_mask`.
+5. Release only the CID whose `raw_client_mask` owns the requested raw bits.
+6. Retry `SET_EVENT_REPORT` with your CAT2 client.
+
+The helper below implements that flow:
+
+```go
+callbacks := usim.STKCallbacks{
+	DisplayText: func(ctx context.Context, cmd stk.DisplayTextCommand) (stk.TerminalResponse, error) {
+		log.Print(cmd.Text.String)
+		return stk.OK(), nil
+	},
+}
+profile := usim.ProfileFromCallbacks(callbacks)
+
+claim, err := uim.NewCAT(uimReader).ForceClaimEvents(ctx, uim.CATEventClaimConfig{
+	RawMask:          profile.QMIEventMask(),
+	FullFunctionMask: profile.QMIFullFunctionMask(),
+})
+if err != nil {
+	return err
+}
+if claim.ReleasedClientID != 0 {
+	log.Printf("released CAT2 owner CID %d", claim.ReleasedClientID)
+}
+
+toolkit, err := card.STK()
+if err != nil {
+	return err
+}
+return toolkit.Run(ctx, callbacks)
+```
+
+Keep the `uim.Reader` open for as long as the STK run is active. Closing it releases the CAT2 client and drops the claimed event registration.
+
+Do not scan CAT2 CIDs up to 255. The Qualcomm reference stack keeps CAT client IDs in a small service-local range (`1..5` on the tested CAT2 firmware), and invalid high CIDs may time out instead of returning `InvalidClientId`. The default helper probes only that small range and only releases a CID after `GET_SERVICE_STATE` proves it owns the requested raw bits.
+
+This is still a deliberate takeover of another CAT2 client. Releasing the owner can disrupt whatever process or daemon owns that CAT2 CID until it reallocates a client or the modem is reset.
+
 ## Testing
 
 Run all tests:

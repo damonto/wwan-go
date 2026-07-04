@@ -3,7 +3,6 @@ package usim
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/damonto/uicc-go/usim/stk"
 )
@@ -90,7 +89,7 @@ func (s *STK) Run(ctx context.Context, callbacks STKCallbacks) error {
 
 	commands, err := s.transport.Commands(runCtx, profile)
 	if err != nil {
-		return fmt.Errorf("starting STK command loop: %w", err)
+		return err
 	}
 	for {
 		select {
@@ -119,7 +118,7 @@ func (s *STK) Handle(ctx context.Context, session STKSession, callbacks STKCallb
 		}
 		return err
 	}
-	return s.sendResponse(ctx, session, response)
+	return s.sendResponse(ctx, session, responseForCommand(session.Command, response))
 }
 
 func (s *STK) SendEnvelope(ctx context.Context, envelope stk.Envelope) (stk.EnvelopeResponse, error) {
@@ -145,7 +144,9 @@ func (s *STK) sendResponse(ctx context.Context, session STKSession, response stk
 func (s *STK) dispatch(ctx context.Context, callbacks STKCallbacks, cmd stk.Command) (stk.TerminalResponse, error) {
 	switch command := cmd.(type) {
 	case stk.MalformedCommand:
-		return stk.Result(stk.ResultCommandDataNotUnderstood), nil
+		return stk.Result(command.ResultCode()), nil
+	case stk.UnknownCommand:
+		return stk.Result(stk.ResultCommandTypeNotUnderstood), nil
 	case stk.DisplayTextCommand:
 		if callbacks.DisplayText != nil {
 			return callbacks.DisplayText(ctx, command)
@@ -263,7 +264,11 @@ func FullSTKProfile() stk.Profile {
 }
 
 func ProfileFromCallbacks(callbacks STKCallbacks) stk.Profile {
-	capabilities := []stk.Capability{stk.CapabilityProfileDownload}
+	capabilities := []stk.Capability{
+		stk.CapabilityProfileDownload,
+		stk.CapabilityBIP,
+		stk.CapabilitySetupEventList,
+	}
 	if callbacks.DisplayText != nil {
 		capabilities = append(capabilities, stk.CapabilityDisplayText)
 	}
@@ -342,7 +347,15 @@ func frameOf(cmd stk.Command) stk.CommandFrame {
 	return stk.CommandFrame{
 		Details: cmd.CommandDetails(),
 		Devices: cmd.DeviceIdentities(),
+		Partial: cmd.PartialComprehension(),
 		TLVs:    cmd.RawTLVs(),
 		Raw:     cmd.RawBytes(),
 	}
+}
+
+func responseForCommand(cmd stk.Command, response stk.TerminalResponse) stk.TerminalResponse {
+	if cmd.PartialComprehension() && response.Result == stk.ResultCommandPerformed {
+		response.Result = stk.ResultPartialComprehension
+	}
+	return response
 }

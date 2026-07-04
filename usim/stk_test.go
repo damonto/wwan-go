@@ -29,6 +29,24 @@ func TestSTKHandle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalBinary() malformed error = %v", err)
 	}
+	var unknownCmd stkpkg.ProactiveCommand
+	err = unknownCmd.UnmarshalBinary(proactive(t,
+		tlv.NewComprehension(0x01, []byte{0x05, 0x7f, 0x00}),
+		tlv.NewComprehension(0x02, []byte{byte(stkpkg.DeviceUICC), byte(stkpkg.DeviceTerminal)}),
+	))
+	if err != nil {
+		t.Fatalf("UnmarshalBinary() unknown error = %v", err)
+	}
+	var partialCmd stkpkg.ProactiveCommand
+	err = partialCmd.UnmarshalBinary(proactive(t,
+		tlv.NewComprehension(0x01, []byte{0x06, byte(stkpkg.CommandDisplayText), 0x00}),
+		tlv.NewComprehension(0x02, []byte{byte(stkpkg.DeviceUICC), byte(stkpkg.DeviceDisplay)}),
+		tlv.NewComprehension(0x0D, []byte{0x04, 'H', 'i'}),
+		tlv.New(0x7e, []byte{0x01}),
+	))
+	if err != nil {
+		t.Fatalf("UnmarshalBinary() partial error = %v", err)
+	}
 	var bipStatusCmd stkpkg.ProactiveCommand
 	err = bipStatusCmd.UnmarshalBinary(proactive(t,
 		tlv.NewComprehension(0x01, []byte{0x03, byte(stkpkg.CommandGetChannelStatus), 0x00}),
@@ -84,12 +102,25 @@ func TestSTKHandle(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "malformed command sends data not understood",
+			name: "malformed command sends required values missing",
 			callbacks: STKCallbacks{DisplayText: func(context.Context, stkpkg.DisplayTextCommand) (stkpkg.TerminalResponse, error) {
 				return stkpkg.OK(), nil
 			}},
 			command: malformedCmd.Command,
-			want:    stkpkg.ResultCommandDataNotUnderstood,
+			want:    stkpkg.ResultRequiredValuesMissing,
+		},
+		{
+			name:    "unknown command sends type not understood",
+			command: unknownCmd.Command,
+			want:    stkpkg.ResultCommandTypeNotUnderstood,
+		},
+		{
+			name: "partial comprehension adjusts successful response",
+			callbacks: STKCallbacks{DisplayText: func(context.Context, stkpkg.DisplayTextCommand) (stkpkg.TerminalResponse, error) {
+				return stkpkg.OK(), nil
+			}},
+			command: partialCmd.Command,
+			want:    stkpkg.ResultPartialComprehension,
 		},
 	}
 
@@ -123,7 +154,7 @@ func TestSTKHandle(t *testing.T) {
 	}
 }
 
-func TestProfileFromCallbacksDoesNotAdvertiseBuiltInBIP(t *testing.T) {
+func TestProfileFromCallbacksAdvertisesBuiltInBIP(t *testing.T) {
 	profile := ProfileFromCallbacks(STKCallbacks{})
 	commands := profile.ProactiveCommandTypes()
 
@@ -140,8 +171,8 @@ func TestProfileFromCallbacksDoesNotAdvertiseBuiltInBIP(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if slices.Contains(commands, tt.cmd) {
-				t.Fatalf("ProactiveCommandTypes() = %v, did not want %v", commands, tt.cmd)
+			if !slices.Contains(commands, tt.cmd) {
+				t.Fatalf("ProactiveCommandTypes() = %v, want %v", commands, tt.cmd)
 			}
 		})
 	}

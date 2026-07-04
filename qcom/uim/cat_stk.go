@@ -177,7 +177,7 @@ func (c *CAT) Commands(ctx context.Context, eventMask, fullFunctionMask uint32) 
 	if err := c.setEventReport(ctx, service, clientID, eventMask, fullFunctionMask); err != nil {
 		cancel()
 		c.releaseCATClient(service, clientID)
-		return nil, fmt.Errorf("watching QMI CAT commands: %w", err)
+		return nil, err
 	}
 
 	out := make(chan CATCommand, 8)
@@ -297,12 +297,15 @@ func (c *CAT) setEventReport(ctx context.Context, service qcom.ServiceType, clie
 
 	resp, err := c.reader.requestService(ctx, service, clientID, qcom.MessageCATSetEventReport, tlvs)
 	if err != nil {
-		return err
+		return fmt.Errorf("registering QMI CAT events: %w", err)
+	}
+	if err := checkEventReportRegistration(resp.TLVs, mask, full); err != nil {
+		return fmt.Errorf("registering QMI CAT events: %w", err)
 	}
 	if err := resultOK(resp); err != nil {
-		return err
+		return fmt.Errorf("registering QMI CAT events: %w", err)
 	}
-	return eventReportRegistrationOK(resp.TLVs, mask, full)
+	return nil
 }
 
 func (c *CAT) setConfiguration(ctx context.Context, service qcom.ServiceType, clientID uint8, config CATConfiguration) error {
@@ -354,7 +357,7 @@ func isRawCATCommandTLV(tag byte) bool {
 	}
 }
 
-func eventReportRegistrationOK(tlvs tlv.TLVs, raw, full uint32) error {
+func checkEventReportRegistration(tlvs tlv.TLVs, raw, full uint32) error {
 	checks := []struct {
 		name      string
 		tag       byte
@@ -372,8 +375,15 @@ func eventReportRegistrationOK(tlvs tlv.TLVs, raw, full uint32) error {
 		if !ok {
 			continue
 		}
-		if failed &= check.requested; failed != 0 {
-			return fmt.Errorf("registering QMI CAT events: %s mask 0x%08X rejected", check.name, failed)
+		rejected := failed & check.requested
+		if rejected != 0 {
+			switch check.name {
+			case "raw":
+				return fmt.Errorf("raw mask 0x%08X already registered by another control point", rejected)
+			case "full-function":
+				return fmt.Errorf("full-function mask 0x%08X was not enabled", rejected)
+			}
+			return fmt.Errorf("%s mask 0x%08X was not enabled", check.name, rejected)
 		}
 	}
 	return nil

@@ -13,6 +13,7 @@ type Command interface {
 	MarshalBinary() ([]byte, error)
 	CommandDetails() CommandDetails
 	DeviceIdentities() DeviceIdentities
+	PartialComprehension() bool
 	RawTLVs() tlv.Items
 	RawBytes() []byte
 }
@@ -20,14 +21,18 @@ type Command interface {
 type CommandFrame struct {
 	Details CommandDetails
 	Devices DeviceIdentities
+	Partial bool
 	TLVs    tlv.Items
 	Raw     []byte
 }
 
-func (c CommandFrame) CommandDetails() CommandDetails     { return c.Details }
-func (c CommandFrame) DeviceIdentities() DeviceIdentities { return c.Devices }
-func (c CommandFrame) RawTLVs() tlv.Items                 { return tlv.CloneItems(c.TLVs) }
-func (c CommandFrame) RawBytes() []byte                   { return slices.Clone(c.Raw) }
+func (c CommandFrame) CommandDetails() CommandDetails { return c.Details }
+func (c CommandFrame) DeviceIdentities() DeviceIdentities {
+	return c.Devices
+}
+func (c CommandFrame) PartialComprehension() bool { return c.Partial }
+func (c CommandFrame) RawTLVs() tlv.Items         { return tlv.CloneItems(c.TLVs) }
+func (c CommandFrame) RawBytes() []byte           { return slices.Clone(c.Raw) }
 
 func (c CommandFrame) MarshalBinary() ([]byte, error) {
 	if len(c.Raw) > 0 {
@@ -100,6 +105,33 @@ func (e commandFrameTLVError) Unwrap() error {
 	return e.Err
 }
 
+type commandValidationError struct {
+	Result ResultCode
+	Err    error
+}
+
+func (e commandValidationError) Error() string {
+	return e.Err.Error()
+}
+
+func (e commandValidationError) Unwrap() error {
+	return e.Err
+}
+
+func validationError(result ResultCode, err error) error {
+	return commandValidationError{
+		Result: result,
+		Err:    err,
+	}
+}
+
+func validationResult(err error) ResultCode {
+	if validation, ok := errors.AsType[commandValidationError](err); ok {
+		return validation.Result
+	}
+	return ResultCommandDataNotUnderstood
+}
+
 func commandTLVs(data []byte) (tlv.Items, error) {
 	items := make(tlv.Items, 0, len(data)/2)
 	for len(data) > 0 {
@@ -133,51 +165,85 @@ func (c *CommandFrame) ReadFrom(r io.Reader) (int64, error) {
 	return int64(len(data)), c.UnmarshalBinary(data)
 }
 
-func (c CommandFrame) Valid() error {
-	if err := requireTLV(c.TLVs, tlvDeviceIDs, "device identities", 2); err != nil {
-		return err
+func (c CommandFrame) validateComprehension() (bool, error) {
+	partial := false
+	for _, item := range c.TLVs {
+		tag := item.ComprehensionTag()
+		if expectedCommandTLV(c.Details.Type, tag) {
+			continue
+		}
+		if item.ComprehensionRequired() {
+			return false, validationError(ResultCommandDataNotUnderstood, fmt.Errorf("parsing proactive command: unexpected comprehension TLV 0x%02X", tag))
+		}
+		partial = true
 	}
+	return partial, nil
+}
 
+func (c CommandFrame) Valid() error {
+	_, err := c.validate()
+	return err
+}
+
+func (c CommandFrame) validate() (bool, error) {
+	if err := requireTLV(c.TLVs, deviceIdentitiesTLV); err != nil {
+		return false, err
+	}
+	if !knownCommandType(c.Details.Type) {
+		return false, nil
+	}
+	if err := c.validateRequiredTLVs(); err != nil {
+		return false, err
+	}
+	return c.validateComprehension()
+}
+
+func (c CommandFrame) validateRequiredTLVs() error {
 	switch c.Details.Type {
 	case CommandDisplayText, CommandGetInkey:
-		return requireTLV(c.TLVs, tlvTextString, "text string", 1)
+		return requireTLV(c.TLVs, textStringTLV)
 	case CommandGetInput:
-		if err := requireTLV(c.TLVs, tlvTextString, "text string", 1); err != nil {
+		if err := requireTLV(c.TLVs, textStringTLV); err != nil {
 			return err
 		}
-		return requireTLV(c.TLVs, tlvResponseLength, "response length", 2)
-	case CommandSetupMenu:
-		items := c.TLVs.All(tlvItem)
-		for _, item := range items {
-			if len(item.Value) == 0 {
-				return errors.New("parsing proactive command: item is truncated")
-			}
-		}
+		return requireTLV(c.TLVs, responseLengthTLV)
 	case CommandSelectItem:
 		items := c.TLVs.All(tlvItem)
 		if len(items) == 0 {
-			return errors.New("parsing proactive command: item missing")
+			return validationError(ResultRequiredValuesMissing, errors.New("parsing proactive command: item missing"))
 		}
-		for _, item := range items {
-			if len(item.Value) == 0 {
-				return errors.New("parsing proactive command: item is truncated")
-			}
-		}
+		return validateItems(items)
+	case CommandSetupMenu:
+		return validateItems(c.TLVs.All(tlvItem))
 	case CommandSetupEventList:
-		return requireTLV(c.TLVs, tlvEventList, "event list", 0)
+		return requireTLV(c.TLVs, eventListTLV)
 	case CommandOpenChannel:
-		return requireTLV(c.TLVs, tlvBufferSize, "buffer size", 2)
+		return requireTLV(c.TLVs, bufferSizeTLV)
 	case CommandReceiveData:
-		return requireTLV(c.TLVs, tlvChannelDataLen, "channel data length", 1)
+		return requireTLV(c.TLVs, channelDataLenTLV)
 	case CommandSendData:
-		return requireTLV(c.TLVs, tlvChannelData, "channel data", 0)
+		return requireTLV(c.TLVs, channelDataTLV)
+	}
+	return nil
+}
+
+func validateItems(items tlv.Items) error {
+	for _, item := range items {
+		if len(item.Value) == 0 {
+			return validationError(ResultCommandDataNotUnderstood, errors.New("parsing proactive command: item is truncated"))
+		}
 	}
 	return nil
 }
 
 func (c CommandFrame) Command() (Command, error) {
-	if err := c.Valid(); err != nil {
-		return MalformedCommand{CommandFrame: c, Err: err}, nil
+	partial, err := c.validate()
+	if err != nil {
+		return MalformedCommand{CommandFrame: c, Err: err, ResponseCode: validationResult(err)}, nil
+	}
+	c.Partial = partial
+	if !knownCommandType(c.Details.Type) {
+		return UnknownCommand{CommandFrame: c}, nil
 	}
 
 	switch c.Details.Type {
@@ -327,11 +393,23 @@ type GenericCommand struct {
 	CommandFrame
 }
 
+type UnknownCommand struct {
+	CommandFrame
+}
+
 // MalformedCommand keeps enough command metadata to send a terminal response
 // when the proactive command data itself cannot be understood.
 type MalformedCommand struct {
 	CommandFrame
-	Err error
+	Err          error
+	ResponseCode ResultCode
+}
+
+func (cmd MalformedCommand) ResultCode() ResultCode {
+	if cmd.ResponseCode != 0 {
+		return cmd.ResponseCode
+	}
+	return ResultCommandDataNotUnderstood
 }
 
 type ProactiveCommand struct {
@@ -350,7 +428,7 @@ func (c *ProactiveCommand) UnmarshalBinary(data []byte) error {
 	if err != nil {
 		var tlvErr commandFrameTLVError
 		if errors.As(err, &tlvErr) {
-			c.Command = MalformedCommand{CommandFrame: frame, Err: err}
+			c.Command = MalformedCommand{CommandFrame: frame, Err: err, ResponseCode: ResultCommandDataNotUnderstood}
 			return nil
 		}
 		return err
@@ -383,15 +461,176 @@ func (c *ProactiveCommand) ReadFrom(r io.Reader) (int64, error) {
 	return int64(len(data)), c.UnmarshalBinary(data)
 }
 
-func requireTLV(tlvs tlv.Items, tag byte, name string, minLen int) error {
-	item, ok := tlvs.Find(tag)
+type commandTLVSpec struct {
+	tag    byte
+	minLen int
+}
+
+func requireTLV(tlvs tlv.Items, spec commandTLVSpec) error {
+	item, ok := tlvs.Find(spec.tag)
 	if !ok {
-		return fmt.Errorf("parsing proactive command: %s missing", name)
+		return validationError(
+			ResultRequiredValuesMissing,
+			fmt.Errorf("parsing proactive command: TLV 0x%02X missing", spec.tag),
+		)
 	}
-	if len(item.Value) < minLen {
-		return fmt.Errorf("parsing proactive command: %s length %d, want at least %d", name, len(item.Value), minLen)
+	if len(item.Value) < spec.minLen {
+		return validationError(
+			ResultCommandDataNotUnderstood,
+			fmt.Errorf("parsing proactive command: TLV 0x%02X length %d, want at least %d", spec.tag, len(item.Value), spec.minLen),
+		)
 	}
 	return nil
+}
+
+var (
+	deviceIdentitiesTLV = commandTLVSpec{tag: tlvDeviceIDs, minLen: 2}
+	textStringTLV       = commandTLVSpec{tag: tlvTextString, minLen: 1}
+	responseLengthTLV   = commandTLVSpec{tag: tlvResponseLength, minLen: 2}
+	eventListTLV        = commandTLVSpec{tag: tlvEventList}
+	bufferSizeTLV       = commandTLVSpec{tag: tlvBufferSize, minLen: 2}
+	channelDataLenTLV   = commandTLVSpec{tag: tlvChannelDataLen, minLen: 1}
+	channelDataTLV      = commandTLVSpec{tag: tlvChannelData}
+)
+
+func knownCommandType(command CommandType) bool {
+	switch command {
+	case CommandRefresh,
+		CommandMoreTime,
+		CommandPollInterval,
+		CommandPollingOff,
+		CommandSetupEventList,
+		CommandSetupCall,
+		CommandSendSS,
+		CommandSendUSSD,
+		CommandSendSMS,
+		CommandSendDTMF,
+		CommandLaunchBrowser,
+		CommandPlayTone,
+		CommandDisplayText,
+		CommandGetInkey,
+		CommandGetInput,
+		CommandSelectItem,
+		CommandSetupMenu,
+		CommandProvideLocalInfo,
+		CommandTimerManagement,
+		CommandSetupIdleModeText,
+		CommandPerformCardAPDU,
+		CommandPowerOnCard,
+		CommandPowerOffCard,
+		CommandGetReaderStatus,
+		CommandRunATCommand,
+		CommandLanguageNotify,
+		CommandOpenChannel,
+		CommandCloseChannel,
+		CommandReceiveData,
+		CommandSendData,
+		CommandGetChannelStatus,
+		CommandServiceSearch,
+		CommandGetServiceInfo,
+		CommandDeclareService,
+		CommandFrames,
+		CommandGetFramesStatus,
+		CommandRetrieveMultimedia,
+		CommandSubmitMultimedia,
+		CommandDisplayMultimedia,
+		CommandActivate,
+		CommandContactlessState,
+		CommandCommandContainer:
+		return true
+	default:
+		return false
+	}
+}
+
+func expectedCommandTLV(command CommandType, tag byte) bool {
+	tag &= 0x7f
+	if tag == tlvCommandDetails || tag == tlvDeviceIDs {
+		return true
+	}
+	if !knownCommandType(command) {
+		return true
+	}
+	return slices.Contains(expectedCommandTLVs(command), tag)
+}
+
+func expectedCommandTLVs(command CommandType) []byte {
+	switch command {
+	case CommandDisplayText:
+		return []byte{tlvTextString, tlvIconID, tlvImmediateResp, tlvDuration, tlvTextAttribute, tlvFrameID}
+	case CommandGetInkey:
+		return []byte{tlvTextString, tlvIconID, tlvDuration, tlvTextAttribute, tlvFrameID}
+	case CommandGetInput:
+		return []byte{tlvTextString, tlvResponseLength, tlvDefaultText, tlvIconID, tlvDuration, tlvTextAttribute, tlvFrameID}
+	case CommandSetupMenu, CommandSelectItem:
+		return []byte{tlvAlphaID, tlvItem, tlvItemID, tlvIconID, tlvItemIconList, tlvHelpRequest, tlvTextAttribute, tlvFrameID}
+	case CommandSetupEventList:
+		return []byte{tlvEventList}
+	case CommandOpenChannel:
+		return []byte{
+			tlvAlphaID, tlvIconID, tlvAddress, tlvSubaddress, tlvDuration,
+			tlvBearerDesc, tlvBufferSize, tlvOtherAddress, tlvTextString,
+			tlvTransportLevel, tlvRemoteEntity, tlvNetworkAccess,
+			tlvTextAttribute, tlvFrameID,
+		}
+	case CommandCloseChannel:
+		return []byte{tlvAlphaID, tlvIconID, tlvTextAttribute, tlvFrameID}
+	case CommandReceiveData:
+		return []byte{tlvAlphaID, tlvIconID, tlvChannelDataLen, tlvTextAttribute, tlvFrameID}
+	case CommandSendData:
+		return []byte{tlvAlphaID, tlvIconID, tlvChannelData, tlvTextAttribute, tlvFrameID}
+	case CommandGetChannelStatus:
+		return []byte{tlvAlphaID, tlvIconID, tlvTextAttribute, tlvFrameID}
+	default:
+		return knownCommandTLVs
+	}
+}
+
+var knownCommandTLVs = []byte{
+	tlvResult,
+	tlvDuration,
+	tlvAlphaID,
+	tlvAddress,
+	tlvSubaddress,
+	tlvSMSTPDU,
+	tlvTextString,
+	tlvTone,
+	tlvItem,
+	tlvItemID,
+	tlvResponseLength,
+	tlvFileList,
+	tlvHelpRequest,
+	tlvDefaultText,
+	tlvEventList,
+	tlvCause,
+	tlvLocationStatus,
+	tlvTransactionID,
+	tlvIconID,
+	tlvItemIconList,
+	tlvCardReaderID,
+	tlvCAPDU,
+	tlvRAPDU,
+	tlvTimerID,
+	tlvTimerValue,
+	tlvDateTimeZone,
+	tlvATCommand,
+	tlvATResponse,
+	tlvImmediateResp,
+	tlvLanguage,
+	tlvBrowserID,
+	tlvURL,
+	tlvBearer,
+	tlvBearerDesc,
+	tlvChannelData,
+	tlvChannelDataLen,
+	tlvChannelStatus,
+	tlvBufferSize,
+	tlvTransportLevel,
+	tlvOtherAddress,
+	tlvRemoteEntity,
+	tlvNetworkAccess,
+	tlvTextAttribute,
+	tlvFrameID,
 }
 
 func (cmd *DisplayTextCommand) UnmarshalFrame(frame CommandFrame) error {

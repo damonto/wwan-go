@@ -6,6 +6,7 @@ import (
 	"encoding"
 	"encoding/binary"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -400,21 +401,30 @@ func TestCATCommandsDecodeRawIndication(t *testing.T) {
 
 func TestCATCommandsRejectsRegistrationErrorMask(t *testing.T) {
 	tests := []struct {
-		name    string
-		raw     uint32
-		full    uint32
-		respTLV tlv.TLV
+		name string
+		raw  uint32
+		full uint32
+		resp qcom.Response
+		want string
 	}{
 		{
-			name:    "raw",
-			raw:     0x01,
-			respTLV: tlv.Uint(0x10, uint32(0x01)),
+			name: "raw",
+			raw:  0x01,
+			resp: successResponse(qcom.MessageCATSetEventReport, tlv.Uint(0x10, uint32(0x01))),
+			want: "registering QMI CAT events: raw mask 0x00000001 already registered by another control point",
 		},
 		{
-			name:    "full function",
-			raw:     0x20,
-			full:    0x01,
-			respTLV: tlv.Uint(0x12, uint32(0x01)),
+			name: "full function",
+			raw:  0x20,
+			full: 0x01,
+			resp: successResponse(qcom.MessageCATSetEventReport, tlv.Uint(0x12, uint32(0x01))),
+			want: "registering QMI CAT events: full-function mask 0x00000001 was not enabled",
+		},
+		{
+			name: "failed result with raw mask",
+			raw:  0x02,
+			resp: errorResponse(qcom.MessageCATSetEventReport, qcom.QMIErrorInvalidOperation, tlv.Uint(0x10, uint32(0x02))),
+			want: "registering QMI CAT events: raw mask 0x00000002 already registered by another control point",
 		},
 	}
 
@@ -430,7 +440,7 @@ func TestCATCommandsRejectsRegistrationErrorMask(t *testing.T) {
 									t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, qcom.MessageCATSetEventReport)
 								}
 							},
-							resp: successResponse(qcom.MessageCATSetEventReport, tt.respTLV),
+							resp: tt.resp,
 						}, {
 							check: func(req qcom.Request) {
 								if req.MessageID != qcom.MessageReleaseClientID {
@@ -449,6 +459,9 @@ func TestCATCommandsRejectsRegistrationErrorMask(t *testing.T) {
 			_, err := NewCAT(reader).Commands(context.Background(), tt.raw, tt.full)
 			if err == nil {
 				t.Fatal("Commands() error = nil, want non-nil")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Commands() error = %q, want containing %q", err, tt.want)
 			}
 		})
 	}

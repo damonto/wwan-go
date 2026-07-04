@@ -61,6 +61,7 @@ const (
 	// CAT/CAT2 service commands
 	MessageCATSetEventReport       MessageID = 0x0001
 	MessageCATEventReport          MessageID = 0x0001
+	MessageCATGetServiceState      MessageID = 0x0020
 	MessageCATSendTerminalResponse MessageID = 0x0021
 	MessageSendEnvelope            MessageID = 0x0022
 	MessageCATSendEnvelope         MessageID = 0x0022
