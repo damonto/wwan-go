@@ -268,12 +268,6 @@ func TestBaudRateOrDefault(t *testing.T) {
 	}
 }
 
-func canceledContext() context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	return ctx
-}
-
 func TestRunKeepsBufferedDataAcrossCalls(t *testing.T) {
 	port := &scriptPort{readData: "\r\nAT+CSIM=?\r\n\r\nOK\r\nAT+CSIM=4,\"00\"\r\n+CSIM: 4,\"9000\"\r\nOK\r\n"}
 	reader := &Reader{

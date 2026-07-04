@@ -34,7 +34,7 @@ func (r *Reader) ensureSlotActivated(ctx context.Context) error {
 
 func (r *Reader) currentActivatedSlot(ctx context.Context) (uint32, error) {
 	request := DeviceSlotMappingsRequest{TransactionID: r.nextTransactionID()}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return 0, err
 	}
 	if len(request.Response.SlotMappings) == 0 {
@@ -48,7 +48,7 @@ func (r *Reader) activateSlot(ctx context.Context, slot uint32) error {
 		TransactionID: r.nextTransactionID(),
 		SlotMappings:  []SlotMapping{{Slot: slot}},
 	}
-	return request.Request().Transmit(ctx, r.conn)
+	return r.transmit(ctx, request.Request())
 }
 
 func (r *Reader) waitForSlotReady(ctx context.Context) error {
@@ -59,7 +59,7 @@ func (r *Reader) waitForSlotReady(ctx context.Context) error {
 	var sawReadyState bool
 	for {
 		request := SubscriberReadyStatusRequest{TransactionID: r.nextTransactionID()}
-		err := request.Request().Transmit(ctx, r.conn)
+		err := r.transmit(ctx, request.Request())
 		if err == nil {
 			sawReadyState = true
 			lastReadyState = request.Response.ReadyState

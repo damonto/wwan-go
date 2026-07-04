@@ -6,7 +6,7 @@ The repository separates protocol packages from USIM business logic:
 
 - Top-level protocol packages implement concrete primitives such as AT `+CSIM`, PC/SC CCID APDU transport, MBIM UICC low-level access, QMI UIM, and QRTR QMI transport.
 - `apdu` implements APDU request/response encoding.
-- `usim` adapts readers into higher-level USIM and ISIM operations such as loading ICCID/IMSI identities, AKA, EAP-AKA, and SMS-PP download.
+- `usim` adapts readers into higher-level USIM and ISIM operations such as loading ICCID/IMSI identities, AKA, EAP-AKA, SMS-PP download, and SIM Toolkit.
 
 The protocol readers do not depend on `usim`. Use `usim` only when you want card-level business behavior on top of a reader.
 
@@ -22,6 +22,7 @@ Implemented reader families:
 - QMI direct and proxy transports
 - QRTR direct Linux socket transport
 - QCOM UIM primitives over QMI or QRTR
+- SIM Toolkit over APDU, QMI CAT raw indications, and MBIM STK PAC
 
 The implementation is pure Go. It does not use cgo and does not link against `libqmi`, `libmbim`, or `libqrtr-glib`.
 
@@ -55,6 +56,7 @@ usim                         USIM/ISIM card loading and high-level operations
 usim/card                    Card-facing interfaces consumed by usim
 usim/command                 APDU command helpers used by usim
 usim/simfile                 SIM file parsers
+usim/stk                     SIM Toolkit commands, envelopes, terminal profile, and BIP
 usim/tlv                     BER-TLV helpers
 ```
 
@@ -231,12 +233,11 @@ func main() {
 	}
 	defer reader.Close()
 
-	if err := reader.PowerOffSIM(ctx, 1); err != nil {
+	status, err := reader.CardStatus(ctx)
+	if err != nil {
 		log.Fatal(err)
 	}
-	if err := reader.PowerOnSIM(ctx, uim.PowerOnSIMRequest{Slot: 1}); err != nil {
-		log.Fatal(err)
-	}
+	log.Printf("ready=%v", status.Ready())
 }
 ```
 
@@ -355,6 +356,67 @@ Once loaded, `*usim.Card` exposes identity and authentication helpers:
 result, err := card.AKA(ctx, rand, autn)
 result, err := card.EAPAKA(ctx, rand, autn)
 ```
+
+## SIM Toolkit
+
+STK hangs off the loaded card. The transport can be APDU (`usim.Reader` over AT or CCID), QCOM UIM, or MBIM; application code uses the same `card.STK()` entry point.
+
+STK command and response types live in `github.com/damonto/uicc-go/usim/stk`:
+
+```go
+transport, err := qmi.Open(ctx, qmi.WithProxy("/dev/cdc-wdm0"))
+if err != nil {
+	return err
+}
+uimReader, err := uim.New(ctx, transport, uim.WithSlot(1))
+if err != nil {
+	return err
+}
+reader, err := usim.NewQCOM(uimReader)
+if err != nil {
+	return err
+}
+card, err := usim.New(ctx, reader)
+if err != nil {
+	return err
+}
+defer card.Close()
+
+toolkit, err := card.STK()
+if err != nil {
+	return err
+}
+
+return toolkit.Run(ctx, usim.STKCallbacks{
+	DisplayText: func(ctx context.Context, cmd stk.DisplayTextCommand) (stk.TerminalResponse, error) {
+		log.Print(cmd.Text.String)
+		return stk.OK(), nil
+	},
+	SetupMenu: func(ctx context.Context, cmd stk.SetupMenuCommand) (stk.TerminalResponse, error) {
+		for _, item := range cmd.Items {
+			log.Printf("%d %s", item.Identifier, item.Text.String)
+		}
+		return stk.OK(), nil
+	},
+})
+```
+
+The terminal profile is derived from the callbacks. Missing callbacks are reported to the card as unsupported terminal capabilities; ordinary callback errors are converted to a best-effort terminal response before the error is returned.
+
+Menu selection and other envelopes are sent through the same STK instance:
+
+```go
+_, err = toolkit.SendEnvelope(ctx, stk.MenuSelection(itemID, false))
+```
+
+Bearer Independent Protocol is built in for TCP and UDP client channels. The STK runtime opens channels, sends and receives data, reports channel status, and closes active channels when the runtime exits. Application callbacks only need to handle user-visible behavior such as text, menu, SMS, calls, and browser launches.
+
+Transport notes:
+
+- APDU transports use `TERMINAL PROFILE`, `STATUS`, `FETCH`, `TERMINAL RESPONSE`, and `ENVELOPE`. Polling is used when the reader has no proactive indication path.
+- QCOM uses CAT/CAT2 raw proactive-command indications and sends raw terminal responses. The high-level `usim.QCOM` adapter registers event reports for the active run and does not change persistent modem CAT configuration.
+- If an operator explicitly calls QMI CAT `SetConfiguration` with a custom terminal profile, `GetConfiguration` can confirm the modem setting immediately, but the UICC may not see changed terminal-profile bits until the next UICC initialization. Some cards support additional terminal profile after activation; many real deployments still require an explicit SIM power cycle. The library does not power-cycle SIMs implicitly.
+- MBIM uses STK PAC, terminal response, and envelope CIDs. The host PAC profile is cleared when `Run` exits.
 
 ## Testing
 

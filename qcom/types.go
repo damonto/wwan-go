@@ -59,7 +59,15 @@ const (
 	MessageAuthenticate              MessageID = 0x0034
 
 	// CAT/CAT2 service commands
-	MessageSendEnvelope MessageID = 0x0022
+	MessageCATSetEventReport       MessageID = 0x0001
+	MessageCATEventReport          MessageID = 0x0001
+	MessageCATSendTerminalResponse MessageID = 0x0021
+	MessageSendEnvelope            MessageID = 0x0022
+	MessageCATSendEnvelope         MessageID = 0x0022
+	MessageCATEventConfirmation    MessageID = 0x0026
+	MessageCATGetTerminalProfile   MessageID = 0x002C
+	MessageCATSetConfiguration     MessageID = 0x002D
+	MessageCATGetConfiguration     MessageID = 0x002E
 )
 
 // QMIResult represents the result code in QMI responses.

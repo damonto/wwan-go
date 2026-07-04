@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"slices"
 )
 
 var (
@@ -17,6 +18,24 @@ type Item struct {
 }
 
 type Items []Item
+
+func New(tag byte, value []byte) Item {
+	return Item{Tag: tag, Value: slices.Clone(value)}
+}
+
+func NewComprehension(tag byte, value []byte) Item {
+	item := New(tag&0x7f, value)
+	item.Tag |= 0x80
+	return item
+}
+
+func (item Item) ComprehensionTag() byte {
+	return item.Tag & 0x7f
+}
+
+func (item Item) ComprehensionRequired() bool {
+	return item.Tag&0x80 != 0
+}
 
 func (item Item) MarshalBinary() ([]byte, error) {
 	var buf bytes.Buffer
@@ -99,6 +118,76 @@ func (items *Items) ReadFrom(r io.Reader) (int64, error) {
 	return int64(len(data)), items.UnmarshalBinary(data)
 }
 
+func (items Items) Find(tag byte) (Item, bool) {
+	tag &= 0x7f
+	for _, item := range items {
+		if item.ComprehensionTag() == tag {
+			return CloneItem(item), true
+		}
+	}
+	return Item{}, false
+}
+
+func (items Items) All(tag byte) Items {
+	tag &= 0x7f
+	out := make(Items, 0)
+	for _, item := range items {
+		if item.ComprehensionTag() == tag {
+			out = append(out, CloneItem(item))
+		}
+	}
+	return out
+}
+
+func WrapBER(tag byte, value []byte) ([]byte, error) {
+	length, err := marshalLength(len(value))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, 1+len(length)+len(value))
+	out = append(out, tag)
+	out = append(out, length...)
+	out = append(out, value...)
+	return out, nil
+}
+
+func UnwrapBER(data []byte) (byte, []byte, error) {
+	if len(data) < 2 {
+		return 0, nil, ErrMalformed
+	}
+	length, size, err := decodeLength(data[1:])
+	if err != nil {
+		return 0, nil, err
+	}
+	offset := 1 + size
+	if len(data[offset:]) < length {
+		return 0, nil, ErrMalformed
+	}
+	if len(data) != offset+length {
+		return 0, nil, ErrMalformed
+	}
+	return data[0], slices.Clone(data[offset : offset+length]), nil
+}
+
+func Consume(data []byte) (Item, int, error) {
+	return consume(data)
+}
+
+func CloneItem(item Item) Item {
+	return Item{Tag: item.Tag, Value: slices.Clone(item.Value)}
+}
+
+func CloneItems(items Items) Items {
+	if items == nil {
+		return nil
+	}
+	out := make(Items, len(items))
+	for i, item := range items {
+		out[i] = CloneItem(item)
+	}
+	return out
+}
+
 func marshalLength(length int) ([]byte, error) {
 	switch {
 	case length < 0x80:
@@ -129,7 +218,7 @@ func consume(data []byte) (Item, int, error) {
 
 	return Item{
 		Tag:   data[0],
-		Value: append([]byte(nil), data[offset:offset+length]...),
+		Value: slices.Clone(data[offset : offset+length]),
 	}, offset + length, nil
 }
 

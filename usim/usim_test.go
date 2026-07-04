@@ -1,14 +1,18 @@
 package usim
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/uicc-go/usim/command"
+	"github.com/damonto/uicc-go/usim/stk"
+	"github.com/damonto/uicc-go/usim/tlv"
 )
 
 type apduScriptTransmitter struct {
@@ -265,5 +269,132 @@ func (t *closingTransmitter) Transmit(context.Context, []byte) ([]byte, error) {
 
 func (t *closingTransmitter) Close() error {
 	t.closed = true
+	return nil
+}
+
+func TestReaderSTKFetchesPendingCommand(t *testing.T) {
+	raw := proactive(t,
+		tlv.NewComprehension(0x01, []byte{0x01, byte(stk.CommandDisplayText), 0x00}),
+		tlv.NewComprehension(0x02, []byte{byte(stk.DeviceUICC), byte(stk.DeviceDisplay)}),
+		tlv.NewComprehension(0x0D, []byte{0x04, 'H', 'i'}),
+	)
+	tx := &fakeAPDUTransmitter{
+		t: t,
+		calls: []apduCall{
+			{want: []byte{0x80, 0x10, 0x00, 0x00, 0x01, 0x01}, resp: []byte{0x90, 0x00}},
+			{want: []byte{0x80, 0xF2, 0x00, 0x00, 0x00}, resp: []byte{0x91, byte(len(raw))}},
+			{want: []byte{0x80, 0x12, 0x00, 0x00, byte(len(raw))}, resp: append(append([]byte(nil), raw...), 0x90, 0x00)},
+		},
+	}
+	reader := newTestSTKReader(t, tx)
+	reader.stkPollInterval = time.Hour
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	commands, err := reader.Commands(ctx, stk.Profile{Data: []byte{0x01}})
+	if err != nil {
+		t.Fatalf("Commands() error = %v", err)
+	}
+
+	select {
+	case got := <-commands:
+		if got.Command.CommandDetails().Type != stk.CommandDisplayText {
+			t.Fatalf("command type = 0x%02X, want DisplayText", got.Command.CommandDetails().Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for command")
+	}
+}
+
+func TestReaderSTKTerminalResponseAPDU(t *testing.T) {
+	tx := &fakeAPDUTransmitter{
+		t: t,
+		calls: []apduCall{{
+			want: []byte{0x80, 0x14, 0x00, 0x00, 0x03, 0x81, 0x01, 0x00},
+			resp: []byte{0x90, 0x00},
+		}},
+	}
+	reader := newTestSTKReader(t, tx)
+	if err := reader.TerminalResponse(context.Background(), 0, []byte{0x81, 0x01, 0x00}); err != nil {
+		t.Fatalf("TerminalResponse() error = %v", err)
+	}
+}
+
+func TestReaderSTKExtendedTerminalResponseAPDU(t *testing.T) {
+	response := bytes.Repeat([]byte{0xAA}, 0x100)
+	want := []byte{0x80, 0x14, 0x00, 0x00, 0x00, 0x01, 0x00}
+	want = append(want, response...)
+	tx := &fakeAPDUTransmitter{
+		t: t,
+		calls: []apduCall{{
+			want: want,
+			resp: []byte{0x90, 0x00},
+		}},
+	}
+	reader := newTestSTKReader(t, tx)
+	if err := reader.TerminalResponse(context.Background(), 0, response); err != nil {
+		t.Fatalf("TerminalResponse() error = %v", err)
+	}
+}
+
+func TestReaderSTKEnvelopeAPDU(t *testing.T) {
+	envelope, err := stk.MenuSelection(0x02, false).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	want := []byte{0x80, 0xC2, 0x00, 0x00, byte(len(envelope))}
+	want = append(want, envelope...)
+	want = append(want, 0x00)
+	tx := &fakeAPDUTransmitter{
+		t: t,
+		calls: []apduCall{{
+			want: want,
+			resp: []byte{0x90, 0x00},
+		}},
+	}
+	reader := newTestSTKReader(t, tx)
+	resp, err := reader.Envelope(context.Background(), envelope)
+	if err != nil {
+		t.Fatalf("Envelope() error = %v", err)
+	}
+	if !resp.OK() {
+		t.Fatalf("Envelope() response = %02X%02X, want 9000", resp.SW1, resp.SW2)
+	}
+}
+
+func newTestSTKReader(t *testing.T, tx *fakeAPDUTransmitter) *Reader {
+	t.Helper()
+	r, err := NewReader(tx)
+	if err != nil {
+		t.Fatalf("NewReader() error = %v", err)
+	}
+	return r
+}
+
+type apduCall struct {
+	want []byte
+	resp []byte
+}
+
+type fakeAPDUTransmitter struct {
+	t     *testing.T
+	calls []apduCall
+	idx   int
+}
+
+func (t *fakeAPDUTransmitter) Transmit(_ context.Context, req []byte) ([]byte, error) {
+	t.t.Helper()
+	if t.idx >= len(t.calls) {
+		t.t.Fatalf("Transmit() unexpected request % X", req)
+	}
+	call := t.calls[t.idx]
+	t.idx++
+	if !bytes.Equal(req, call.want) {
+		t.t.Fatalf("Transmit() request = % X, want % X", req, call.want)
+	}
+	return append([]byte(nil), call.resp...), nil
+}
+
+func (t *fakeAPDUTransmitter) Close() error {
 	return nil
 }

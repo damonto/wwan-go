@@ -150,15 +150,8 @@ func (r *Request) readConn(ctx context.Context, conn Conn) (int, error) {
 			}
 		}
 
-		response := CommandResponse{}
-		err = response.UnmarshalBinary(buf)
-		if err != nil {
-			return 0, err
-		}
-		if r.Response != nil && response.Status == StatusNone {
-			if err := r.Response.UnmarshalBinary(response.ResponseBuffer); err != nil {
-				return 0, err
-			}
+		if err := r.unmarshalResponse(buf); err != nil {
+			return len(buf), err
 		}
 		return len(buf), nil
 	}
@@ -221,6 +214,41 @@ func responseMessageType(requestType MessageType) (MessageType, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func (r *Request) unmarshalResponse(data []byte) error {
+	var response CommandResponse
+	err := response.UnmarshalBinary(data)
+	if err != nil {
+		ok, responseErr := unmarshalStatusResponse(err, response.ResponseBuffer, r.Response)
+		if responseErr != nil {
+			return responseErr
+		}
+		if !ok {
+			return err
+		}
+		return err
+	}
+	if r.Response != nil && response.Status == StatusNone {
+		if err := r.Response.UnmarshalBinary(response.ResponseBuffer); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func unmarshalStatusResponse(err error, data []byte, response encoding.BinaryUnmarshaler) (bool, error) {
+	if response == nil {
+		return false, nil
+	}
+	var status Status
+	if !errors.As(err, &status) || status != StatusAuthSyncFailure {
+		return false, nil
+	}
+	if err := response.UnmarshalBinary(data); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 func requestDeadline(ctx context.Context, timeout time.Duration) (time.Time, bool) {
@@ -314,6 +342,18 @@ type CommandResponse struct {
 	Response        encoding.BinaryUnmarshaler
 }
 
+type Indication struct {
+	MessageType       MessageType
+	MessageLength     uint32
+	TransactionID     uint32
+	FragmentTotal     uint32
+	FragmentCurrent   uint32
+	ServiceID         [16]byte
+	CommandID         uint32
+	InformationLength uint32
+	InformationBuffer []byte
+}
+
 type commandDoneHeader struct {
 	ServiceID [16]byte
 	CommandID uint32
@@ -384,9 +424,6 @@ func (r *CommandResponse) unmarshalCommandDone(data []byte) error {
 	copy(r.ServiceID[:], data[20:36])
 	r.CommandID = binary.LittleEndian.Uint32(data[36:40])
 	r.Status = Status(binary.LittleEndian.Uint32(data[40:44]))
-	if r.Status != StatusNone {
-		return r.Status
-	}
 	if r.FragmentTotal != 1 || r.FragmentCurrent != 0 {
 		return fmt.Errorf("parsing MBIM command response: unsupported fragment %d of %d", r.FragmentCurrent, r.FragmentTotal)
 	}
@@ -395,6 +432,9 @@ func (r *CommandResponse) unmarshalCommandDone(data []byte) error {
 		return fmt.Errorf("parsing MBIM command response: response length %d exceeds remaining %d", r.ResponseLength, len(data)-48)
 	}
 	r.ResponseBuffer = data[48 : 48+r.ResponseLength]
+	if r.Status != StatusNone {
+		return r.Status
+	}
 	if r.Response == nil {
 		return nil
 	}
@@ -406,4 +446,35 @@ func (r *CommandResponse) unmarshalFunctionError(data []byte) error {
 		return fmt.Errorf("parsing MBIM function error: length %d, want 16", len(data))
 	}
 	return ProtocolError(binary.LittleEndian.Uint32(data[12:16]))
+}
+
+func (r *Indication) UnmarshalBinary(data []byte) error {
+	if len(data) < 44 {
+		return fmt.Errorf("parsing MBIM indication: length %d is too short", len(data))
+	}
+	r.MessageType = MessageType(binary.LittleEndian.Uint32(data[:4]))
+	if r.MessageType != MessageTypeIndicateStatus {
+		return fmt.Errorf("parsing MBIM indication: unexpected message type %#x", r.MessageType)
+	}
+	r.MessageLength = binary.LittleEndian.Uint32(data[4:8])
+	r.TransactionID = binary.LittleEndian.Uint32(data[8:12])
+	if r.MessageLength != uint32(len(data)) {
+		return fmt.Errorf("parsing MBIM indication: header length %d does not match actual length %d", r.MessageLength, len(data))
+	}
+	if r.TransactionID != 0 {
+		return fmt.Errorf("parsing MBIM indication: transaction ID %d, want 0", r.TransactionID)
+	}
+	r.FragmentTotal = binary.LittleEndian.Uint32(data[12:16])
+	r.FragmentCurrent = binary.LittleEndian.Uint32(data[16:20])
+	if r.FragmentTotal != 1 || r.FragmentCurrent != 0 {
+		return fmt.Errorf("parsing MBIM indication: unsupported fragment %d of %d", r.FragmentCurrent, r.FragmentTotal)
+	}
+	copy(r.ServiceID[:], data[20:36])
+	r.CommandID = binary.LittleEndian.Uint32(data[36:40])
+	r.InformationLength = binary.LittleEndian.Uint32(data[40:44])
+	if r.InformationLength > uint32(len(data)-44) {
+		return fmt.Errorf("parsing MBIM indication: information length %d exceeds remaining %d", r.InformationLength, len(data)-44)
+	}
+	r.InformationBuffer = data[44 : 44+r.InformationLength]
+	return nil
 }

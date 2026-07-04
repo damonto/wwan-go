@@ -12,6 +12,7 @@ func TestProtocolTypesImplementStandardInterfaces(t *testing.T) {
 	var _ encoding.BinaryMarshaler = (*CloseRequest)(nil)
 
 	var _ encoding.BinaryUnmarshaler = (*CommandResponse)(nil)
+	var _ encoding.BinaryUnmarshaler = (*Indication)(nil)
 	var _ encoding.BinaryUnmarshaler = (*ProxyConfigResponse)(nil)
 	var _ encoding.BinaryUnmarshaler = (*OpenDeviceResponse)(nil)
 	var _ encoding.BinaryUnmarshaler = (*CloseResponse)(nil)
@@ -23,6 +24,10 @@ func TestProtocolTypesImplementStandardInterfaces(t *testing.T) {
 	var _ encoding.BinaryUnmarshaler = (*ReadBinaryResponse)(nil)
 	var _ encoding.BinaryUnmarshaler = (*ReadRecordResponse)(nil)
 	var _ encoding.BinaryUnmarshaler = (*AuthAKAResponse)(nil)
+	var _ encoding.BinaryUnmarshaler = (*STKPACInfo)(nil)
+	var _ encoding.BinaryUnmarshaler = (*STKPAC)(nil)
+	var _ encoding.BinaryUnmarshaler = (*STKTerminalResponseInfo)(nil)
+	var _ encoding.BinaryUnmarshaler = (*STKEnvelopeInfo)(nil)
 	var _ encoding.BinaryUnmarshaler = (*UiccATRResponse)(nil)
 	var _ encoding.BinaryUnmarshaler = (*OpenChannelResponse)(nil)
 	var _ encoding.BinaryUnmarshaler = (*CloseChannelResponse)(nil)

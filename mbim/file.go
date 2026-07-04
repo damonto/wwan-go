@@ -14,19 +14,12 @@ func (r *Reader) FileAttributes(ctx context.Context, file FileRef) (FileAttribut
 		return FileAttributes{}, errors.New("reading MBIM file attributes: path is empty")
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
-		return FileAttributes{}, errors.New("reading MBIM file attributes: reader is closed")
-	}
-
 	request := FileStatusRequest{
 		TransactionID: r.nextTransactionID(),
 		ApplicationID: slices.Clone(file.AID),
 		FilePath:      filePath(file),
 	}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return FileAttributes{}, fmt.Errorf("reading MBIM file attributes %X: %w", file.Path, err)
 	}
 	if err := cardStatusError(request.Response.StatusWord1, request.Response.StatusWord2); err != nil {
@@ -58,13 +51,6 @@ func (r *Reader) ReadTransparent(ctx context.Context, req TransparentRead) ([]by
 		return nil, nil
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
-		return nil, errors.New("reading MBIM transparent file: reader is closed")
-	}
-
 	request := ReadBinaryRequest{
 		TransactionID: r.nextTransactionID(),
 		ApplicationID: slices.Clone(req.File.AID),
@@ -72,7 +58,7 @@ func (r *Reader) ReadTransparent(ctx context.Context, req TransparentRead) ([]by
 		Offset:        uint32(req.Offset),
 		Size:          uint32(length),
 	}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return nil, fmt.Errorf("reading MBIM transparent file %X: %w", req.File.Path, err)
 	}
 	if err := cardStatusError(request.Response.StatusWord1, request.Response.StatusWord2); err != nil {
@@ -97,20 +83,13 @@ func (r *Reader) ReadRecord(ctx context.Context, req RecordRead) ([]byte, error)
 		return nil, errors.New("reading MBIM record file: unexpected file structure")
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
-		return nil, errors.New("reading MBIM record file: reader is closed")
-	}
-
 	request := ReadRecordRequest{
 		TransactionID: r.nextTransactionID(),
 		ApplicationID: slices.Clone(req.File.AID),
 		FilePath:      filePath(req.File),
 		Record:        uint32(req.Record),
 	}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return nil, fmt.Errorf("reading MBIM record file %X record %d: %w", req.File.Path, req.Record, err)
 	}
 	if err := cardStatusError(request.Response.StatusWord1, request.Response.StatusWord2); err != nil {

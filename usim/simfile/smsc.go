@@ -40,15 +40,14 @@ func (smsc *SMSC) UnmarshalBinary(data []byte) error {
 		return nil
 	}
 
-	number, err := decodeSwappedBCD(sca[2:length+1], false)
-	if err != nil {
+	var address Address
+	if err := address.UnmarshalBinary(sca[1 : length+1]); err != nil {
 		return err
 	}
-	if number == "" {
-		*smsc = ""
+	if address == "" {
 		return nil
 	}
 
-	*smsc = SMSC("+" + number)
+	*smsc = SMSC(address)
 	return nil
 }

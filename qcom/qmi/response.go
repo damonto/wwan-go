@@ -11,6 +11,11 @@ import (
 	"github.com/damonto/uicc-go/qcom/tlv"
 )
 
+var (
+	errUnexpectedControlMessageType = errors.New("unexpected control QMI message type")
+	errUnexpectedServiceMessageType = errors.New("unexpected service QMI message type")
+)
+
 type Response struct {
 	QMUXHeader
 	TransactionID uint16
@@ -79,10 +84,10 @@ func (r *Response) UnmarshalBinary(data []byte) error {
 
 	if r.QMUXHeader.ServiceType == qcom.ServiceControl {
 		if r.MessageType != 0x01 {
-			return fmt.Errorf("parsing QMI message: unexpected control message type 0x%02X", r.MessageType)
+			return fmt.Errorf("parsing QMI message: %w: 0x%02X", errUnexpectedControlMessageType, r.MessageType)
 		}
 	} else if r.MessageType != qcom.MessageTypeResponse && r.MessageType != qcom.MessageTypeIndication {
-		return fmt.Errorf("parsing QMI message: unexpected message type 0x%02X", r.MessageType)
+		return fmt.Errorf("parsing QMI message: %w: 0x%02X", errUnexpectedServiceMessageType, r.MessageType)
 	}
 	if got, want := reader.Len(), int(r.MessageLength); got != want {
 		return fmt.Errorf("parsing QMI message: QMI TLV length mismatch: got %d bytes, header declares %d", got, want)

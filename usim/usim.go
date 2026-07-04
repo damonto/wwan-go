@@ -7,11 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
+	"time"
 
 	"github.com/damonto/uicc-go/apdu"
 	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/uicc-go/usim/command"
 	"github.com/damonto/uicc-go/usim/simfile"
+	"github.com/damonto/uicc-go/usim/stk"
 )
 
 var (
@@ -20,7 +23,11 @@ var (
 )
 
 type Reader struct {
-	tx usimcard.Transmitter
+	tx              usimcard.Transmitter
+	stkPollInterval time.Duration
+	stkMu           sync.Mutex
+	stkOut          chan<- STKSession
+	stkPending      []STKSession
 
 	selected selection
 }
@@ -31,11 +38,15 @@ type selection struct {
 	info  simfile.FCI
 }
 
+var _ stkTransport = (*Reader)(nil)
+
+const defaultSTKPollInterval = 5 * time.Second
+
 func NewReader(tx usimcard.Transmitter) (*Reader, error) {
 	if tx == nil {
 		return nil, errors.New("creating APDU USIM reader: transmitter is nil")
 	}
-	return &Reader{tx: tx}, nil
+	return &Reader{tx: tx, stkPollInterval: defaultSTKPollInterval}, nil
 }
 
 func (r *Reader) ListApplications(ctx context.Context) ([]usimcard.Application, error) {
@@ -156,6 +167,186 @@ func (r *Reader) SMSPPDownload(ctx context.Context, req usimcard.SMSPPDownloadRe
 
 func (r *Reader) Close() error {
 	return r.tx.Close()
+}
+
+func (r *Reader) STK() (*STK, error) {
+	if r == nil || r.tx == nil {
+		return nil, errors.New("creating USIM STK: reader is nil")
+	}
+	return newSTK(r)
+}
+
+func (r *Reader) applyProfile(ctx context.Context, profile stk.Profile) error {
+	if r == nil || r.tx == nil {
+		return errors.New("applying STK terminal profile: APDU transmitter is nil")
+	}
+	req, err := (command.TerminalProfile{Data: profile.Bytes()}).MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("building STK terminal profile APDU: %w", err)
+	}
+	resp, err := r.transmitSTKAPDU(ctx, req)
+	if err != nil {
+		return fmt.Errorf("applying STK terminal profile: %w", err)
+	}
+	return r.acceptSTKStatus(ctx, apdu.Response(resp))
+}
+
+func (r *Reader) Commands(ctx context.Context, profile stk.Profile) (<-chan STKSession, error) {
+	if r == nil || r.tx == nil {
+		return nil, errors.New("watching STK APDU commands: APDU transmitter is nil")
+	}
+	if err := r.applyProfile(ctx, profile); err != nil {
+		return nil, fmt.Errorf("watching STK APDU commands: %w", err)
+	}
+	out := make(chan STKSession, 8)
+	r.stkMu.Lock()
+	r.stkOut = out
+	r.stkMu.Unlock()
+
+	go func() {
+		defer close(out)
+		defer func() {
+			r.stkMu.Lock()
+			if r.stkOut == out {
+				r.stkOut = nil
+			}
+			r.stkMu.Unlock()
+		}()
+
+		r.flushPendingSTK(ctx, out)
+		r.pollSTK(ctx)
+		interval := r.stkPollInterval
+		if interval <= 0 {
+			interval = defaultSTKPollInterval
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.pollSTK(ctx)
+			}
+		}
+	}()
+	return out, nil
+}
+
+func (r *Reader) TerminalResponse(ctx context.Context, _ uint32, data []byte) error {
+	req, err := (command.TerminalResponse{Data: data}).MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("building STK terminal response APDU: %w", err)
+	}
+	resp, err := r.transmitSTKAPDU(ctx, req)
+	if err != nil {
+		return fmt.Errorf("sending STK terminal response APDU: %w", err)
+	}
+	return r.acceptSTKStatus(ctx, apdu.Response(resp))
+}
+
+func (r *Reader) Respond(ctx context.Context, session STKSession, response stk.TerminalResponse) error {
+	data, err := response.MarshalFor(session.Command)
+	if err != nil {
+		return err
+	}
+	return r.TerminalResponse(ctx, session.Ref, data)
+}
+
+func (r *Reader) Envelope(ctx context.Context, envelope []byte) (stk.EnvelopeResponse, error) {
+	req, err := (command.Envelope{Data: envelope}).MarshalBinary()
+	if err != nil {
+		return stk.EnvelopeResponse{}, err
+	}
+	resp, err := r.transmitSTKAPDU(ctx, req)
+	if err != nil {
+		return stk.EnvelopeResponse{}, fmt.Errorf("sending STK envelope APDU: %w", err)
+	}
+	response := apdu.Response(resp)
+	if response.SW1() == 0x91 {
+		if err := r.fetchSTK(ctx, response.SW2()); err != nil {
+			return stk.EnvelopeResponse{}, err
+		}
+	}
+	return stk.EnvelopeResponse{SW1: response.SW1(), SW2: response.SW2(), Data: response.Data()}, nil
+}
+
+func (r *Reader) pollSTK(ctx context.Context) {
+	req, err := (command.Status{}).MarshalBinary()
+	if err != nil {
+		return
+	}
+	resp, err := r.transmitSTKAPDU(ctx, req)
+	if err != nil {
+		return
+	}
+	_ = r.acceptSTKStatus(ctx, apdu.Response(resp))
+}
+
+func (r *Reader) acceptSTKStatus(ctx context.Context, resp apdu.Response) error {
+	switch {
+	case resp.OK():
+		return nil
+	case resp.SW1() == 0x91:
+		return r.fetchSTK(ctx, resp.SW2())
+	default:
+		return apdu.StatusError{SW: resp.SW()}
+	}
+}
+
+func (r *Reader) fetchSTK(ctx context.Context, length byte) error {
+	req, err := (command.Fetch{Length: length}).MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("building STK fetch APDU: %w", err)
+	}
+	resp, err := r.transmitSTKAPDU(ctx, req)
+	if err != nil {
+		return fmt.Errorf("fetching STK command: %w", err)
+	}
+	raw := apdu.Response(resp)
+	if !raw.OK() {
+		return apdu.StatusError{SW: raw.SW()}
+	}
+	var proactive stk.ProactiveCommand
+	if err := proactive.UnmarshalBinary(raw.Data()); err != nil {
+		return err
+	}
+
+	r.stkMu.Lock()
+	out := r.stkOut
+	if out == nil {
+		r.stkPending = append(r.stkPending, STKSession{Command: proactive.Command})
+		r.stkMu.Unlock()
+		return nil
+	}
+	r.stkMu.Unlock()
+	select {
+	case out <- STKSession{Command: proactive.Command}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
+}
+
+func (r *Reader) transmitSTKAPDU(ctx context.Context, req []byte) ([]byte, error) {
+	r.stkMu.Lock()
+	defer r.stkMu.Unlock()
+	return r.tx.Transmit(ctx, req)
+}
+
+func (r *Reader) flushPendingSTK(ctx context.Context, out chan<- STKSession) {
+	r.stkMu.Lock()
+	pending := slices.Clone(r.stkPending)
+	r.stkPending = nil
+	r.stkMu.Unlock()
+
+	for _, command := range pending {
+		select {
+		case out <- command:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (r *Reader) selectFile(ctx context.Context, file usimcard.FileRef) (simfile.FCI, error) {

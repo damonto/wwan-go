@@ -59,7 +59,7 @@ func New(conn Conn) *Transport {
 
 func (t *Transport) Close() error {
 	err := t.conn.Close()
-	t.failAll(errors.New("QMI transport is closed"))
+	t.fail(errors.New("QMI transport is closed"))
 	return err
 }
 
@@ -214,13 +214,16 @@ func (t *Transport) readLoop() {
 	for {
 		frame, err := ReadFrame(t.conn)
 		if err != nil {
-			t.failAll(fmt.Errorf("reading QMI message: %w", err))
+			t.fail(fmt.Errorf("reading QMI message: %w", err))
 			return
 		}
 
 		var wire Response
 		if err := wire.UnmarshalBinary(frame); err != nil {
-			t.failAll(err)
+			if errors.Is(err, errUnexpectedServiceMessageType) {
+				continue
+			}
+			t.fail(fmt.Errorf("parsing QMI frame: %w", err))
 			return
 		}
 		switch wire.MessageType {
@@ -272,7 +275,7 @@ func trySendIndication(ch chan qcom.Indication, ind qcom.Indication) {
 	}
 }
 
-func (t *Transport) failAll(err error) {
+func (t *Transport) fail(err error) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()

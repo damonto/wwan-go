@@ -11,6 +11,7 @@ import (
 	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/uicc-go/usim/command"
 	"github.com/damonto/uicc-go/usim/simfile"
+	"github.com/damonto/uicc-go/usim/stk"
 )
 
 var (
@@ -167,8 +168,108 @@ func (r *QCOM) SMSPPDownload(ctx context.Context, req usimcard.SMSPPDownloadRequ
 	}, nil
 }
 
+func (r *QCOM) STK() (*STK, error) {
+	if r == nil || r.reader == nil {
+		return nil, errors.New("creating QCOM STK: reader is nil")
+	}
+	return newSTK(r)
+}
+
+func (r *QCOM) Commands(ctx context.Context, profile stk.Profile) (<-chan STKSession, error) {
+	cat, err := r.qcomCAT()
+	if err != nil {
+		return nil, err
+	}
+	commands, err := cat.Commands(ctx, profile.QMIEventMask(), profile.QMIFullFunctionMask())
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(chan STKSession, 8)
+	go func() {
+		defer close(out)
+		for raw := range commands {
+			var proactive stk.ProactiveCommand
+			if err := proactive.UnmarshalBinary(raw.Data); err != nil {
+				continue
+			}
+			select {
+			case out <- STKSession{Ref: raw.Ref, Command: proactive.Command}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, nil
+}
+
+func (r *QCOM) TerminalResponse(ctx context.Context, ref uint32, response []byte) error {
+	cat, err := r.qcomCAT()
+	if err != nil {
+		return err
+	}
+	return cat.TerminalResponse(ctx, ref, slices.Clone(response))
+}
+
+func (r *QCOM) Respond(ctx context.Context, session STKSession, response stk.TerminalResponse) error {
+	cat, err := r.qcomCAT()
+	if err != nil {
+		return err
+	}
+	if confirmation, ok := qcomEventConfirmation(session.Command, response); ok {
+		return cat.EventConfirmation(ctx, confirmation)
+	}
+	data, err := response.MarshalFor(session.Command)
+	if err != nil {
+		return err
+	}
+	if err := cat.TerminalResponse(ctx, session.Ref, data); err != nil {
+		return fmt.Errorf("sending QCOM STK terminal response: %w", err)
+	}
+	return nil
+}
+
+func (r *QCOM) Envelope(ctx context.Context, envelope []byte) (stk.EnvelopeResponse, error) {
+	cat, err := r.qcomCAT()
+	if err != nil {
+		return stk.EnvelopeResponse{}, err
+	}
+	resp, err := cat.Envelope(ctx, envelope, stk.EnvelopeType(envelope))
+	if err != nil {
+		return stk.EnvelopeResponse{}, err
+	}
+	return stk.EnvelopeResponse{SW1: resp.SW1, SW2: resp.SW2, Data: slices.Clone(resp.Data)}, nil
+}
+
 func (r *QCOM) Close() error {
 	return r.reader.Close()
+}
+
+func (r *QCOM) qcomCAT() (*uim.CAT, error) {
+	if r == nil || r.reader == nil {
+		return nil, errors.New("using QCOM STK: reader is nil")
+	}
+	return uim.NewCAT(r.reader), nil
+}
+
+func qcomEventConfirmation(command stk.Command, response stk.TerminalResponse) (uim.CATEventConfirmation, bool) {
+	confirmed := response.Result < stk.ResultUserTermination
+	notDisplayed := false
+
+	switch cmd := command.(type) {
+	case stk.OpenChannelCommand:
+		return uim.CATEventConfirmation{
+			UserConfirmed: &confirmed,
+			IconDisplayed: &notDisplayed,
+		}, true
+	case stk.CloseChannelCommand, stk.ReceiveDataCommand, stk.SendDataCommand:
+		return uim.CATEventConfirmation{IconDisplayed: &notDisplayed}, true
+	case stk.SimpleCommand:
+		if cmd.Details.Type == stk.CommandRefresh {
+			return uim.CATEventConfirmation{IconDisplayed: &notDisplayed}, true
+		}
+	}
+	return uim.CATEventConfirmation{}, false
 }
 
 func (r *QCOM) fileAttributes(ctx context.Context, file usimcard.FileRef) (uim.FileAttributes, error) {

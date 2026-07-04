@@ -5,7 +5,9 @@ const (
 
 	CIDAuthAKA = 0x00000001
 
-	CIDSTKEnvelope = 0x00000003
+	CIDSTKPAC              = 0x00000001
+	CIDSTKTerminalResponse = 0x00000002
+	CIDSTKEnvelope         = 0x00000003
 
 	CIDUiccATR                = 0x00000001
 	CIDUiccOpenChannel        = 0x00000002

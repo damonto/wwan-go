@@ -853,6 +853,160 @@ func (r *UiccResetResponse) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+const (
+	stkPACHostControlLength  = 32
+	stkPACSupportLength      = 256
+	stkEnvelopeSupportLength = 32
+)
+
+type STKPACQueryRequest struct {
+	TransactionID uint32
+	Response      *STKPACInfo
+}
+
+func (r *STKPACQueryRequest) Request() *Request {
+	r.Response = new(STKPACInfo)
+	return &Request{
+		MessageType:   MessageTypeCommand,
+		TransactionID: r.TransactionID,
+		Command: command(
+			ServiceSTK,
+			CIDSTKPAC,
+			CommandTypeQuery,
+			nil,
+		),
+		Response: r.Response,
+	}
+}
+
+type STKPACSetRequest struct {
+	TransactionID  uint32
+	PacHostControl []byte
+	Response       *STKPACInfo
+}
+
+func (r *STKPACSetRequest) Request() *Request {
+	r.Response = new(STKPACInfo)
+	return &Request{
+		MessageType:   MessageTypeCommand,
+		TransactionID: r.TransactionID,
+		Command: command(
+			ServiceSTK,
+			CIDSTKPAC,
+			CommandTypeSet,
+			r.PacHostControl,
+		),
+		Response: r.Response,
+	}
+}
+
+type STKPACInfo struct {
+	PacSupport [stkPACSupportLength]STKPACProfile
+}
+
+func (r *STKPACInfo) UnmarshalBinary(data []byte) error {
+	if len(data) < stkPACSupportLength {
+		return errors.New("parsing MBIM STK PAC info: payload is truncated")
+	}
+	for i, value := range data[:stkPACSupportLength] {
+		r.PacSupport[i] = STKPACProfile(value)
+	}
+	return nil
+}
+
+type STKPAC struct {
+	Type    STKPACType
+	Command []byte
+}
+
+func (r *STKPAC) UnmarshalBinary(data []byte) error {
+	if len(data) < 4 {
+		return errors.New("parsing MBIM STK PAC: payload is truncated")
+	}
+	r.Type = STKPACType(binary.LittleEndian.Uint32(data[:4]))
+	r.Command = slices.Clone(data[4:])
+	return nil
+}
+
+type STKTerminalResponseRequest struct {
+	TransactionID uint32
+	Data          []byte
+	Response      *STKTerminalResponseInfo
+}
+
+func (r *STKTerminalResponseRequest) Request() *Request {
+	data := binary.LittleEndian.AppendUint32(nil, uint32(len(r.Data)))
+	data = append(data, r.Data...)
+
+	r.Response = new(STKTerminalResponseInfo)
+	return &Request{
+		MessageType:   MessageTypeCommand,
+		TransactionID: r.TransactionID,
+		Command: command(
+			ServiceSTK,
+			CIDSTKTerminalResponse,
+			CommandTypeSet,
+			data,
+		),
+		Response: r.Response,
+	}
+}
+
+type STKTerminalResponseInfo struct {
+	ResultData  []byte
+	StatusWords uint32
+}
+
+func (r *STKTerminalResponseInfo) UnmarshalBinary(data []byte) error {
+	if len(data) < 12 {
+		return errors.New("parsing MBIM STK terminal response: payload is truncated")
+	}
+	result, err := byteArrayRef(data, data, 0)
+	if err != nil {
+		return fmt.Errorf("parsing MBIM STK terminal response data: %w", err)
+	}
+	r.ResultData = result
+	r.StatusWords = binary.LittleEndian.Uint32(data[8:12])
+	return nil
+}
+
+type STKEnvelopeQueryRequest struct {
+	TransactionID uint32
+	Response      *STKEnvelopeInfo
+}
+
+func (r *STKEnvelopeQueryRequest) Request() *Request {
+	r.Response = new(STKEnvelopeInfo)
+	return &Request{
+		MessageType:   MessageTypeCommand,
+		TransactionID: r.TransactionID,
+		Command: command(
+			ServiceSTK,
+			CIDSTKEnvelope,
+			CommandTypeQuery,
+			nil,
+		),
+		Response: r.Response,
+	}
+}
+
+type STKEnvelopeInfo struct {
+	EnvelopeSupport [stkEnvelopeSupportLength]byte
+}
+
+func (r *STKEnvelopeInfo) Supports(tag byte) bool {
+	mask := byte(1 << (tag % 8))
+	return r.EnvelopeSupport[int(tag)/8]&mask != 0
+}
+
+func (r *STKEnvelopeInfo) UnmarshalBinary(data []byte) error {
+	if len(data) < stkEnvelopeSupportLength {
+		return errors.New("parsing MBIM STK envelope info: payload is truncated")
+	}
+	copy(r.EnvelopeSupport[:], data[:stkEnvelopeSupportLength])
+	return nil
+}
+
 type STKEnvelopeRequest struct {
 	TransactionID uint32
 	Data          []byte
@@ -860,9 +1014,6 @@ type STKEnvelopeRequest struct {
 }
 
 func (r *STKEnvelopeRequest) Request() *Request {
-	data := binary.LittleEndian.AppendUint32(nil, uint32(len(r.Data)))
-	data = append(data, r.Data...)
-
 	r.Response = new(STKEnvelopeResponse)
 	return &Request{
 		MessageType:   MessageTypeCommand,
@@ -871,7 +1022,7 @@ func (r *STKEnvelopeRequest) Request() *Request {
 			ServiceSTK,
 			CIDSTKEnvelope,
 			CommandTypeSet,
-			data,
+			r.Data,
 		),
 		Response: r.Response,
 	}

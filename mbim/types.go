@@ -42,6 +42,26 @@ const (
 	CommandTypeSet
 )
 
+type STKPACProfile byte
+
+const (
+	STKPACNotHandledByFunctionCannotBeHandledByHost STKPACProfile = iota
+	STKPACNotHandledByFunctionMayBeHandledByHost
+	STKPACHandledByFunctionOnlyTransparentToHost
+	STKPACHandledByFunctionNotificationToHostPossible
+	STKPACHandledByFunctionNotificationsToHostEnabled
+	STKPACHandledByFunctionCanBeOverriddenByHost
+	STKPACHandledByHostFunctionNotAbleToHandle
+	STKPACHandledByHostFunctionAbleToHandle
+)
+
+type STKPACType uint32
+
+const (
+	STKPACTypeProactiveCommand STKPACType = iota
+	STKPACTypeNotification
+)
+
 type UiccApplicationType uint32
 
 const (

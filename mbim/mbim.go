@@ -19,8 +19,17 @@ type Reader struct {
 	proxy              bool
 	maxControlTransfer int
 
-	mu     sync.Mutex
-	closed bool
+	mu              sync.Mutex
+	writeMu         sync.Mutex
+	closed          bool
+	closing         bool
+	receiverStarted bool
+	receiverErr     error
+	pending         map[uint32]*responseWaiter
+	subs            map[indicationKey]map[chan Indication]struct{}
+	waiters         map[indicationKey][]chan Indication
+	indications     map[indicationKey][]Indication
+	envelopeSupport *STKEnvelopeInfo
 }
 
 type Option func(*config)
@@ -106,6 +115,9 @@ func (r *Reader) connect(ctx context.Context, device string) error {
 	if err := r.openDevice(ctx); err != nil {
 		return err
 	}
+	if err := r.startReceiver(); err != nil {
+		return err
+	}
 	if err := r.ensureSlotActivated(ctx); err != nil {
 		return err
 	}
@@ -141,17 +153,16 @@ func (r *Reader) openDevice(ctx context.Context) error {
 func (r *Reader) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
 	defer cancel()
-	r.mu.Lock()
-	defer r.mu.Unlock()
 
-	if r.closed {
+	if !r.beginClose() {
 		return nil
 	}
-	r.closed = true
 
 	request := CloseRequest{TransactionID: r.nextTransactionID()}
-	err := request.Request().Transmit(ctx, r.conn)
-	return errors.Join(err, r.conn.Close())
+	err := r.transmitClosing(ctx, request.Request())
+	closeErr := r.conn.Close()
+	r.finishClose()
+	return errors.Join(err, closeErr)
 }
 
 func (r *Reader) nextTransactionID() uint32 {

@@ -5,11 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/damonto/uicc-go/mbim"
 	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/uicc-go/usim/command"
 	"github.com/damonto/uicc-go/usim/simfile"
+	"github.com/damonto/uicc-go/usim/stk"
+)
+
+const (
+	mbimSTKCleanupTimeout          = 5 * time.Second
+	mbimSTKPACHostControlLength    = 32
+	mbimSTKQueuedCommandBufferSize = 8
 )
 
 type MBIM struct {
@@ -80,7 +88,9 @@ func (r *MBIM) ReadRecord(ctx context.Context, req usimcard.RecordRead) ([]byte,
 func (r *MBIM) Authenticate3G(ctx context.Context, req usimcard.AuthenticateRequest) ([]byte, error) {
 	resp, err := r.reader.AuthenticateAKA(ctx, req.Rand, req.AUTN)
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, mbim.StatusAuthSyncFailure) || resp == nil {
+			return nil, err
+		}
 	}
 
 	result := command.Authenticate3GResult{Reject: true}
@@ -110,6 +120,104 @@ func (r *MBIM) SMSPPDownload(ctx context.Context, req usimcard.SMSPPDownloadRequ
 	return usimcard.SMSPPDownloadResponse{SW1: 0x90, SW2: 0x00}, nil
 }
 
+func (r *MBIM) STK() (*STK, error) {
+	if r == nil || r.reader == nil {
+		return nil, errors.New("creating MBIM STK: reader is nil")
+	}
+	return newSTK(r)
+}
+
+func (r *MBIM) Commands(ctx context.Context, profile stk.Profile) (<-chan STKSession, error) {
+	if r == nil || r.reader == nil {
+		return nil, errors.New("watching MBIM STK commands: reader is nil")
+	}
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	pacs, err := r.reader.WatchSTKPAC(watchCtx)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("watching MBIM STK commands: %w", err)
+	}
+	if err := r.setSTKPAC(ctx, profile); err != nil {
+		cancel()
+		return nil, fmt.Errorf("watching MBIM STK commands: %w", err)
+	}
+
+	out := make(chan STKSession, mbimSTKQueuedCommandBufferSize)
+	go func() {
+		defer close(out)
+		defer cancel()
+		defer r.clearSTKPAC()
+
+		for pac := range pacs {
+			if pac.Type != mbim.STKPACTypeProactiveCommand {
+				continue
+			}
+			var proactive stk.ProactiveCommand
+			if err := proactive.UnmarshalBinary(pac.Command); err != nil {
+				continue
+			}
+			select {
+			case out <- STKSession{Command: proactive.Command}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, nil
+}
+
+func (r *MBIM) TerminalResponse(ctx context.Context, _ uint32, response []byte) error {
+	if r == nil || r.reader == nil {
+		return errors.New("sending MBIM STK terminal response: reader is nil")
+	}
+	_, err := r.reader.STKTerminalResponse(ctx, response)
+	return err
+}
+
+func (r *MBIM) Respond(ctx context.Context, session STKSession, response stk.TerminalResponse) error {
+	data, err := response.MarshalFor(session.Command)
+	if err != nil {
+		return err
+	}
+	if err := r.TerminalResponse(ctx, session.Ref, data); err != nil {
+		return fmt.Errorf("sending MBIM STK terminal response: %w", err)
+	}
+	return nil
+}
+
+func (r *MBIM) Envelope(ctx context.Context, envelope []byte) (stk.EnvelopeResponse, error) {
+	if r == nil || r.reader == nil {
+		return stk.EnvelopeResponse{}, errors.New("running MBIM STK envelope: reader is nil")
+	}
+	if err := r.reader.STKEnvelope(ctx, envelope); err != nil {
+		return stk.EnvelopeResponse{}, err
+	}
+	return stk.EnvelopeResponse{}, nil
+}
+
 func (r *MBIM) Close() error {
 	return r.reader.Close()
+}
+
+func (r *MBIM) setSTKPAC(ctx context.Context, profile stk.Profile) error {
+	_, err := r.reader.SetSTKPAC(ctx, mbimPACHostControl(profile))
+	return err
+}
+
+func (r *MBIM) clearSTKPAC() {
+	ctx, cancel := context.WithTimeout(context.Background(), mbimSTKCleanupTimeout)
+	defer cancel()
+	_, _ = r.reader.SetSTKPAC(ctx, make([]byte, mbimSTKPACHostControlLength))
+}
+
+func mbimPACHostControl(profile stk.Profile) []byte {
+	control := make([]byte, mbimSTKPACHostControlLength)
+	for _, command := range profile.ProactiveCommandTypes() {
+		bit := int(command)
+		if bit < len(control)*8 {
+			control[bit/8] |= 1 << (bit % 8)
+		}
+	}
+	return control
 }

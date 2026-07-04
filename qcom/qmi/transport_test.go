@@ -236,6 +236,82 @@ func TestTransportDispatchesIndications(t *testing.T) {
 	}
 }
 
+func TestTransportSkipsDirtyServiceMessageTypeFrames(t *testing.T) {
+	tests := []struct {
+		name  string
+		dirty []byte
+	}{
+		{
+			name: "unexpected service message type",
+			dirty: func() []byte {
+				frame := serviceResultFrame(99, qcom.MessageAuthenticate)
+				frame[6] = 0x80
+				return frame
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := &deadlineConn{read: bytes.NewReader(joinFrames(tt.dirty, serviceResultFrame(3, qcom.MessageReadTransparent)))}
+			transport := New(conn)
+
+			_, err := transport.Do(context.Background(), qcom.Request{
+				Service:       qcom.ServiceUIM,
+				ClientID:      7,
+				TransactionID: 3,
+				MessageID:     qcom.MessageReadTransparent,
+				Timeout:       time.Second,
+			})
+			if err != nil {
+				t.Fatalf("Do() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestTransportFailsMalformedFrames(t *testing.T) {
+	tests := []struct {
+		name  string
+		frame []byte
+	}{
+		{
+			name: "unexpected QMUX marker",
+			frame: func() []byte {
+				frame := serviceResultFrame(99, qcom.MessageAuthenticate)
+				frame[0] = 0xFF
+				return frame
+			}(),
+		},
+		{
+			name: "unexpected control message type",
+			frame: []byte{
+				0x01, 0x12, 0x00, 0x80, 0x00, 0x00,
+				0x04, 0x01, 0x00, 0xFF, 0x07, 0x00,
+				0x02, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := &deadlineConn{read: bytes.NewReader(joinFrames(tt.frame, serviceResultFrame(3, qcom.MessageReadTransparent)))}
+			transport := New(conn)
+
+			_, err := transport.Do(context.Background(), qcom.Request{
+				Service:       qcom.ServiceUIM,
+				ClientID:      7,
+				TransactionID: 3,
+				MessageID:     qcom.MessageReadTransparent,
+				Timeout:       time.Second,
+			})
+			if err == nil {
+				t.Fatal("Do() error = nil, want malformed frame error")
+			}
+		})
+	}
+}
+
 func TestTransportClearsWriteDeadlineBeforeNextWrite(t *testing.T) {
 	conn := newAsyncDeadlineConn()
 	transport := New(conn)

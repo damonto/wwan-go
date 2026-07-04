@@ -136,6 +136,18 @@ const (
 	PersonalizationFeatureGWCarrier
 )
 
+type CATConfigMode uint8
+
+const (
+	CATConfigDisabled      CATConfigMode = 0x00
+	CATConfigGobi          CATConfigMode = 0x01
+	CATConfigAndroid       CATConfigMode = 0x02
+	CATConfigDecoded       CATConfigMode = 0x03
+	CATConfigDecodedPull   CATConfigMode = 0x04
+	CATConfigCustomRaw     CATConfigMode = 0x05
+	CATConfigCustomDecoded CATConfigMode = 0x06
+)
+
 type Session uint8
 
 const (

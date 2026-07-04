@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -108,26 +109,198 @@ func TestCommandMarshalBinaryPadsInformationBuffer(t *testing.T) {
 	}
 }
 
-func TestSTKEnvelopeRequest(t *testing.T) {
-	req := (&STKEnvelopeRequest{
-		TransactionID: 7,
-		Data:          []byte{0xD1, 0x09, 0x82, 0x02, 0x83, 0x81, 0x8B, 0x03, 0x00, 0x7F, 0xF6},
-	}).Request()
+func TestSTKRequestData(t *testing.T) {
+	envelope := []byte{0xD1, 0x09, 0x82, 0x02, 0x83, 0x81, 0x8B, 0x03, 0x00, 0x7F, 0xF6}
+	terminalResponse := []byte{0x81, 0x03, 0x01, 0x21, 0x00}
+	pacHostControl := bytes.Repeat([]byte{0xA5}, stkPACHostControlLength)
 
-	cmd, ok := req.Command.(*Command)
-	if !ok {
-		t.Fatalf("Command type = %T, want *Command", req.Command)
-	}
-	if cmd.ServiceID != ServiceSTK {
-		t.Fatalf("ServiceID = % X, want STK", cmd.ServiceID)
-	}
-	if cmd.CommandID != CIDSTKEnvelope || cmd.CommandType != CommandTypeSet {
-		t.Fatalf("command = cid %d type %d, want STK envelope set", cmd.CommandID, cmd.CommandType)
+	tests := []struct {
+		name        string
+		req         *Request
+		commandID   uint32
+		commandType CommandType
+		want        []byte
+	}{
+		{
+			name:        "PAC query",
+			req:         (&STKPACQueryRequest{TransactionID: 7}).Request(),
+			commandID:   CIDSTKPAC,
+			commandType: CommandTypeQuery,
+			want:        nil,
+		},
+		{
+			name: "PAC set",
+			req: (&STKPACSetRequest{
+				TransactionID:  7,
+				PacHostControl: pacHostControl,
+			}).Request(),
+			commandID:   CIDSTKPAC,
+			commandType: CommandTypeSet,
+			want:        pacHostControl,
+		},
+		{
+			name: "terminal response set",
+			req: (&STKTerminalResponseRequest{
+				TransactionID: 7,
+				Data:          terminalResponse,
+			}).Request(),
+			commandID:   CIDSTKTerminalResponse,
+			commandType: CommandTypeSet,
+			want:        append(binary.LittleEndian.AppendUint32(nil, uint32(len(terminalResponse))), terminalResponse...),
+		},
+		{
+			name:        "envelope query",
+			req:         (&STKEnvelopeQueryRequest{TransactionID: 7}).Request(),
+			commandID:   CIDSTKEnvelope,
+			commandType: CommandTypeQuery,
+			want:        nil,
+		},
+		{
+			name: "envelope set",
+			req: (&STKEnvelopeRequest{
+				TransactionID: 7,
+				Data:          envelope,
+			}).Request(),
+			commandID:   CIDSTKEnvelope,
+			commandType: CommandTypeSet,
+			want:        envelope,
+		},
 	}
 
-	want := []byte{0x0B, 0x00, 0x00, 0x00, 0xD1, 0x09, 0x82, 0x02, 0x83, 0x81, 0x8B, 0x03, 0x00, 0x7F, 0xF6}
-	if !bytes.Equal(cmd.Data, want) {
-		t.Fatalf("Data = % X, want % X", cmd.Data, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, ok := tt.req.Command.(*Command)
+			if !ok {
+				t.Fatalf("Command type = %T, want *Command", tt.req.Command)
+			}
+			if cmd.ServiceID != ServiceSTK {
+				t.Fatalf("ServiceID = % X, want STK", cmd.ServiceID)
+			}
+			if cmd.CommandID != tt.commandID || cmd.CommandType != tt.commandType {
+				t.Fatalf("command = cid %d type %d, want cid %d type %d", cmd.CommandID, cmd.CommandType, tt.commandID, tt.commandType)
+			}
+			if !bytes.Equal(cmd.Data, tt.want) {
+				t.Fatalf("Data = % X, want % X", cmd.Data, tt.want)
+			}
+		})
+	}
+}
+
+func TestSTKResponseUnmarshalBinary(t *testing.T) {
+	envelopeSupport := make([]byte, stkEnvelopeSupportLength)
+	setBit(envelopeSupport, 0xD1)
+	pacSupport := make([]byte, stkPACSupportLength)
+	pacSupport[0x21] = byte(STKPACHandledByHostFunctionAbleToHandle)
+	resultData := []byte{0xAA, 0xBB}
+	terminalResponseInfo := binary.LittleEndian.AppendUint32(nil, 12)
+	terminalResponseInfo = binary.LittleEndian.AppendUint32(terminalResponseInfo, uint32(len(resultData)))
+	terminalResponseInfo = binary.LittleEndian.AppendUint32(terminalResponseInfo, 0x9000)
+	terminalResponseInfo = append(terminalResponseInfo, resultData...)
+
+	tests := []struct {
+		name    string
+		run     func([]byte) error
+		data    []byte
+		wantErr bool
+	}{
+		{
+			name: "PAC info",
+			data: pacSupport,
+			run: func(data []byte) error {
+				var got STKPACInfo
+				if err := got.UnmarshalBinary(data); err != nil {
+					return err
+				}
+				if got.PacSupport[0x21] != STKPACHandledByHostFunctionAbleToHandle {
+					return fmt.Errorf("PacSupport[0x21] = %d", got.PacSupport[0x21])
+				}
+				return nil
+			},
+		},
+		{
+			name:    "PAC info truncated",
+			data:    pacSupport[:stkPACSupportLength-1],
+			run:     func(data []byte) error { return new(STKPACInfo).UnmarshalBinary(data) },
+			wantErr: true,
+		},
+		{
+			name: "PAC notification",
+			data: append(binary.LittleEndian.AppendUint32(nil, uint32(STKPACTypeNotification)), envelopeSupport[:3]...),
+			run: func(data []byte) error {
+				var got STKPAC
+				if err := got.UnmarshalBinary(data); err != nil {
+					return err
+				}
+				if got.Type != STKPACTypeNotification {
+					return fmt.Errorf("Type = %d", got.Type)
+				}
+				if !bytes.Equal(got.Command, envelopeSupport[:3]) {
+					return fmt.Errorf("Command = %X", got.Command)
+				}
+				return nil
+			},
+		},
+		{
+			name:    "PAC notification truncated",
+			data:    []byte{0x01, 0x00, 0x00},
+			run:     func(data []byte) error { return new(STKPAC).UnmarshalBinary(data) },
+			wantErr: true,
+		},
+		{
+			name: "terminal response info",
+			data: terminalResponseInfo,
+			run: func(data []byte) error {
+				var got STKTerminalResponseInfo
+				if err := got.UnmarshalBinary(data); err != nil {
+					return err
+				}
+				if got.StatusWords != 0x9000 {
+					return fmt.Errorf("StatusWords = %#x", got.StatusWords)
+				}
+				if !bytes.Equal(got.ResultData, resultData) {
+					return fmt.Errorf("ResultData = %X", got.ResultData)
+				}
+				return nil
+			},
+		},
+		{
+			name:    "terminal response info truncated",
+			data:    terminalResponseInfo[:11],
+			run:     func(data []byte) error { return new(STKTerminalResponseInfo).UnmarshalBinary(data) },
+			wantErr: true,
+		},
+		{
+			name: "envelope info",
+			data: envelopeSupport,
+			run: func(data []byte) error {
+				var got STKEnvelopeInfo
+				if err := got.UnmarshalBinary(data); err != nil {
+					return err
+				}
+				if !got.Supports(0xD1) {
+					return errors.New("D1 envelope not supported")
+				}
+				if got.Supports(0xD2) {
+					return errors.New("D2 envelope unexpectedly supported")
+				}
+				return nil
+			},
+		},
+		{
+			name:    "envelope info truncated",
+			data:    envelopeSupport[:stkEnvelopeSupportLength-1],
+			run:     func(data []byte) error { return new(STKEnvelopeInfo).UnmarshalBinary(data) },
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run(tt.data)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("UnmarshalBinary() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -752,6 +925,454 @@ func TestReaderUiccResetAndTerminalCapability(t *testing.T) {
 	}
 }
 
+func TestReaderSTKEnvelopeChecksSupport(t *testing.T) {
+	envelope := []byte{0xD1, 0x09, 0x82, 0x02, 0x83, 0x81, 0x8B, 0x03, 0x00, 0x7F, 0xF6}
+
+	tests := []struct {
+		name    string
+		support bool
+		wantErr bool
+	}{
+		{name: "supported", support: true},
+		{name: "not expected", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			t.Cleanup(func() { _ = client.Close() })
+
+			errc := make(chan error, 1)
+			go func() {
+				defer close(errc)
+				defer server.Close()
+
+				if err := expectMBIMCommandWithService(server, 1, ServiceSTK, CIDSTKEnvelope, CommandTypeQuery, nil); err != nil {
+					errc <- err
+					return
+				}
+				support := make([]byte, stkEnvelopeSupportLength)
+				if tt.support {
+					setBit(support, envelope[0])
+				}
+				if _, err := server.Write(mbimCommandDone(1, ServiceSTK, CIDSTKEnvelope, support)); err != nil {
+					errc <- err
+					return
+				}
+				if !tt.support {
+					return
+				}
+
+				if err := expectMBIMCommandWithService(server, 2, ServiceSTK, CIDSTKEnvelope, CommandTypeSet, envelope); err != nil {
+					errc <- err
+					return
+				}
+				if _, err := server.Write(mbimCommandDone(2, ServiceSTK, CIDSTKEnvelope, nil)); err != nil {
+					errc <- err
+					return
+				}
+			}()
+
+			reader := &Reader{conn: client}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			err := reader.STKEnvelope(ctx, envelope)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("STKEnvelope() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err := <-errc; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestReaderSTKEnvelopeUsesCachedSupport(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	envelope := []byte{0xD1, 0x09, 0x82, 0x02, 0x83, 0x81, 0x8B, 0x03, 0x00, 0x7F, 0xF6}
+	support := make([]byte, stkEnvelopeSupportLength)
+	setBit(support, envelope[0])
+
+	errc := make(chan error, 1)
+	go func() {
+		defer close(errc)
+		defer server.Close()
+
+		if err := expectMBIMCommandWithService(server, 1, ServiceSTK, CIDSTKEnvelope, CommandTypeQuery, nil); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimCommandDone(1, ServiceSTK, CIDSTKEnvelope, support)); err != nil {
+			errc <- err
+			return
+		}
+
+		if err := expectMBIMCommandWithService(server, 2, ServiceSTK, CIDSTKEnvelope, CommandTypeSet, envelope); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimCommandDone(2, ServiceSTK, CIDSTKEnvelope, nil)); err != nil {
+			errc <- err
+			return
+		}
+	}()
+
+	reader := &Reader{conn: client}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if _, err := reader.QuerySTKEnvelopeSupport(ctx); err != nil {
+		t.Fatalf("QuerySTKEnvelopeSupport() error = %v", err)
+	}
+	if err := reader.STKEnvelope(ctx, envelope); err != nil {
+		t.Fatalf("STKEnvelope() error = %v", err)
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReaderSTKPACAndTerminalResponse(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	pacHostControl := bytes.Repeat([]byte{0x5A}, stkPACHostControlLength)
+	pacSupport := make([]byte, stkPACSupportLength)
+	pacSupport[0x21] = byte(STKPACHandledByHostFunctionAbleToHandle)
+	terminalResponse := []byte{0x81, 0x03, 0x01, 0x21, 0x00}
+	terminalRequest := binary.LittleEndian.AppendUint32(nil, uint32(len(terminalResponse)))
+	terminalRequest = append(terminalRequest, terminalResponse...)
+	terminalInfo := binary.LittleEndian.AppendUint32(nil, 12)
+	terminalInfo = binary.LittleEndian.AppendUint32(terminalInfo, 0)
+	terminalInfo = binary.LittleEndian.AppendUint32(terminalInfo, 0x9000)
+
+	errc := make(chan error, 1)
+	go func() {
+		defer close(errc)
+		defer server.Close()
+
+		if err := expectMBIMCommandWithService(server, 1, ServiceSTK, CIDSTKPAC, CommandTypeQuery, nil); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimCommandDone(1, ServiceSTK, CIDSTKPAC, pacSupport)); err != nil {
+			errc <- err
+			return
+		}
+
+		if err := expectMBIMCommandWithService(server, 2, ServiceSTK, CIDSTKPAC, CommandTypeSet, pacHostControl); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimCommandDone(2, ServiceSTK, CIDSTKPAC, pacSupport)); err != nil {
+			errc <- err
+			return
+		}
+
+		if err := expectMBIMCommandWithService(server, 3, ServiceSTK, CIDSTKTerminalResponse, CommandTypeSet, terminalRequest); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimCommandDone(3, ServiceSTK, CIDSTKTerminalResponse, terminalInfo)); err != nil {
+			errc <- err
+			return
+		}
+	}()
+
+	reader := &Reader{conn: client}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	info, err := reader.QuerySTKPAC(ctx)
+	if err != nil {
+		t.Fatalf("QuerySTKPAC() error = %v", err)
+	}
+	if info.PacSupport[0x21] != STKPACHandledByHostFunctionAbleToHandle {
+		t.Fatalf("QuerySTKPAC().PacSupport[0x21] = %d", info.PacSupport[0x21])
+	}
+
+	info, err = reader.SetSTKPAC(ctx, pacHostControl)
+	if err != nil {
+		t.Fatalf("SetSTKPAC() error = %v", err)
+	}
+	if info.PacSupport[0x21] != STKPACHandledByHostFunctionAbleToHandle {
+		t.Fatalf("SetSTKPAC().PacSupport[0x21] = %d", info.PacSupport[0x21])
+	}
+
+	terminalResp, err := reader.STKTerminalResponse(ctx, terminalResponse)
+	if err != nil {
+		t.Fatalf("STKTerminalResponse() error = %v", err)
+	}
+	if terminalResp.StatusWords != 0x9000 {
+		t.Fatalf("STKTerminalResponse().StatusWords = %#x, want 0x9000", terminalResp.StatusWords)
+	}
+
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReaderReadSTKPAC(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	command := []byte{0xD0, 0x03, 0x81, 0x01, 0x21}
+	payload := binary.LittleEndian.AppendUint32(nil, uint32(STKPACTypeProactiveCommand))
+	payload = append(payload, command...)
+
+	errc := make(chan error, 1)
+	go func() {
+		defer close(errc)
+		defer server.Close()
+
+		if _, err := server.Write(mbimIndication(ServiceSTK, CIDSTKPAC, payload)); err != nil {
+			errc <- err
+			return
+		}
+	}()
+
+	reader := &Reader{conn: client}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	got, err := reader.ReadSTKPAC(ctx)
+	if err != nil {
+		t.Fatalf("ReadSTKPAC() error = %v", err)
+	}
+	if got.Type != STKPACTypeProactiveCommand {
+		t.Fatalf("ReadSTKPAC().Type = %d, want %d", got.Type, STKPACTypeProactiveCommand)
+	}
+	if !bytes.Equal(got.Command, command) {
+		t.Fatalf("ReadSTKPAC().Command = %X, want %X", got.Command, command)
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReaderReadSTKPACContinuesAfterDeadlineExceeded(t *testing.T) {
+	command := []byte{0xD0, 0x03, 0x81, 0x01, 0x21}
+	payload := binary.LittleEndian.AppendUint32(nil, uint32(STKPACTypeProactiveCommand))
+	payload = append(payload, command...)
+	conn := &deadlineExceededConn{
+		read: bytes.NewReader(mbimIndication(ServiceSTK, CIDSTKPAC, payload)),
+	}
+	reader := &Reader{conn: conn}
+
+	got, err := reader.ReadSTKPAC(context.Background())
+	if err != nil {
+		t.Fatalf("ReadSTKPAC() error = %v", err)
+	}
+	if !bytes.Equal(got.Command, command) {
+		t.Fatalf("ReadSTKPAC().Command = %X, want %X", got.Command, command)
+	}
+	if reads := conn.reads.Load(); reads < 2 {
+		t.Fatalf("Read() calls = %d, want at least 2", reads)
+	}
+}
+
+func TestReaderQueuesSTKPACDuringCommand(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	command := []byte{0xD0, 0x03, 0x81, 0x01, 0x21}
+	payload := binary.LittleEndian.AppendUint32(nil, uint32(STKPACTypeProactiveCommand))
+	payload = append(payload, command...)
+	atr := mustDecodeHex(t, "03000000080000003B9F96")
+
+	errc := make(chan error, 1)
+	go func() {
+		defer close(errc)
+		defer server.Close()
+
+		if err := expectMBIMCommandWithType(server, 1, CIDUiccATR, CommandTypeQuery, nil); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimIndication(ServiceSTK, CIDSTKPAC, payload)); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimCommandDone(1, ServiceMsUiccLowLevelAccess, CIDUiccATR, atr)); err != nil {
+			errc <- err
+			return
+		}
+	}()
+
+	reader := &Reader{conn: client}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if _, err := reader.QueryUiccATR(ctx); err != nil {
+		t.Fatalf("QueryUiccATR() error = %v", err)
+	}
+	got, err := reader.ReadSTKPAC(ctx)
+	if err != nil {
+		t.Fatalf("ReadSTKPAC() error = %v", err)
+	}
+	if !bytes.Equal(got.Command, command) {
+		t.Fatalf("ReadSTKPAC().Command = %X, want %X", got.Command, command)
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReaderReadSTKPACPreservesQueuedIndications(t *testing.T) {
+	tests := []struct {
+		name     string
+		commands [][]byte
+	}{
+		{
+			name: "two queued PACs",
+			commands: [][]byte{
+				{0xD0, 0x03, 0x81, 0x01, 0x21},
+				{0xD0, 0x03, 0x81, 0x01, 0x22},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			t.Cleanup(func() { _ = client.Close() })
+
+			atr := mustDecodeHex(t, "03000000080000003B9F96")
+			errc := make(chan error, 1)
+			go func() {
+				defer close(errc)
+				defer server.Close()
+
+				if err := expectMBIMCommandWithType(server, 1, CIDUiccATR, CommandTypeQuery, nil); err != nil {
+					errc <- err
+					return
+				}
+				for _, command := range tt.commands {
+					payload := binary.LittleEndian.AppendUint32(nil, uint32(STKPACTypeProactiveCommand))
+					payload = append(payload, command...)
+					if _, err := server.Write(mbimIndication(ServiceSTK, CIDSTKPAC, payload)); err != nil {
+						errc <- err
+						return
+					}
+				}
+				if _, err := server.Write(mbimCommandDone(1, ServiceMsUiccLowLevelAccess, CIDUiccATR, atr)); err != nil {
+					errc <- err
+					return
+				}
+			}()
+
+			reader := &Reader{conn: client}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			if _, err := reader.QueryUiccATR(ctx); err != nil {
+				t.Fatalf("QueryUiccATR() error = %v", err)
+			}
+			for i, want := range tt.commands {
+				got, err := reader.ReadSTKPAC(ctx)
+				if err != nil {
+					t.Fatalf("ReadSTKPAC(%d) error = %v", i, err)
+				}
+				if !bytes.Equal(got.Command, want) {
+					t.Fatalf("ReadSTKPAC(%d).Command = %X, want %X", i, got.Command, want)
+				}
+			}
+			if err := <-errc; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestReaderWatchSTKPAC(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	command := []byte{0xD0, 0x03, 0x81, 0x01, 0x21}
+	payload := binary.LittleEndian.AppendUint32(nil, uint32(STKPACTypeNotification))
+	payload = append(payload, command...)
+
+	errc := make(chan error, 1)
+	go func() {
+		defer close(errc)
+		defer server.Close()
+
+		if _, err := server.Write(mbimIndication(ServiceSTK, CIDSTKPAC, payload)); err != nil {
+			errc <- err
+			return
+		}
+	}()
+
+	reader := &Reader{conn: client}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	pacs, err := reader.WatchSTKPAC(ctx)
+	if err != nil {
+		t.Fatalf("WatchSTKPAC() error = %v", err)
+	}
+	select {
+	case got := <-pacs:
+		if got.Type != STKPACTypeNotification {
+			t.Fatalf("WatchSTKPAC().Type = %d, want %d", got.Type, STKPACTypeNotification)
+		}
+		if !bytes.Equal(got.Command, command) {
+			t.Fatalf("WatchSTKPAC().Command = %X, want %X", got.Command, command)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReaderAuthenticateAKAReturnsAUTSOnSyncFailure(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	rand := bytes.Repeat([]byte{0x11}, 16)
+	autn := bytes.Repeat([]byte{0x22}, 16)
+	auts := bytes.Repeat([]byte{0xA5}, 14)
+	wantRequest := append(slices.Clone(rand), autn...)
+
+	errc := make(chan error, 1)
+	go func() {
+		defer close(errc)
+		defer server.Close()
+
+		if err := expectMBIMCommandWithService(server, 1, ServiceAuth, CIDAuthAKA, CommandTypeQuery, wantRequest); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimCommandDoneStatus(1, ServiceAuth, CIDAuthAKA, StatusAuthSyncFailure, mbimAKAAuthInfo(nil, nil, nil, auts))); err != nil {
+			errc <- err
+			return
+		}
+	}()
+
+	reader := &Reader{conn: client}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	got, err := reader.AuthenticateAKA(ctx, rand, autn)
+	if !errors.Is(err, StatusAuthSyncFailure) {
+		t.Fatalf("AuthenticateAKA() error = %v, want StatusAuthSyncFailure", err)
+	}
+	if got == nil {
+		t.Fatal("AuthenticateAKA() response = nil")
+	}
+	if !bytes.Equal(got.AUTS, auts) {
+		t.Fatalf("AuthenticateAKA().AUTS = %X, want %X", got.AUTS, auts)
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRequestTransmitAcceptsResponseLargerThanControlTransfer(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xDB}, defaultMaxControlTransfer+256)
 	response := mbimCommandDone(1, ServiceMsUiccLowLevelAccess, CIDUiccAPDU, mbimUICCResponseData(0x90, payload))
@@ -782,8 +1403,8 @@ func TestRequestTransmitContinuesAfterDeadlineExceeded(t *testing.T) {
 	if err := req.Transmit(context.Background(), conn); err != nil {
 		t.Fatalf("Transmit() error = %v", err)
 	}
-	if conn.reads < 2 {
-		t.Fatalf("Read() calls = %d, want at least 2", conn.reads)
+	if reads := conn.reads.Load(); reads < 2 {
+		t.Fatalf("Read() calls = %d, want at least 2", reads)
 	}
 }
 
@@ -1145,6 +1766,10 @@ func expectMBIMCommand(conn net.Conn, transactionID, commandID uint32, wantData 
 }
 
 func expectMBIMCommandWithType(conn net.Conn, transactionID, commandID uint32, commandType CommandType, wantData []byte) error {
+	return expectMBIMCommandWithService(conn, transactionID, ServiceMsUiccLowLevelAccess, commandID, commandType, wantData)
+}
+
+func expectMBIMCommandWithService(conn net.Conn, transactionID uint32, service [16]byte, commandID uint32, commandType CommandType, wantData []byte) error {
 	frame, err := readFrame(conn)
 	if err != nil {
 		return err
@@ -1152,10 +1777,10 @@ func expectMBIMCommandWithType(conn net.Conn, transactionID, commandID uint32, c
 	if got := binary.LittleEndian.Uint32(frame[8:12]); got != transactionID {
 		return fmt.Errorf("transaction ID = %d, want %d", got, transactionID)
 	}
-	var service [16]byte
-	copy(service[:], frame[20:36])
-	if service != ServiceMsUiccLowLevelAccess {
-		return fmt.Errorf("service = % X, want MS UICC low level access", service)
+	var gotService [16]byte
+	copy(gotService[:], frame[20:36])
+	if gotService != service {
+		return fmt.Errorf("service = % X, want % X", gotService, service)
 	}
 	if got := binary.LittleEndian.Uint32(frame[36:40]); got != commandID {
 		return fmt.Errorf("command ID = %d, want %d", got, commandID)
@@ -1192,6 +1817,19 @@ func mbimCommandDoneStatus(transactionID uint32, service [16]byte, commandID uin
 	return append(buf, data...)
 }
 
+func mbimIndication(service [16]byte, commandID uint32, data []byte) []byte {
+	messageLength := uint32(44 + len(data))
+	buf := binary.LittleEndian.AppendUint32(nil, uint32(MessageTypeIndicateStatus))
+	buf = binary.LittleEndian.AppendUint32(buf, messageLength)
+	buf = binary.LittleEndian.AppendUint32(buf, 0)
+	buf = binary.LittleEndian.AppendUint32(buf, 1)
+	buf = binary.LittleEndian.AppendUint32(buf, 0)
+	buf = append(buf, service[:]...)
+	buf = binary.LittleEndian.AppendUint32(buf, commandID)
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(data)))
+	return append(buf, data...)
+}
+
 func mbimCommandDoneTruncatedResponse(transactionID uint32, service [16]byte, commandID uint32) []byte {
 	buf := mbimCommandDoneStatus(transactionID, service, commandID, StatusNone, nil)
 	binary.LittleEndian.PutUint32(buf[44:48], 4)
@@ -1219,12 +1857,11 @@ func (c *scriptMBIMConn) MaxControlTransfer() int          { return defaultMaxCo
 type deadlineExceededConn struct {
 	scriptMBIMConn
 	read  *bytes.Reader
-	reads int
+	reads atomic.Int32
 }
 
 func (c *deadlineExceededConn) Read(p []byte) (int, error) {
-	c.reads++
-	if c.reads == 1 {
+	if c.reads.Add(1) == 1 {
 		return 0, os.ErrDeadlineExceeded
 	}
 	return c.read.Read(p)
@@ -1243,4 +1880,18 @@ func mbimUICCOpenChannelResponseData(status, channel uint32, response []byte) []
 	data = binary.LittleEndian.AppendUint32(data, uint32(len(response)))
 	data = binary.LittleEndian.AppendUint32(data, 16)
 	return append(data, response...)
+}
+
+func mbimAKAAuthInfo(res, ik, ck, auts []byte) []byte {
+	data := make([]byte, 66)
+	copy(data[:16], res)
+	binary.LittleEndian.PutUint32(data[16:20], uint32(len(res)))
+	copy(data[20:36], ik)
+	copy(data[36:52], ck)
+	copy(data[52:66], auts)
+	return data
+}
+
+func setBit(data []byte, bit byte) {
+	data[int(bit)/8] |= byte(1 << (bit % 8))
 }

@@ -11,15 +11,8 @@ import (
 )
 
 func (r *Reader) ListApplications(ctx context.Context) ([]Application, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
-		return nil, errors.New("listing MBIM applications: reader is closed")
-	}
-
 	request := ApplicationListRequest{TransactionID: r.nextTransactionID()}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return nil, fmt.Errorf("listing MBIM applications: %w", err)
 	}
 
@@ -44,53 +37,35 @@ func (r *Reader) AuthenticateAKA(ctx context.Context, rand, autn []byte) (*AuthA
 		return nil, fmt.Errorf("authenticating MBIM AKA: AUTN length %d, want 16", len(autn))
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
-		return nil, errors.New("authenticating MBIM AKA: reader is closed")
-	}
-
 	request := AuthAKARequest{
 		TransactionID: r.nextTransactionID(),
 		Rand:          slices.Clone(rand),
 		AUTN:          slices.Clone(autn),
 	}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
+		if errors.Is(err, StatusAuthSyncFailure) {
+			return request.Response, fmt.Errorf("authenticating MBIM AKA: %w", err)
+		}
 		return nil, fmt.Errorf("authenticating MBIM AKA: %w", err)
 	}
 	return request.Response, nil
 }
 
 func (r *Reader) QueryUiccATR(ctx context.Context) ([]byte, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
-		return nil, errors.New("querying MBIM UICC ATR: reader is closed")
-	}
-
 	request := UiccATRQueryRequest{TransactionID: r.nextTransactionID()}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return nil, fmt.Errorf("querying MBIM UICC ATR: %w", err)
 	}
 	return slices.Clone(request.Response.ATR), nil
 }
 
 func (r *Reader) OpenChannel(ctx context.Context, aid []byte) (uint32, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
-		return 0, errors.New("opening MBIM UICC channel: reader is closed")
-	}
-
 	request := OpenChannelRequest{
 		TransactionID: r.nextTransactionID(),
 		ApplicationID: slices.Clone(aid),
 		ChannelGroup:  uiccChannelGroupDefault,
 	}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return 0, fmt.Errorf("opening MBIM UICC channel: %w", err)
 	}
 	if err := uiccStatusError(request.Response.Status); err != nil {
@@ -100,13 +75,6 @@ func (r *Reader) OpenChannel(ctx context.Context, aid []byte) (uint32, error) {
 }
 
 func (r *Reader) TransmitAPDU(ctx context.Context, channel uint32, command []byte) ([]byte, uint32, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
-		return nil, 0, errors.New("transmitting MBIM UICC APDU: reader is closed")
-	}
-
 	request := APDURequest{
 		TransactionID:   r.nextTransactionID(),
 		Channel:         channel,
@@ -114,92 +82,58 @@ func (r *Reader) TransmitAPDU(ctx context.Context, channel uint32, command []byt
 		ClassByteType:   UiccClassByteTypeInterIndustry,
 		Command:         slices.Clone(command),
 	}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return nil, 0, fmt.Errorf("transmitting MBIM UICC APDU: %w", err)
 	}
 	return slices.Clone(request.Response.Response), request.Response.Status, nil
 }
 
 func (r *Reader) SetUiccReset(ctx context.Context, action UiccPassThroughAction) (UiccPassThroughStatus, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
-		return 0, errors.New("setting MBIM UICC reset: reader is closed")
-	}
-
 	request := UiccResetSetRequest{
 		TransactionID: r.nextTransactionID(),
 		Action:        action,
 	}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return 0, fmt.Errorf("setting MBIM UICC reset: %w", err)
 	}
+	r.clearEnvelopeSupport()
 	return request.Response.PassThroughStatus, nil
 }
 
 func (r *Reader) QueryUiccReset(ctx context.Context) (UiccPassThroughStatus, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
-		return 0, errors.New("querying MBIM UICC reset: reader is closed")
-	}
-
 	request := UiccResetQueryRequest{TransactionID: r.nextTransactionID()}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return 0, fmt.Errorf("querying MBIM UICC reset: %w", err)
 	}
 	return request.Response.PassThroughStatus, nil
 }
 
 func (r *Reader) SetUiccTerminalCapability(ctx context.Context, capabilities [][]byte) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
-		return errors.New("setting MBIM UICC terminal capability: reader is closed")
-	}
-
 	request := UiccTerminalCapabilitySetRequest{
 		TransactionID: r.nextTransactionID(),
 		Capabilities:  cloneByteSlices(capabilities),
 	}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return fmt.Errorf("setting MBIM UICC terminal capability: %w", err)
 	}
 	return nil
 }
 
 func (r *Reader) QueryUiccTerminalCapability(ctx context.Context) ([][]byte, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
-		return nil, errors.New("querying MBIM UICC terminal capability: reader is closed")
-	}
-
 	request := UiccTerminalCapabilityQueryRequest{TransactionID: r.nextTransactionID()}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return nil, fmt.Errorf("querying MBIM UICC terminal capability: %w", err)
 	}
 	return cloneByteSlices(request.Response.Capabilities), nil
 }
 
 func (r *Reader) CloseChannel(ctx context.Context, channel uint32) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
-		return errors.New("closing MBIM UICC channel: reader is closed")
-	}
-
 	request := CloseChannelRequest{
 		TransactionID: r.nextTransactionID(),
 		Channel:       channel,
 		ChannelGroup:  uiccChannelGroupDefault,
 	}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return fmt.Errorf("closing MBIM UICC channel: %w", err)
 	}
 	if err := uiccStatusError(request.Response.Status); err != nil {
@@ -208,22 +142,159 @@ func (r *Reader) CloseChannel(ctx context.Context, channel uint32) error {
 	return nil
 }
 
-func (r *Reader) STKEnvelope(ctx context.Context, data []byte) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (r *Reader) QuerySTKPAC(ctx context.Context) (STKPACInfo, error) {
+	request := STKPACQueryRequest{TransactionID: r.nextTransactionID()}
+	if err := r.transmit(ctx, request.Request()); err != nil {
+		return STKPACInfo{}, fmt.Errorf("querying MBIM STK PAC: %w", err)
+	}
+	return *request.Response, nil
+}
 
-	if r.closed {
-		return errors.New("running MBIM STK envelope: reader is closed")
+func (r *Reader) SetSTKPAC(ctx context.Context, pacHostControl []byte) (STKPACInfo, error) {
+	if len(pacHostControl) != stkPACHostControlLength {
+		return STKPACInfo{}, fmt.Errorf("setting MBIM STK PAC: host control length %d, want %d", len(pacHostControl), stkPACHostControlLength)
+	}
+
+	request := STKPACSetRequest{
+		TransactionID:  r.nextTransactionID(),
+		PacHostControl: slices.Clone(pacHostControl),
+	}
+	if err := r.transmit(ctx, request.Request()); err != nil {
+		return STKPACInfo{}, fmt.Errorf("setting MBIM STK PAC: %w", err)
+	}
+	return *request.Response, nil
+}
+
+func (r *Reader) ReadSTKPAC(ctx context.Context) (STKPAC, error) {
+	indication, err := r.nextIndication(ctx, indicationKey{serviceID: ServiceSTK, commandID: CIDSTKPAC})
+	if err != nil {
+		return STKPAC{}, fmt.Errorf("reading MBIM STK PAC: %w", err)
+	}
+	var pac STKPAC
+	if err := pac.UnmarshalBinary(indication.InformationBuffer); err != nil {
+		return STKPAC{}, fmt.Errorf("reading MBIM STK PAC: %w", err)
+	}
+	return pac, nil
+}
+
+// WatchSTKPAC streams STK proactive command notifications until ctx is done.
+func (r *Reader) WatchSTKPAC(ctx context.Context) (<-chan STKPAC, error) {
+	indications, unsubscribe, err := r.subscribeIndication(indicationKey{serviceID: ServiceSTK, commandID: CIDSTKPAC})
+	if err != nil {
+		return nil, fmt.Errorf("watching MBIM STK PAC: %w", err)
+	}
+
+	out := make(chan STKPAC, maxQueuedIndications)
+	go func() {
+		defer close(out)
+		defer unsubscribe()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case indication, ok := <-indications:
+				if !ok {
+					return
+				}
+				var pac STKPAC
+				if err := pac.UnmarshalBinary(indication.InformationBuffer); err != nil {
+					continue
+				}
+				select {
+				case out <- pac:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out, nil
+}
+
+func (r *Reader) STKTerminalResponse(ctx context.Context, data []byte) (STKTerminalResponseInfo, error) {
+	if len(data) == 0 {
+		return STKTerminalResponseInfo{}, errors.New("sending MBIM STK terminal response: response is empty")
+	}
+
+	request := STKTerminalResponseRequest{
+		TransactionID: r.nextTransactionID(),
+		Data:          slices.Clone(data),
+	}
+	if err := r.transmit(ctx, request.Request()); err != nil {
+		return STKTerminalResponseInfo{}, fmt.Errorf("sending MBIM STK terminal response: %w", err)
+	}
+	return *request.Response, nil
+}
+
+func (r *Reader) QuerySTKEnvelopeSupport(ctx context.Context) (STKEnvelopeInfo, error) {
+	info, err := r.querySTKEnvelopeSupport(ctx)
+	if err != nil {
+		return STKEnvelopeInfo{}, err
+	}
+	r.setEnvelopeSupport(info)
+	return info, nil
+}
+
+func (r *Reader) STKEnvelope(ctx context.Context, data []byte) error {
+	if len(data) == 0 {
+		return errors.New("running MBIM STK envelope: envelope is empty")
+	}
+
+	info, err := r.envelopeSupportInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("running MBIM STK envelope: %w", err)
+	}
+	if !info.Supports(data[0]) {
+		return fmt.Errorf("running MBIM STK envelope: envelope tag 0x%02X is not expected by function", data[0])
 	}
 
 	request := STKEnvelopeRequest{
 		TransactionID: r.nextTransactionID(),
 		Data:          slices.Clone(data),
 	}
-	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+	if err := r.transmit(ctx, request.Request()); err != nil {
 		return fmt.Errorf("running MBIM STK envelope: %w", err)
 	}
 	return nil
+}
+
+func (r *Reader) querySTKEnvelopeSupport(ctx context.Context) (STKEnvelopeInfo, error) {
+	request := STKEnvelopeQueryRequest{TransactionID: r.nextTransactionID()}
+	if err := r.transmit(ctx, request.Request()); err != nil {
+		return STKEnvelopeInfo{}, fmt.Errorf("querying MBIM STK envelope support: %w", err)
+	}
+	return *request.Response, nil
+}
+
+func (r *Reader) envelopeSupportInfo(ctx context.Context) (STKEnvelopeInfo, error) {
+	r.mu.Lock()
+	if r.envelopeSupport != nil {
+		info := *r.envelopeSupport
+		r.mu.Unlock()
+		return info, nil
+	}
+	r.mu.Unlock()
+
+	info, err := r.querySTKEnvelopeSupport(ctx)
+	if err != nil {
+		return STKEnvelopeInfo{}, err
+	}
+	r.setEnvelopeSupport(info)
+	return info, nil
+}
+
+func (r *Reader) setEnvelopeSupport(info STKEnvelopeInfo) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.envelopeSupport = new(STKEnvelopeInfo)
+	*r.envelopeSupport = info
+}
+
+func (r *Reader) clearEnvelopeSupport() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.envelopeSupport = nil
 }
 
 func cloneByteSlices(values [][]byte) [][]byte {

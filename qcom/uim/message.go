@@ -16,7 +16,8 @@ const (
 
 	envelopeCommandSMSPP = 9
 	// QMI CAT raw envelope buffers are capped by the modem CAT service IDL.
-	catRawEnvelopeMaxLength = 258
+	catRawEnvelopeMaxLength      = 258
+	catTerminalResponseMaxLength = 255
 )
 
 func resultOK(resp qcom.Response) error {
