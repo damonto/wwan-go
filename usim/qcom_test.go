@@ -145,7 +145,7 @@ func TestNewWithFakeQMITransport(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewQCOM() error = %v", err)
 			}
-			card, err := usim.New(context.Background(), adapter)
+			card, err := usim.New(context.Background(), adapter, nil)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -209,7 +209,7 @@ func TestAKAWithFakeQMITransport(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewQCOM() error = %v", err)
 			}
-			card, err := usim.New(context.Background(), adapter)
+			card, err := usim.New(context.Background(), adapter, nil)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
