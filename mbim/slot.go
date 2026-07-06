@@ -58,7 +58,11 @@ func (r *Reader) waitForSlotReady(ctx context.Context) error {
 	var lastReadyState SubscriberReadyState
 	var sawReadyState bool
 	for {
-		request := SubscriberReadyStatusRequest{TransactionID: r.nextTransactionID()}
+		request := SubscriberReadyStatusRequest{
+			TransactionID: r.nextTransactionID(),
+			MBIMExVersion: r.mbimExVersion,
+			SlotID:        r.subscriberReadySlotID(),
+		}
 		err := r.transmit(ctx, request.Request())
 		if err == nil {
 			sawReadyState = true

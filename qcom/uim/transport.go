@@ -83,12 +83,23 @@ func (r *Reader) requestService(
 	id qcom.MessageID,
 	tlvs tlv.TLVs,
 ) (qcom.Response, error) {
+	return r.requestServiceWithTimeout(ctx, service, clientID, id, tlvs, DefaultRequestTimeout)
+}
+
+func (r *Reader) requestServiceWithTimeout(
+	ctx context.Context,
+	service qcom.ServiceType,
+	clientID uint8,
+	id qcom.MessageID,
+	tlvs tlv.TLVs,
+	timeout time.Duration,
+) (qcom.Response, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed || r.transport == nil {
 		return qcom.Response{}, errReaderClosed
 	}
-	return r.sendRequest(ctx, service, clientID, id, tlvs, DefaultRequestTimeout)
+	return r.sendRequest(ctx, service, clientID, id, tlvs, timeout)
 }
 
 // sendRequest assumes r.mu is held and r.transport is live.

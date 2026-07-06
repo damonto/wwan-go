@@ -109,6 +109,298 @@ func TestCommandMarshalBinaryPadsInformationBuffer(t *testing.T) {
 	}
 }
 
+func TestVersionRequestData(t *testing.T) {
+	tests := []struct {
+		name        string
+		req         *Request
+		serviceID   [16]byte
+		commandID   uint32
+		commandType CommandType
+		want        []byte
+	}{
+		{
+			name:        "device services",
+			req:         (&DeviceServicesRequest{TransactionID: 1}).Request(),
+			serviceID:   ServiceBasicConnect,
+			commandID:   CIDDeviceServices,
+			commandType: CommandTypeQuery,
+			want:        nil,
+		},
+		{
+			name: "version",
+			req: (&VersionRequest{
+				TransactionID: 1,
+				MBIMVersion:   mbimVersion10,
+				MBIMExVersion: hostMBIMExVersion,
+			}).Request(),
+			serviceID:   ServiceMsBasicConnectExtensions,
+			commandID:   CIDVersion,
+			commandType: CommandTypeQuery,
+			want:        mustDecodeHex(t, "00010004"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			command := tt.req.Command.(*Command)
+			if command.ServiceID != tt.serviceID {
+				t.Fatalf("ServiceID = % X, want % X", command.ServiceID, tt.serviceID)
+			}
+			if command.CommandID != tt.commandID || command.CommandType != tt.commandType {
+				t.Fatalf("command = cid %d type %d, want cid %d type %d", command.CommandID, command.CommandType, tt.commandID, tt.commandType)
+			}
+			if !bytes.Equal(command.Data, tt.want) {
+				t.Fatalf("Data = %X, want %X", command.Data, tt.want)
+			}
+		})
+	}
+}
+
+func TestCommandRequestTimeouts(t *testing.T) {
+	tests := []struct {
+		name string
+		req  *Request
+		want time.Duration
+	}{
+		{
+			name: "radio state query",
+			req:  (&RadioStateRequest{TransactionID: 1}).Request(),
+			want: mbimCIDResponseTimeout,
+		},
+		{
+			name: "radio state set",
+			req: (&RadioStateSetRequest{
+				TransactionID: 1,
+				State:         RadioSwitchStateOn,
+			}).Request(),
+			want: mbimCIDLongResponseTimeout,
+		},
+		{
+			name: "subscriber ready status",
+			req:  (&SubscriberReadyStatusRequest{TransactionID: 1}).Request(),
+			want: mbimCIDResponseTimeout,
+		},
+		{
+			name: "UICC ATR",
+			req:  (&UiccATRQueryRequest{TransactionID: 1}).Request(),
+			want: mbimCIDLongResponseTimeout,
+		},
+		{
+			name: "open channel",
+			req: (&OpenChannelRequest{
+				TransactionID: 1,
+				ChannelGroup:  uiccChannelGroupDefault,
+			}).Request(),
+			want: mbimCIDResponseTimeout,
+		},
+		{
+			name: "close channel",
+			req: (&CloseChannelRequest{
+				TransactionID: 1,
+				ChannelGroup:  uiccChannelGroupDefault,
+			}).Request(),
+			want: mbimCIDResponseTimeout,
+		},
+		{
+			name: "APDU",
+			req: (&APDURequest{
+				TransactionID:   1,
+				SecureMessaging: UiccSecureMessagingNone,
+				ClassByteType:   UiccClassByteTypeInterIndustry,
+			}).Request(),
+			want: mbimCIDLongResponseTimeout,
+		},
+		{
+			name: "terminal capability set",
+			req:  (&UiccTerminalCapabilitySetRequest{TransactionID: 1}).Request(),
+			want: mbimCIDResponseTimeout,
+		},
+		{
+			name: "terminal capability query",
+			req:  (&UiccTerminalCapabilityQueryRequest{TransactionID: 1}).Request(),
+			want: mbimCIDResponseTimeout,
+		},
+		{
+			name: "UICC reset set",
+			req: (&UiccResetSetRequest{
+				TransactionID: 1,
+				Action:        UiccPassThroughActionEnable,
+			}).Request(),
+			want: mbimCIDLongResponseTimeout,
+		},
+		{
+			name: "UICC reset query",
+			req:  (&UiccResetQueryRequest{TransactionID: 1}).Request(),
+			want: mbimCIDLongResponseTimeout,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.req.Timeout != tt.want {
+				t.Fatalf("Timeout = %v, want %v", tt.req.Timeout, tt.want)
+			}
+		})
+	}
+}
+
+func TestReaderNegotiatesMBIMExVersion(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	errc := make(chan error, 1)
+	go func() {
+		defer close(errc)
+		defer server.Close()
+
+		if err := expectMBIMCommandWithService(server, 1, ServiceBasicConnect, CIDDeviceServices, CommandTypeQuery, nil); err != nil {
+			errc <- err
+			return
+		}
+		services := deviceServicesPayload(DeviceService{
+			ServiceID: ServiceMsBasicConnectExtensions,
+			CIDs:      []uint32{CIDVersion},
+		})
+		if _, err := server.Write(mbimCommandDone(1, ServiceBasicConnect, CIDDeviceServices, services)); err != nil {
+			errc <- err
+			return
+		}
+
+		if err := expectMBIMCommandWithService(server, 2, ServiceMsBasicConnectExtensions, CIDVersion, CommandTypeQuery, mustDecodeHex(t, "00010004")); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimCommandDone(2, ServiceMsBasicConnectExtensions, CIDVersion, mustDecodeHex(t, "00010004"))); err != nil {
+			errc <- err
+			return
+		}
+	}()
+
+	reader := &Reader{conn: client}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := reader.negotiateVersion(ctx); err != nil {
+		t.Fatalf("negotiateVersion() error = %v", err)
+	}
+	if reader.mbimExVersion != mbimExVersion40 {
+		t.Fatalf("mbimExVersion = %#x, want %#x", reader.mbimExVersion, mbimExVersion40)
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReaderConnectSkipsSlotActivationWithMBIMEx4(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	errc := make(chan error, 1)
+	go func() {
+		defer close(errc)
+		defer server.Close()
+
+		if err := expectMBIMOpen(server, 1); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimOpenDone(1)); err != nil {
+			errc <- err
+			return
+		}
+
+		if err := expectMBIMCommandWithService(server, 2, ServiceBasicConnect, CIDDeviceServices, CommandTypeQuery, nil); err != nil {
+			errc <- err
+			return
+		}
+		services := deviceServicesPayload(DeviceService{
+			ServiceID: ServiceMsBasicConnectExtensions,
+			CIDs:      []uint32{CIDVersion},
+		})
+		if _, err := server.Write(mbimCommandDone(2, ServiceBasicConnect, CIDDeviceServices, services)); err != nil {
+			errc <- err
+			return
+		}
+
+		if err := expectMBIMCommandWithService(server, 3, ServiceMsBasicConnectExtensions, CIDVersion, CommandTypeQuery, mustDecodeHex(t, "00010004")); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimCommandDone(3, ServiceMsBasicConnectExtensions, CIDVersion, mustDecodeHex(t, "00010004"))); err != nil {
+			errc <- err
+			return
+		}
+		errc <- expectNoMBIMCommand(server, 50*time.Millisecond)
+	}()
+
+	reader := &Reader{conn: client, slot: 1}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := reader.connect(ctx, ""); err != nil {
+		t.Fatalf("connect() error = %v", err)
+	}
+	if reader.mbimExVersion != mbimExVersion40 {
+		t.Fatalf("mbimExVersion = %#x, want %#x", reader.mbimExVersion, mbimExVersion40)
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReaderConnectActivatesSlotBeforeMBIMEx4(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	errc := make(chan error, 1)
+	go func() {
+		defer close(errc)
+		defer server.Close()
+
+		if err := expectMBIMOpen(server, 1); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimOpenDone(1)); err != nil {
+			errc <- err
+			return
+		}
+
+		if err := expectMBIMCommandWithService(server, 2, ServiceBasicConnect, CIDDeviceServices, CommandTypeQuery, nil); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimCommandDone(2, ServiceBasicConnect, CIDDeviceServices, deviceServicesPayload())); err != nil {
+			errc <- err
+			return
+		}
+
+		if err := expectMBIMCommandWithService(server, 3, ServiceMsBasicConnectExtensions, CIDDeviceSlotMappings, CommandTypeQuery, mustDecodeHex(t, "00000000")); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimCommandDone(3, ServiceMsBasicConnectExtensions, CIDDeviceSlotMappings, slotMappingsPayload(1))); err != nil {
+			errc <- err
+			return
+		}
+		errc <- expectNoMBIMCommand(server, 50*time.Millisecond)
+	}()
+
+	reader := &Reader{conn: client, slot: 1}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := reader.connect(ctx, ""); err != nil {
+		t.Fatalf("connect() error = %v", err)
+	}
+	if reader.mbimExVersion != mbimExVersion10 {
+		t.Fatalf("mbimExVersion = %#x, want %#x", reader.mbimExVersion, mbimExVersion10)
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSTKRequestData(t *testing.T) {
 	envelope := []byte{0xD1, 0x09, 0x82, 0x02, 0x83, 0x81, 0x8B, 0x03, 0x00, 0x7F, 0xF6}
 	terminalResponse := []byte{0x81, 0x03, 0x01, 0x21, 0x00}
@@ -308,10 +600,21 @@ func TestUiccATRRequestData(t *testing.T) {
 	tests := []struct {
 		name string
 		req  *Request
+		want []byte
 	}{
 		{
 			name: "query",
 			req:  (&UiccATRQueryRequest{TransactionID: 1}).Request(),
+			want: nil,
+		},
+		{
+			name: "query EX4",
+			req: (&UiccATRQueryRequest{
+				TransactionID: 1,
+				MBIMExVersion: mbimExVersion40,
+				SlotID:        1,
+			}).Request(),
+			want: mustDecodeHex(t, "01000000"),
 		},
 	}
 
@@ -324,8 +627,8 @@ func TestUiccATRRequestData(t *testing.T) {
 			if command.CommandID != CIDUiccATR || command.CommandType != CommandTypeQuery {
 				t.Fatalf("command = cid %d type %d, want cid %d query", command.CommandID, command.CommandType, CIDUiccATR)
 			}
-			if len(command.Data) != 0 {
-				t.Fatalf("Data = %X, want empty", command.Data)
+			if !bytes.Equal(command.Data, tt.want) {
+				t.Fatalf("Data = %X, want %X", command.Data, tt.want)
 			}
 		})
 	}
@@ -349,6 +652,18 @@ func TestUICCChannelRequestData(t *testing.T) {
 			want:      mustDecodeHex(t, "07000000100000000000000001000000A0000000871004"),
 		},
 		{
+			name: "open channel EX4",
+			req: (&OpenChannelRequest{
+				TransactionID: 1,
+				MBIMExVersion: mbimExVersion40,
+				SlotID:        1,
+				ApplicationID: []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04},
+				ChannelGroup:  uiccChannelGroupDefault,
+			}).Request(),
+			commandID: CIDUiccOpenChannel,
+			want:      mustDecodeHex(t, "0700000014000000000000000100000001000000A0000000871004"),
+		},
+		{
 			name: "apdu",
 			req: (&APDURequest{
 				TransactionID:   1,
@@ -361,6 +676,20 @@ func TestUICCChannelRequestData(t *testing.T) {
 			want:      mustDecodeHex(t, "030000000000000000000000040000001400000000880081"),
 		},
 		{
+			name: "apdu EX4",
+			req: (&APDURequest{
+				TransactionID:   1,
+				MBIMExVersion:   mbimExVersion40,
+				SlotID:          1,
+				Channel:         3,
+				SecureMessaging: UiccSecureMessagingNone,
+				ClassByteType:   UiccClassByteTypeInterIndustry,
+				Command:         []byte{0x00, 0x88, 0x00, 0x81},
+			}).Request(),
+			commandID: CIDUiccAPDU,
+			want:      mustDecodeHex(t, "03000000000000000000000004000000180000000100000000880081"),
+		},
+		{
 			name: "close channel",
 			req: (&CloseChannelRequest{
 				TransactionID: 1,
@@ -369,6 +698,18 @@ func TestUICCChannelRequestData(t *testing.T) {
 			}).Request(),
 			commandID: CIDUiccCloseChannel,
 			want:      mustDecodeHex(t, "0300000001000000"),
+		},
+		{
+			name: "close channel EX4",
+			req: (&CloseChannelRequest{
+				TransactionID: 1,
+				MBIMExVersion: mbimExVersion40,
+				SlotID:        1,
+				Channel:       3,
+				ChannelGroup:  uiccChannelGroupDefault,
+			}).Request(),
+			commandID: CIDUiccCloseChannel,
+			want:      mustDecodeHex(t, "030000000100000001000000"),
 		},
 	}
 
@@ -405,10 +746,31 @@ func TestUiccResetRequestData(t *testing.T) {
 			want:        mustDecodeHex(t, "01000000"),
 		},
 		{
+			name: "set EX4",
+			req: (&UiccResetSetRequest{
+				TransactionID: 1,
+				MBIMExVersion: mbimExVersion40,
+				SlotID:        1,
+				Action:        UiccPassThroughActionEnable,
+			}).Request(),
+			commandType: CommandTypeSet,
+			want:        mustDecodeHex(t, "0100000001000000"),
+		},
+		{
 			name:        "query",
 			req:         (&UiccResetQueryRequest{TransactionID: 1}).Request(),
 			commandType: CommandTypeQuery,
 			want:        nil,
+		},
+		{
+			name: "query EX4",
+			req: (&UiccResetQueryRequest{
+				TransactionID: 1,
+				MBIMExVersion: mbimExVersion40,
+				SlotID:        1,
+			}).Request(),
+			commandType: CommandTypeQuery,
+			want:        mustDecodeHex(t, "01000000"),
 		},
 	}
 
@@ -521,6 +883,7 @@ func TestUiccTerminalCapabilityRequestData(t *testing.T) {
 		{0xA0, 0xB0, 0xC0},
 	}
 	terminalCapabilityPayload := mustDecodeHex(t, "0200000014000000050000001C000000030000000A0B0C0D0A000000A0B0C000")
+	terminalCapabilityPayloadEx4 := mustDecodeHex(t, "0100000002000000180000000500000020000000030000000A0B0C0D0A000000A0B0C000")
 	tests := []struct {
 		name        string
 		req         *Request
@@ -537,6 +900,17 @@ func TestUiccTerminalCapabilityRequestData(t *testing.T) {
 			want:        terminalCapabilityPayload,
 		},
 		{
+			name: "set EX4",
+			req: (&UiccTerminalCapabilitySetRequest{
+				TransactionID: 1,
+				MBIMExVersion: mbimExVersion40,
+				SlotID:        1,
+				Capabilities:  terminalCapabilities,
+			}).Request(),
+			commandType: CommandTypeSet,
+			want:        terminalCapabilityPayloadEx4,
+		},
+		{
 			name: "set empty",
 			req: (&UiccTerminalCapabilitySetRequest{
 				TransactionID: 1,
@@ -545,10 +919,30 @@ func TestUiccTerminalCapabilityRequestData(t *testing.T) {
 			want:        mustDecodeHex(t, "00000000"),
 		},
 		{
+			name: "set empty EX4",
+			req: (&UiccTerminalCapabilitySetRequest{
+				TransactionID: 1,
+				MBIMExVersion: mbimExVersion40,
+				SlotID:        1,
+			}).Request(),
+			commandType: CommandTypeSet,
+			want:        mustDecodeHex(t, "0100000000000000"),
+		},
+		{
 			name:        "query",
 			req:         (&UiccTerminalCapabilityQueryRequest{TransactionID: 1}).Request(),
 			commandType: CommandTypeQuery,
 			want:        nil,
+		},
+		{
+			name: "query EX4",
+			req: (&UiccTerminalCapabilityQueryRequest{
+				TransactionID: 1,
+				MBIMExVersion: mbimExVersion40,
+				SlotID:        1,
+			}).Request(),
+			commandType: CommandTypeQuery,
+			want:        mustDecodeHex(t, "01000000"),
 		},
 	}
 
@@ -740,6 +1134,92 @@ func TestReaderQueryUiccATR(t *testing.T) {
 			}
 			if !bytes.Equal(got, tt.want) {
 				t.Fatalf("QueryUiccATR() = %X, want %X", got, tt.want)
+			}
+			if err := <-errc; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestReaderRadioState(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	errc := make(chan error, 1)
+	go func() {
+		defer close(errc)
+		defer server.Close()
+
+		if err := expectMBIMCommandWithService(server, 1, ServiceBasicConnect, CIDRadioState, CommandTypeQuery, nil); err != nil {
+			errc <- err
+			return
+		}
+		if _, err := server.Write(mbimCommandDone(1, ServiceBasicConnect, CIDRadioState, radioStatePayload(RadioSwitchStateOn, RadioSwitchStateOff))); err != nil {
+			errc <- err
+			return
+		}
+	}()
+
+	reader := &Reader{conn: client}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	got, err := reader.RadioState(ctx)
+	if err != nil {
+		t.Fatalf("RadioState() error = %v", err)
+	}
+	if got.HwRadioState != RadioSwitchStateOn {
+		t.Fatalf("HwRadioState = %d, want %d", got.HwRadioState, RadioSwitchStateOn)
+	}
+	if got.SwRadioState != RadioSwitchStateOff {
+		t.Fatalf("SwRadioState = %d, want %d", got.SwRadioState, RadioSwitchStateOff)
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReaderSetRadioState(t *testing.T) {
+	tests := []struct {
+		name  string
+		state RadioSwitchState
+	}{
+		{name: "off", state: RadioSwitchStateOff},
+		{name: "on", state: RadioSwitchStateOn},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			t.Cleanup(func() { _ = client.Close() })
+
+			errc := make(chan error, 1)
+			go func() {
+				defer close(errc)
+				defer server.Close()
+
+				wantRequest := binary.LittleEndian.AppendUint32(nil, uint32(tt.state))
+				if err := expectMBIMCommandWithService(server, 1, ServiceBasicConnect, CIDRadioState, CommandTypeSet, wantRequest); err != nil {
+					errc <- err
+					return
+				}
+				if _, err := server.Write(mbimCommandDone(1, ServiceBasicConnect, CIDRadioState, radioStatePayload(RadioSwitchStateOn, tt.state))); err != nil {
+					errc <- err
+					return
+				}
+			}()
+
+			reader := &Reader{conn: client}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			got, err := reader.SetRadioState(ctx, tt.state)
+			if err != nil {
+				t.Fatalf("SetRadioState() error = %v", err)
+			}
+			if got.SwRadioState != tt.state {
+				t.Fatalf("SwRadioState = %d, want %d", got.SwRadioState, tt.state)
 			}
 			if err := <-errc; err != nil {
 				t.Fatal(err)
@@ -1487,9 +1967,113 @@ func TestDeviceSlotMappingsResponseUnmarshalBinary(t *testing.T) {
 	}
 }
 
+func TestDeviceServicesResponseUnmarshalBinary(t *testing.T) {
+	tests := []struct {
+		name            string
+		data            []byte
+		wantServices    int
+		wantVersionCID  bool
+		wantMaxSessions uint32
+		wantErr         bool
+	}{
+		{
+			name:            "empty",
+			data:            mustDecodeHex(t, "0000000003000000"),
+			wantMaxSessions: 3,
+		},
+		{
+			name: "basic connect extensions",
+			data: deviceServicesPayload(DeviceService{
+				ServiceID:       ServiceMsBasicConnectExtensions,
+				MaxDSSInstances: 1,
+				CIDs:            []uint32{CIDDeviceSlotMappings, CIDVersion},
+			}),
+			wantServices:    1,
+			wantVersionCID:  true,
+			wantMaxSessions: 3,
+		},
+		{
+			name:    "truncated payload",
+			data:    []byte{1, 0, 0, 0},
+			wantErr: true,
+		},
+		{
+			name:    "truncated service table",
+			data:    mustDecodeHex(t, "0100000000000000"),
+			wantErr: true,
+		},
+		{
+			name:    "truncated CID list",
+			data:    mustDecodeHex(t, "0100000003000000100000001C0000003D01DCC5FEF54D050D3ABEF7058E9AAF0000000000000000020000000F000000"),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got DeviceServicesResponse
+			err := got.UnmarshalBinary(tt.data)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("UnmarshalBinary() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if got.MaxDSSSessions != tt.wantMaxSessions {
+				t.Fatalf("MaxDSSSessions = %d, want %d", got.MaxDSSSessions, tt.wantMaxSessions)
+			}
+			if len(got.Services) != tt.wantServices {
+				t.Fatalf("Services length = %d, want %d", len(got.Services), tt.wantServices)
+			}
+			if got.SupportsCID(ServiceMsBasicConnectExtensions, CIDVersion) != tt.wantVersionCID {
+				t.Fatalf("SupportsCID(version) = %v, want %v", got.SupportsCID(ServiceMsBasicConnectExtensions, CIDVersion), tt.wantVersionCID)
+			}
+		})
+	}
+}
+
+func TestRadioStateInfoUnmarshalBinary(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    []byte
+		want    RadioStateInfo
+		wantErr bool
+	}{
+		{
+			name: "radio state",
+			data: radioStatePayload(RadioSwitchStateOn, RadioSwitchStateOff),
+			want: RadioStateInfo{
+				HwRadioState: RadioSwitchStateOn,
+				SwRadioState: RadioSwitchStateOff,
+			},
+		},
+		{name: "truncated", data: []byte{1, 0, 0, 0}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got RadioStateInfo
+			err := got.UnmarshalBinary(tt.data)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalBinary() error = nil, want non-nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("UnmarshalBinary() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSubscriberReadyStatusResponseUnmarshalBinary(t *testing.T) {
 	tests := []struct {
 		name    string
+		version uint16
 		data    []byte
 		want    SubscriberReadyStatusResponse
 		wantErr bool
@@ -1503,6 +2087,32 @@ func TestSubscriberReadyStatusResponseUnmarshalBinary(t *testing.T) {
 				SIMICCID:              "89014103211118510720",
 				ReadyInfo:             ReadyInfoProtectUniqueID,
 				TelephoneNumbersCount: 1,
+				SlotID:                activeSubscriberSlot,
+				TelephoneNumbers:      []string{"+15551234567"},
+			},
+		},
+		{
+			name:    "ready EX4",
+			version: mbimExVersion40,
+			data: subscriberReadyPayloadEx4(
+				t,
+				SubscriberReadyStateInitialized,
+				SubscriberReadyStatusFlagESIM|SubscriberReadyStatusFlagSIMSlotActive,
+				1,
+				"001010123456789",
+				"89014103211118510720",
+				ReadyInfoProtectUniqueID,
+				"+15551234567",
+			),
+			want: SubscriberReadyStatusResponse{
+				MBIMExVersion:         mbimExVersion40,
+				ReadyState:            SubscriberReadyStateInitialized,
+				Flags:                 SubscriberReadyStatusFlagESIM | SubscriberReadyStatusFlagSIMSlotActive,
+				SubscriberID:          "001010123456789",
+				SIMICCID:              "89014103211118510720",
+				ReadyInfo:             ReadyInfoProtectUniqueID,
+				TelephoneNumbersCount: 1,
+				SlotID:                1,
 				TelephoneNumbers:      []string{"+15551234567"},
 			},
 		},
@@ -1541,7 +2151,7 @@ func TestSubscriberReadyStatusResponseUnmarshalBinary(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var got SubscriberReadyStatusResponse
+			got := SubscriberReadyStatusResponse{MBIMExVersion: tt.version}
 			err := got.UnmarshalBinary(tt.data)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("UnmarshalBinary() error = %v, wantErr %v", err, tt.wantErr)
@@ -1553,7 +2163,9 @@ func TestSubscriberReadyStatusResponseUnmarshalBinary(t *testing.T) {
 				got.SubscriberID != tt.want.SubscriberID ||
 				got.SIMICCID != tt.want.SIMICCID ||
 				got.ReadyInfo != tt.want.ReadyInfo ||
-				got.TelephoneNumbersCount != tt.want.TelephoneNumbersCount {
+				got.TelephoneNumbersCount != tt.want.TelephoneNumbersCount ||
+				got.Flags != tt.want.Flags ||
+				got.SlotID != tt.want.SlotID {
 				t.Fatalf("UnmarshalBinary() = %+v, want %+v", got, tt.want)
 			}
 			if !slices.Equal(got.TelephoneNumbers, tt.want.TelephoneNumbers) {
@@ -1752,6 +2364,71 @@ func subscriberReadyPayload(t *testing.T, readyState SubscriberReadyState, subsc
 	return data
 }
 
+func subscriberReadyPayloadEx4(t *testing.T, readyState SubscriberReadyState, flags SubscriberReadyStatusFlags, slotID uint32, subscriberID, iccid string, readyInfo ReadyInfo, numbers ...string) []byte {
+	t.Helper()
+
+	headerSize := 36 + len(numbers)*8
+	data := make([]byte, 0, headerSize)
+	data = binary.LittleEndian.AppendUint32(data, uint32(readyState))
+	data = binary.LittleEndian.AppendUint32(data, uint32(flags))
+
+	refs := make([][]byte, 0, 2+len(numbers))
+	refs = append(refs, utf16Bytes(subscriberID), utf16Bytes(iccid))
+	for _, number := range numbers {
+		refs = append(refs, utf16Bytes(number))
+	}
+
+	offset := uint32(headerSize)
+	for _, ref := range refs[:2] {
+		data = binary.LittleEndian.AppendUint32(data, offset)
+		data = binary.LittleEndian.AppendUint32(data, uint32(len(ref)))
+		offset += uint32(len(ref))
+	}
+	data = binary.LittleEndian.AppendUint32(data, uint32(readyInfo))
+	data = binary.LittleEndian.AppendUint32(data, uint32(len(numbers)))
+	data = binary.LittleEndian.AppendUint32(data, slotID)
+	for _, ref := range refs[2:] {
+		data = binary.LittleEndian.AppendUint32(data, offset)
+		data = binary.LittleEndian.AppendUint32(data, uint32(len(ref)))
+		offset += uint32(len(ref))
+	}
+	for _, ref := range refs {
+		data = append(data, ref...)
+	}
+	return data
+}
+
+func deviceServicesPayload(services ...DeviceService) []byte {
+	data := binary.LittleEndian.AppendUint32(nil, uint32(len(services)))
+	data = binary.LittleEndian.AppendUint32(data, 3)
+
+	elements := make([][]byte, len(services))
+	offset := 8 + len(services)*8
+	for i, service := range services {
+		element := append([]byte(nil), service.ServiceID[:]...)
+		element = binary.LittleEndian.AppendUint32(element, service.DSSPayload)
+		element = binary.LittleEndian.AppendUint32(element, service.MaxDSSInstances)
+		element = binary.LittleEndian.AppendUint32(element, uint32(len(service.CIDs)))
+		for _, cid := range service.CIDs {
+			element = binary.LittleEndian.AppendUint32(element, cid)
+		}
+		elements[i] = element
+		data = binary.LittleEndian.AppendUint32(data, uint32(offset))
+		data = binary.LittleEndian.AppendUint32(data, uint32(len(element)))
+		offset += len(element)
+	}
+
+	for _, element := range elements {
+		data = append(data, element...)
+	}
+	return data
+}
+
+func radioStatePayload(hw, sw RadioSwitchState) []byte {
+	data := binary.LittleEndian.AppendUint32(nil, uint32(hw))
+	return binary.LittleEndian.AppendUint32(data, uint32(sw))
+}
+
 func mustDecodeHex(t *testing.T, s string) []byte {
 	t.Helper()
 	data, err := hex.DecodeString(s)
@@ -1795,6 +2472,34 @@ func expectMBIMCommandWithService(conn net.Conn, transactionID uint32, service [
 	gotData := frame[48 : 48+dataLength]
 	if !bytes.Equal(gotData, wantData) {
 		return fmt.Errorf("request data = %X, want %X", gotData, wantData)
+	}
+	return nil
+}
+
+func expectMBIMOpen(conn net.Conn, transactionID uint32) error {
+	frame, err := readFrame(conn)
+	if err != nil {
+		return err
+	}
+	if got := MessageType(binary.LittleEndian.Uint32(frame[:4])); got != MessageTypeOpen {
+		return fmt.Errorf("message type = %#x, want %#x", got, MessageTypeOpen)
+	}
+	if got := binary.LittleEndian.Uint32(frame[8:12]); got != transactionID {
+		return fmt.Errorf("transaction ID = %d, want %d", got, transactionID)
+	}
+	return nil
+}
+
+func expectNoMBIMCommand(conn net.Conn, timeout time.Duration) error {
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	frame, err := readFrame(conn)
+	if err == nil {
+		return fmt.Errorf("unexpected MBIM command: %X", frame)
+	}
+	if !timeoutError(err) {
+		return fmt.Errorf("reading next MBIM command: %w", err)
 	}
 	return nil
 }

@@ -31,6 +31,39 @@ func NewQCOM(reader *uim.Reader) (*QCOM, error) {
 	return &QCOM{reader: reader}, nil
 }
 
+// OpenIMSPDN starts the LTE IMS PDN through the QCOM modem backing this reader.
+func (r *QCOM) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSession, error) {
+	if r == nil || r.reader == nil {
+		return nil, errors.New("opening IMS PDN: QCOM reader is nil")
+	}
+	normalized, err := cfg.normalized()
+	if err != nil {
+		return nil, err
+	}
+	session, err := r.reader.OpenIMSPDN(ctx, uim.IMSPDNConfig{
+		APN:            normalized.APN,
+		IPFamily:       qcomIPFamilyForPDNType(normalized.PDNType),
+		RequestTimeout: normalized.RequestTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("opening IMS PDN: %w", err)
+	}
+	return &IMSPDNSession{
+		info: func() IMSPDNInfo {
+			info := session.Info()
+			return IMSPDNInfo{
+				LocalIPv4:       info.LocalIPv4,
+				LocalIPv6:       info.LocalIPv6,
+				PCSCFIPs:        info.PCSCFIPs,
+				VoPSKnown:       info.VoPSKnown,
+				VoPSSupported:   info.VoPSSupported,
+				PacketDataReady: info.PacketDataReady,
+			}
+		},
+		close: session.Close,
+	}, nil
+}
+
 func (r *QCOM) ListApplications(ctx context.Context) ([]usimcard.Application, error) {
 	attrs, err := r.FileAttributes(ctx, usimcard.FileRef{Path: efDirFile})
 	if err != nil {
@@ -411,6 +444,17 @@ func retryableQCOMSessionError(err error) bool {
 		errors.Is(err, qc.QMIErrorInvalidSessionType) ||
 		errors.Is(err, qc.QMIErrorAuthenticationFailed) ||
 		errors.Is(err, qc.QMIErrorAccessDenied)
+}
+
+func qcomIPFamilyForPDNType(pdnType string) qc.WDSIPFamily {
+	switch pdnType {
+	case "ipv4":
+		return qc.WDSIPFamilyIPv4
+	case "ipv6":
+		return qc.WDSIPFamilyIPv6
+	default:
+		return qc.WDSIPFamilyIPv4v6
+	}
 }
 
 func hasPrefix(value, prefix []byte) bool {

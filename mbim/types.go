@@ -1,5 +1,7 @@
 package mbim
 
+import "net"
+
 type MessageType uint32
 
 const (
@@ -35,12 +37,166 @@ const (
 	ReadyInfoProtectUniqueID ReadyInfo = 1 << 0
 )
 
+type SubscriberReadyStatusFlags uint32
+
+const (
+	SubscriberReadyStatusFlagNone                 SubscriberReadyStatusFlags = 0
+	SubscriberReadyStatusFlagESIM                 SubscriberReadyStatusFlags = 1 << 0
+	SubscriberReadyStatusFlagSIMRemovabilityKnown SubscriberReadyStatusFlags = 1 << 1
+	SubscriberReadyStatusFlagSIMRemovable         SubscriberReadyStatusFlags = 1 << 2
+	SubscriberReadyStatusFlagSIMSlotActive        SubscriberReadyStatusFlags = 1 << 3
+)
+
 type CommandType uint32
 
 const (
 	CommandTypeQuery CommandType = iota
 	CommandTypeSet
 )
+
+type RadioSwitchState uint32
+
+const (
+	RadioSwitchStateOff RadioSwitchState = iota
+	RadioSwitchStateOn
+)
+
+type RadioStateInfo struct {
+	HwRadioState RadioSwitchState
+	SwRadioState RadioSwitchState
+}
+
+type PacketServiceAction uint32
+
+const (
+	PacketServiceActionAttach PacketServiceAction = iota
+	PacketServiceActionDetach
+)
+
+type PacketServiceState uint32
+
+const (
+	PacketServiceStateUnknown PacketServiceState = iota
+	PacketServiceStateAttaching
+	PacketServiceStateAttached
+	PacketServiceStateDetaching
+	PacketServiceStateDetached
+)
+
+type PacketServiceInfo struct {
+	NwError                   uint32
+	PacketServiceState        PacketServiceState
+	HighestAvailableDataClass uint32
+	UplinkSpeed               uint64
+	DownlinkSpeed             uint64
+}
+
+type ActivationCommand uint32
+
+const (
+	ActivationCommandDeactivate ActivationCommand = iota
+	ActivationCommandActivate
+)
+
+type ActivationOption uint32
+
+const (
+	ActivationOptionDefault ActivationOption = iota
+	ActivationOptionPerNonDefaultURSPRules
+	ActivationOptionPerDefaultURSPRule
+	ActivationOptionPerURSPRules
+)
+
+type Compression uint32
+
+const (
+	CompressionNone Compression = iota
+	CompressionEnable
+)
+
+type AuthProtocol uint32
+
+const (
+	AuthProtocolNone AuthProtocol = iota
+	AuthProtocolPAP
+	AuthProtocolCHAP
+	AuthProtocolMSCHAPV2
+)
+
+type ContextIPType uint32
+
+const (
+	ContextIPTypeDefault ContextIPType = iota
+	ContextIPTypeIPv4
+	ContextIPTypeIPv6
+	ContextIPTypeIPv4v6
+	ContextIPTypeIPv4AndIPv6
+)
+
+type ActivationState uint32
+
+const (
+	ActivationStateUnknown ActivationState = iota
+	ActivationStateActivated
+	ActivationStateActivating
+	ActivationStateDeactivated
+	ActivationStateDeactivating
+)
+
+type VoiceCallState uint32
+
+const (
+	VoiceCallStateNone VoiceCallState = iota
+	VoiceCallStateInProgress
+	VoiceCallStateHangUp
+)
+
+type AccessMediaType uint32
+
+const (
+	AccessMediaTypeNone AccessMediaType = iota
+	AccessMediaType3GPP
+	AccessMediaType3GPPPreferred
+)
+
+type ContextType [16]byte
+
+var (
+	ContextTypeNone     = ContextType{0xB4, 0x3F, 0x75, 0x8C, 0xA5, 0x60, 0x4B, 0x46, 0xB3, 0x5E, 0xC5, 0x86, 0x96, 0x41, 0xFB, 0x54}
+	ContextTypeInternet = ContextType{0x7E, 0x5E, 0x2A, 0x7E, 0x4E, 0x6F, 0x72, 0x72, 0x73, 0x6B, 0x65, 0x6E, 0x7E, 0x5E, 0x2A, 0x7E}
+	ContextTypeIMS      = ContextType{0x21, 0x61, 0x0D, 0x01, 0x30, 0x74, 0x4B, 0xCE, 0x94, 0x25, 0xB5, 0x3A, 0x07, 0xD6, 0x97, 0xD6}
+)
+
+type TLVType uint16
+
+const (
+	TLVTypeWCharString TLVType = 10
+	TLVTypePCO         TLVType = 13
+)
+
+type IPConfigurationAvailable uint32
+
+const (
+	IPConfigurationAvailableAddress IPConfigurationAvailable = 1 << iota
+	IPConfigurationAvailableGateway
+	IPConfigurationAvailableDNSServer
+	IPConfigurationAvailableMTU
+)
+
+type IPAddress struct {
+	IP           net.IP
+	PrefixLength uint32
+}
+
+type IPConfigurationInfo struct {
+	SessionID                  uint32
+	IPv4ConfigurationAvailable IPConfigurationAvailable
+	IPv6ConfigurationAvailable IPConfigurationAvailable
+	IPv4Addresses              []IPAddress
+	IPv6Addresses              []IPAddress
+	IPv4MTU                    uint32
+	IPv6MTU                    uint32
+}
 
 type STKPACProfile byte
 

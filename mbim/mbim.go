@@ -15,6 +15,7 @@ const defaultCloseTimeout = 5 * time.Second
 type Reader struct {
 	conn               Conn
 	slot               uint32
+	mbimExVersion      uint16
 	txn                atomic.Uint32
 	proxy              bool
 	maxControlTransfer int
@@ -118,8 +119,13 @@ func (r *Reader) connect(ctx context.Context, device string) error {
 	if err := r.startReceiver(); err != nil {
 		return err
 	}
-	if err := r.ensureSlotActivated(ctx); err != nil {
+	if err := r.negotiateVersion(ctx); err != nil {
 		return err
+	}
+	if !r.usesUiccSlotID() {
+		if err := r.ensureSlotActivated(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -1,7 +1,12 @@
 package mbim
 
 const (
+	CIDRadioState            = 0x00000003
 	CIDSubscriberReadyStatus = 0x00000002
+	CIDPacketService         = 0x0000000A
+	CIDConnect               = 0x0000000C
+	CIDIPConfiguration       = 0x0000000F
+	CIDDeviceServices        = 0x00000010
 
 	CIDAuthAKA = 0x00000001
 
@@ -22,9 +27,19 @@ const (
 
 	CIDProxyControlConfiguration = 0x00000001
 	CIDDeviceSlotMappings        = 0x00000007
+	CIDVersion                   = 0x0000000F
 )
 
 const uiccChannelGroupDefault = 1
+
+const (
+	mbimVersion10        uint16 = 0x0100
+	mbimExVersion10      uint16 = 0x0100
+	mbimExVersion30      uint16 = 0x0300
+	mbimExVersion40      uint16 = 0x0400
+	hostMBIMExVersion           = mbimExVersion40
+	activeSubscriberSlot        = 0xFFFFFFFF
+)
 
 const (
 	defaultMaxControlTransfer = 4096

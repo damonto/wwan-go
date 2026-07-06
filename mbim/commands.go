@@ -10,6 +10,11 @@ import (
 	"unicode/utf16"
 )
 
+const (
+	mbimCIDResponseTimeout     = 8 * time.Second
+	mbimCIDLongResponseTimeout = 58 * time.Second
+)
+
 type ProxyConfigRequest struct {
 	TransactionID uint32
 	DevicePath    string
@@ -93,6 +98,137 @@ type CloseResponse struct{}
 
 func (r *CloseResponse) UnmarshalBinary([]byte) error { return nil }
 
+type DeviceServicesRequest struct {
+	TransactionID uint32
+	Response      *DeviceServicesResponse
+}
+
+func (r *DeviceServicesRequest) Request() *Request {
+	r.Response = new(DeviceServicesResponse)
+	return &Request{
+		MessageType:   MessageTypeCommand,
+		TransactionID: r.TransactionID,
+		Command: command(
+			ServiceBasicConnect,
+			CIDDeviceServices,
+			CommandTypeQuery,
+			nil,
+		),
+		Response: r.Response,
+	}
+}
+
+type DeviceServicesResponse struct {
+	MaxDSSSessions uint32
+	Services       []DeviceService
+}
+
+func (r DeviceServicesResponse) SupportsCID(serviceID [16]byte, cid uint32) bool {
+	return slices.ContainsFunc(r.Services, func(service DeviceService) bool {
+		return service.ServiceID == serviceID && slices.Contains(service.CIDs, cid)
+	})
+}
+
+func (r *DeviceServicesResponse) UnmarshalBinary(data []byte) error {
+	if len(data) < 8 {
+		return errors.New("parsing MBIM device services: payload is truncated")
+	}
+	serviceCount := binary.LittleEndian.Uint32(data[:4])
+	r.MaxDSSSessions = binary.LittleEndian.Uint32(data[4:8])
+	if serviceCount == 0 {
+		r.Services = nil
+		return nil
+	}
+	if serviceCount > uint32((len(data)-8)/8) {
+		return errors.New("parsing MBIM device services: service table is truncated")
+	}
+
+	r.Services = make([]DeviceService, 0, serviceCount)
+	for i := range serviceCount {
+		entryOffset := uint32(8 + i*8)
+		ref, err := readOffsetSizeRef(data, entryOffset)
+		if err != nil {
+			return fmt.Errorf("parsing MBIM device service %d: %w", i, err)
+		}
+		if err := ref.validate(data); err != nil {
+			return fmt.Errorf("parsing MBIM device service %d: %w", i, err)
+		}
+
+		var service DeviceService
+		if err := service.UnmarshalBinary(data[ref.offset : ref.offset+ref.size]); err != nil {
+			return fmt.Errorf("parsing MBIM device service %d: %w", i, err)
+		}
+		r.Services = append(r.Services, service)
+	}
+	return nil
+}
+
+type DeviceService struct {
+	ServiceID       [16]byte
+	DSSPayload      uint32
+	MaxDSSInstances uint32
+	CIDs            []uint32
+}
+
+func (s *DeviceService) UnmarshalBinary(data []byte) error {
+	if len(data) < 28 {
+		return errors.New("device service is truncated")
+	}
+	copy(s.ServiceID[:], data[:16])
+	s.DSSPayload = binary.LittleEndian.Uint32(data[16:20])
+	s.MaxDSSInstances = binary.LittleEndian.Uint32(data[20:24])
+	cidCount := binary.LittleEndian.Uint32(data[24:28])
+	if cidCount > uint32((len(data)-28)/4) {
+		return errors.New("CID list is truncated")
+	}
+
+	s.CIDs = make([]uint32, cidCount)
+	for i := range cidCount {
+		offset := 28 + i*4
+		s.CIDs[i] = binary.LittleEndian.Uint32(data[offset : offset+4])
+	}
+	return nil
+}
+
+type VersionRequest struct {
+	TransactionID uint32
+	MBIMVersion   uint16
+	MBIMExVersion uint16
+	Response      *VersionInfo
+}
+
+func (r *VersionRequest) Request() *Request {
+	data := binary.LittleEndian.AppendUint16(nil, r.MBIMVersion)
+	data = binary.LittleEndian.AppendUint16(data, r.MBIMExVersion)
+
+	r.Response = new(VersionInfo)
+	return &Request{
+		MessageType:   MessageTypeCommand,
+		TransactionID: r.TransactionID,
+		Command: command(
+			ServiceMsBasicConnectExtensions,
+			CIDVersion,
+			CommandTypeQuery,
+			data,
+		),
+		Response: r.Response,
+	}
+}
+
+type VersionInfo struct {
+	MBIMVersion   uint16
+	MBIMExVersion uint16
+}
+
+func (r *VersionInfo) UnmarshalBinary(data []byte) error {
+	if len(data) < 4 {
+		return errors.New("parsing MBIM version: payload is truncated")
+	}
+	r.MBIMVersion = binary.LittleEndian.Uint16(data[:2])
+	r.MBIMExVersion = binary.LittleEndian.Uint16(data[2:4])
+	return nil
+}
+
 type DeviceSlotMappingsRequest struct {
 	TransactionID uint32
 	SlotMappings  []SlotMapping
@@ -168,20 +304,20 @@ func (r *DeviceSlotMappingsResponse) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
-type SubscriberReadyStatusRequest struct {
+type RadioStateRequest struct {
 	TransactionID uint32
-	Response      *SubscriberReadyStatusResponse
+	Response      *RadioStateInfo
 }
 
-func (r *SubscriberReadyStatusRequest) Request() *Request {
-	r.Response = new(SubscriberReadyStatusResponse)
+func (r *RadioStateRequest) Request() *Request {
+	r.Response = new(RadioStateInfo)
 	return &Request{
 		MessageType:   MessageTypeCommand,
 		TransactionID: r.TransactionID,
-		Timeout:       time.Second,
+		Timeout:       mbimCIDResponseTimeout,
 		Command: command(
 			ServiceBasicConnect,
-			CIDSubscriberReadyStatus,
+			CIDRadioState,
 			CommandTypeQuery,
 			nil,
 		),
@@ -189,12 +325,75 @@ func (r *SubscriberReadyStatusRequest) Request() *Request {
 	}
 }
 
+type RadioStateSetRequest struct {
+	TransactionID uint32
+	State         RadioSwitchState
+	Response      *RadioStateInfo
+}
+
+func (r *RadioStateSetRequest) Request() *Request {
+	data := binary.LittleEndian.AppendUint32(nil, uint32(r.State))
+	r.Response = new(RadioStateInfo)
+	return &Request{
+		MessageType:   MessageTypeCommand,
+		TransactionID: r.TransactionID,
+		Timeout:       mbimCIDLongResponseTimeout,
+		Command: command(
+			ServiceBasicConnect,
+			CIDRadioState,
+			CommandTypeSet,
+			data,
+		),
+		Response: r.Response,
+	}
+}
+
+func (r *RadioStateInfo) UnmarshalBinary(data []byte) error {
+	if len(data) < 8 {
+		return errors.New("parsing MBIM radio state: payload is truncated")
+	}
+	r.HwRadioState = RadioSwitchState(binary.LittleEndian.Uint32(data[:4]))
+	r.SwRadioState = RadioSwitchState(binary.LittleEndian.Uint32(data[4:8]))
+	return nil
+}
+
+type SubscriberReadyStatusRequest struct {
+	TransactionID uint32
+	MBIMExVersion uint16
+	SlotID        uint32
+	Response      *SubscriberReadyStatusResponse
+}
+
+func (r *SubscriberReadyStatusRequest) Request() *Request {
+	var data []byte
+	if r.MBIMExVersion >= mbimExVersion40 {
+		data = binary.LittleEndian.AppendUint32(nil, r.SlotID)
+	}
+
+	r.Response = &SubscriberReadyStatusResponse{MBIMExVersion: r.MBIMExVersion}
+	return &Request{
+		MessageType:   MessageTypeCommand,
+		TransactionID: r.TransactionID,
+		Timeout:       mbimCIDResponseTimeout,
+		Command: command(
+			ServiceBasicConnect,
+			CIDSubscriberReadyStatus,
+			CommandTypeQuery,
+			data,
+		),
+		Response: r.Response,
+	}
+}
+
 type SubscriberReadyStatusResponse struct {
+	MBIMExVersion         uint16
 	ReadyState            SubscriberReadyState
+	Flags                 SubscriberReadyStatusFlags
 	SubscriberID          string
 	SIMICCID              string
 	ReadyInfo             ReadyInfo
 	TelephoneNumbersCount uint32
+	SlotID                uint32
 	TelephoneNumbers      []string
 }
 
@@ -202,19 +401,40 @@ func (r *SubscriberReadyStatusResponse) UnmarshalBinary(data []byte) error {
 	if len(data) < 28 {
 		return errors.New("parsing MBIM subscriber ready status: payload is truncated")
 	}
-	r.ReadyState = SubscriberReadyState(binary.LittleEndian.Uint32(data[:4]))
-	subscriberIDRef := valueRef{
-		offset: binary.LittleEndian.Uint32(data[4:8]),
-		size:   binary.LittleEndian.Uint32(data[8:12]),
+	subscriberRefOffset := uint32(4)
+	simRefOffset := uint32(12)
+	readyInfoOffset := uint32(20)
+	countOffset := uint32(24)
+	telephoneTableOffset := uint32(28)
+	if r.MBIMExVersion >= mbimExVersion40 {
+		if len(data) < 36 {
+			return errors.New("parsing MBIM subscriber ready status: payload is truncated")
+		}
+		r.Flags = SubscriberReadyStatusFlags(binary.LittleEndian.Uint32(data[4:8]))
+		r.SlotID = binary.LittleEndian.Uint32(data[32:36])
+		subscriberRefOffset = 8
+		simRefOffset = 16
+		readyInfoOffset = 24
+		countOffset = 28
+		telephoneTableOffset = 36
+	} else {
+		r.Flags = SubscriberReadyStatusFlagNone
+		r.SlotID = activeSubscriberSlot
 	}
-	simICCIDRef := valueRef{
-		offset: binary.LittleEndian.Uint32(data[12:16]),
-		size:   binary.LittleEndian.Uint32(data[16:20]),
-	}
-	r.ReadyInfo = ReadyInfo(binary.LittleEndian.Uint32(data[20:24]))
-	r.TelephoneNumbersCount = binary.LittleEndian.Uint32(data[24:28])
 
-	if r.TelephoneNumbersCount > uint32((len(data)-28)/8) {
+	r.ReadyState = SubscriberReadyState(binary.LittleEndian.Uint32(data[:4]))
+	subscriberIDRef, err := readOffsetSizeRef(data, subscriberRefOffset)
+	if err != nil {
+		return fmt.Errorf("parsing MBIM subscriber ready status subscriber ID: %w", err)
+	}
+	simICCIDRef, err := readOffsetSizeRef(data, simRefOffset)
+	if err != nil {
+		return fmt.Errorf("parsing MBIM subscriber ready status SIM ICCID: %w", err)
+	}
+	r.ReadyInfo = ReadyInfo(binary.LittleEndian.Uint32(data[readyInfoOffset : readyInfoOffset+4]))
+	r.TelephoneNumbersCount = binary.LittleEndian.Uint32(data[countOffset : countOffset+4])
+
+	if r.TelephoneNumbersCount > uint32((len(data)-int(telephoneTableOffset))/8) {
 		return errors.New("parsing MBIM subscriber ready status: telephone number table is truncated")
 	}
 	r.TelephoneNumbers = nil
@@ -225,7 +445,7 @@ func (r *SubscriberReadyStatusResponse) UnmarshalBinary(data []byte) error {
 	refs := make([]valueRef, 0, 2+r.TelephoneNumbersCount)
 	refs = append(refs, subscriberIDRef, simICCIDRef)
 	for i := range r.TelephoneNumbersCount {
-		entryOffset := 28 + i*8
+		entryOffset := telephoneTableOffset + i*8
 		refs = append(refs, valueRef{
 			offset: binary.LittleEndian.Uint32(data[entryOffset : entryOffset+4]),
 			size:   binary.LittleEndian.Uint32(data[entryOffset+4 : entryOffset+8]),
@@ -235,7 +455,6 @@ func (r *SubscriberReadyStatusResponse) UnmarshalBinary(data []byte) error {
 		return fmt.Errorf("parsing MBIM subscriber ready status strings: %w", err)
 	}
 
-	var err error
 	r.SubscriberID, err = utf16String(data, subscriberIDRef)
 	if err != nil {
 		return fmt.Errorf("parsing MBIM subscriber ready status subscriber ID: %w", err)
@@ -565,19 +784,27 @@ func (r *AuthAKAResponse) UnmarshalBinary(data []byte) error {
 
 type UiccATRQueryRequest struct {
 	TransactionID uint32
+	MBIMExVersion uint16
+	SlotID        uint32
 	Response      *UiccATRResponse
 }
 
 func (r *UiccATRQueryRequest) Request() *Request {
+	var data []byte
+	if r.MBIMExVersion >= mbimExVersion40 {
+		data = binary.LittleEndian.AppendUint32(nil, r.SlotID)
+	}
+
 	r.Response = new(UiccATRResponse)
 	return &Request{
 		MessageType:   MessageTypeCommand,
 		TransactionID: r.TransactionID,
+		Timeout:       mbimCIDLongResponseTimeout,
 		Command: command(
 			ServiceMsUiccLowLevelAccess,
 			CIDUiccATR,
 			CommandTypeQuery,
-			nil,
+			data,
 		),
 		Response: r.Response,
 	}
@@ -598,6 +825,8 @@ func (r *UiccATRResponse) UnmarshalBinary(data []byte) error {
 
 type OpenChannelRequest struct {
 	TransactionID uint32
+	MBIMExVersion uint16
+	SlotID        uint32
 	ApplicationID []byte
 	SelectP2Arg   uint32
 	ChannelGroup  uint32
@@ -605,15 +834,23 @@ type OpenChannelRequest struct {
 }
 
 func (r *OpenChannelRequest) Request() *Request {
-	data := uiccRefHeader(16, r.ApplicationID)
+	appIDOffset := 16
+	if r.MBIMExVersion >= mbimExVersion40 {
+		appIDOffset = 20
+	}
+	data := uiccRefHeader(appIDOffset, r.ApplicationID)
 	data = binary.LittleEndian.AppendUint32(data, r.SelectP2Arg)
 	data = binary.LittleEndian.AppendUint32(data, r.ChannelGroup)
+	if r.MBIMExVersion >= mbimExVersion40 {
+		data = binary.LittleEndian.AppendUint32(data, r.SlotID)
+	}
 	data = append(data, r.ApplicationID...)
 
 	r.Response = new(OpenChannelResponse)
 	return &Request{
 		MessageType:   MessageTypeCommand,
 		TransactionID: r.TransactionID,
+		Timeout:       mbimCIDResponseTimeout,
 		Command: command(
 			ServiceMsUiccLowLevelAccess,
 			CIDUiccOpenChannel,
@@ -646,6 +883,8 @@ func (r *OpenChannelResponse) UnmarshalBinary(data []byte) error {
 
 type CloseChannelRequest struct {
 	TransactionID uint32
+	MBIMExVersion uint16
+	SlotID        uint32
 	Channel       uint32
 	ChannelGroup  uint32
 	Response      *CloseChannelResponse
@@ -654,11 +893,15 @@ type CloseChannelRequest struct {
 func (r *CloseChannelRequest) Request() *Request {
 	data := binary.LittleEndian.AppendUint32(nil, r.Channel)
 	data = binary.LittleEndian.AppendUint32(data, r.ChannelGroup)
+	if r.MBIMExVersion >= mbimExVersion40 {
+		data = binary.LittleEndian.AppendUint32(data, r.SlotID)
+	}
 
 	r.Response = new(CloseChannelResponse)
 	return &Request{
 		MessageType:   MessageTypeCommand,
 		TransactionID: r.TransactionID,
+		Timeout:       mbimCIDResponseTimeout,
 		Command: command(
 			ServiceMsUiccLowLevelAccess,
 			CIDUiccCloseChannel,
@@ -683,6 +926,8 @@ func (r *CloseChannelResponse) UnmarshalBinary(data []byte) error {
 
 type APDURequest struct {
 	TransactionID   uint32
+	MBIMExVersion   uint16
+	SlotID          uint32
 	Channel         uint32
 	SecureMessaging UiccSecureMessaging
 	ClassByteType   UiccClassByteType
@@ -691,17 +936,26 @@ type APDURequest struct {
 }
 
 func (r *APDURequest) Request() *Request {
+	commandOffset := uint32(20)
+	if r.MBIMExVersion >= mbimExVersion40 {
+		commandOffset = 24
+	}
+
 	data := binary.LittleEndian.AppendUint32(nil, r.Channel)
 	data = binary.LittleEndian.AppendUint32(data, uint32(r.SecureMessaging))
 	data = binary.LittleEndian.AppendUint32(data, uint32(r.ClassByteType))
 	data = binary.LittleEndian.AppendUint32(data, uint32(len(r.Command)))
-	data = binary.LittleEndian.AppendUint32(data, 20)
+	data = binary.LittleEndian.AppendUint32(data, commandOffset)
+	if r.MBIMExVersion >= mbimExVersion40 {
+		data = binary.LittleEndian.AppendUint32(data, r.SlotID)
+	}
 	data = append(data, r.Command...)
 
 	r.Response = new(APDUResponse)
 	return &Request{
 		MessageType:   MessageTypeCommand,
 		TransactionID: r.TransactionID,
+		Timeout:       mbimCIDLongResponseTimeout,
 		Command: command(
 			ServiceMsUiccLowLevelAccess,
 			CIDUiccAPDU,
@@ -732,37 +986,53 @@ func (r *APDUResponse) UnmarshalBinary(data []byte) error {
 
 type UiccTerminalCapabilitySetRequest struct {
 	TransactionID uint32
+	MBIMExVersion uint16
+	SlotID        uint32
 	Capabilities  [][]byte
 }
 
 func (r *UiccTerminalCapabilitySetRequest) Request() *Request {
+	data := terminalCapabilityData(r.Capabilities)
+	if r.MBIMExVersion >= mbimExVersion40 {
+		data = terminalCapabilityDataEx4(r.SlotID, r.Capabilities)
+	}
+
 	return &Request{
 		MessageType:   MessageTypeCommand,
 		TransactionID: r.TransactionID,
+		Timeout:       mbimCIDResponseTimeout,
 		Command: command(
 			ServiceMsUiccLowLevelAccess,
 			CIDUiccTerminalCapability,
 			CommandTypeSet,
-			terminalCapabilityData(r.Capabilities),
+			data,
 		),
 	}
 }
 
 type UiccTerminalCapabilityQueryRequest struct {
 	TransactionID uint32
+	MBIMExVersion uint16
+	SlotID        uint32
 	Response      *UiccTerminalCapabilityResponse
 }
 
 func (r *UiccTerminalCapabilityQueryRequest) Request() *Request {
+	var data []byte
+	if r.MBIMExVersion >= mbimExVersion40 {
+		data = binary.LittleEndian.AppendUint32(nil, r.SlotID)
+	}
+
 	r.Response = new(UiccTerminalCapabilityResponse)
 	return &Request{
 		MessageType:   MessageTypeCommand,
 		TransactionID: r.TransactionID,
+		Timeout:       mbimCIDResponseTimeout,
 		Command: command(
 			ServiceMsUiccLowLevelAccess,
 			CIDUiccTerminalCapability,
 			CommandTypeQuery,
-			nil,
+			data,
 		),
 		Response: r.Response,
 	}
@@ -800,17 +1070,23 @@ func (r *UiccTerminalCapabilityResponse) UnmarshalBinary(data []byte) error {
 
 type UiccResetSetRequest struct {
 	TransactionID uint32
+	MBIMExVersion uint16
+	SlotID        uint32
 	Action        UiccPassThroughAction
 	Response      *UiccResetResponse
 }
 
 func (r *UiccResetSetRequest) Request() *Request {
 	data := binary.LittleEndian.AppendUint32(nil, uint32(r.Action))
+	if r.MBIMExVersion >= mbimExVersion40 {
+		data = binary.LittleEndian.AppendUint32(data, r.SlotID)
+	}
 
 	r.Response = new(UiccResetResponse)
 	return &Request{
 		MessageType:   MessageTypeCommand,
 		TransactionID: r.TransactionID,
+		Timeout:       mbimCIDLongResponseTimeout,
 		Command: command(
 			ServiceMsUiccLowLevelAccess,
 			CIDUiccReset,
@@ -823,19 +1099,27 @@ func (r *UiccResetSetRequest) Request() *Request {
 
 type UiccResetQueryRequest struct {
 	TransactionID uint32
+	MBIMExVersion uint16
+	SlotID        uint32
 	Response      *UiccResetResponse
 }
 
 func (r *UiccResetQueryRequest) Request() *Request {
+	var data []byte
+	if r.MBIMExVersion >= mbimExVersion40 {
+		data = binary.LittleEndian.AppendUint32(nil, r.SlotID)
+	}
+
 	r.Response = new(UiccResetResponse)
 	return &Request{
 		MessageType:   MessageTypeCommand,
 		TransactionID: r.TransactionID,
+		Timeout:       mbimCIDLongResponseTimeout,
 		Command: command(
 			ServiceMsUiccLowLevelAccess,
 			CIDUiccReset,
 			CommandTypeQuery,
-			nil,
+			data,
 		),
 		Response: r.Response,
 	}
@@ -1128,6 +1412,25 @@ func terminalCapabilityData(capabilities [][]byte) []byte {
 	return data
 }
 
+func terminalCapabilityDataEx4(slotID uint32, capabilities [][]byte) []byte {
+	capabilityCount := uint32(len(capabilities))
+	data := binary.LittleEndian.AppendUint32(nil, slotID)
+	data = binary.LittleEndian.AppendUint32(data, capabilityCount)
+	capabilityOffset := 8 + len(capabilities)*8
+	for _, capability := range capabilities {
+		data = binary.LittleEndian.AppendUint32(data, uint32(capabilityOffset))
+		data = binary.LittleEndian.AppendUint32(data, uint32(len(capability)))
+		capabilityOffset = align4(capabilityOffset + len(capability))
+	}
+	for _, capability := range capabilities {
+		data = append(data, capability...)
+		for len(data)%4 != 0 {
+			data = append(data, 0)
+		}
+	}
+	return data
+}
+
 func refHeader(baseOffset int, refs ...[]byte) []byte {
 	data := binary.LittleEndian.AppendUint32(nil, 1)
 	offset := baseOffset
@@ -1200,6 +1503,10 @@ func utf16String(data []byte, ref valueRef) (string, error) {
 		return "", nil
 	}
 	raw := data[ref.offset : ref.offset+ref.size]
+	return utf16RawString(raw)
+}
+
+func utf16RawString(raw []byte) (string, error) {
 	if len(raw)%2 != 0 {
 		return "", errors.New("UTF-16 string has odd byte length")
 	}

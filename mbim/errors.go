@@ -91,6 +91,8 @@ const (
 	StatusMSInvalidLogicalChannel Status = 0x87430003
 )
 
+const StatusInvalidSlot Status = 202
+
 func (e Status) Error() string {
 	switch e {
 	case StatusNone:
@@ -171,6 +173,8 @@ func (e Status) Error() string {
 		return "MBIM auth AMF not set"
 	case StatusContextNotSupported:
 		return "MBIM context not supported"
+	case StatusInvalidSlot:
+		return "MBIM invalid slot"
 	case StatusMSNoLogicalChannels:
 		return "MBIM no logical channels"
 	case StatusMSSelectFailed:

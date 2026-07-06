@@ -111,3 +111,22 @@ func TestResultError(t *testing.T) {
 		})
 	}
 }
+
+func TestWDSStartNetworkErrorIncludesCallEndReason(t *testing.T) {
+	err := &WDSStartNetworkError{
+		Err:                     QMIErrorCallFailed,
+		CallEndReason:           WDSCallEndReasonGenericUnspecified,
+		HasCallEndReason:        true,
+		VerboseCallEndReason:    WDSVerboseCallEndReason{Type: WDSVerboseCallEndReasonTypeInternal, Reason: 241},
+		HasVerboseCallEndReason: true,
+	}
+
+	if !errors.Is(err, QMIErrorCallFailed) {
+		t.Fatal("WDSStartNetworkError should unwrap the QMI error")
+	}
+
+	want := "start WDS network: Call failed: call end reason generic-unspecified (1): verbose call end reason [internal] interface-in-use-config-match (2,241)"
+	if got := err.Error(); got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+}

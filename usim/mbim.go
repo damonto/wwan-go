@@ -31,6 +31,39 @@ func NewMBIM(reader *mbim.Reader) (*MBIM, error) {
 	return &MBIM{reader: reader}, nil
 }
 
+// OpenIMSPDN starts the LTE IMS PDN through the MBIM modem backing this reader.
+func (r *MBIM) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSession, error) {
+	if r == nil || r.reader == nil {
+		return nil, errors.New("opening IMS PDN: MBIM reader is nil")
+	}
+	normalized, err := cfg.normalized()
+	if err != nil {
+		return nil, err
+	}
+	session, err := r.reader.OpenIMSPDN(ctx, mbim.IMSPDNConfig{
+		APN:            normalized.APN,
+		IPType:         mbimContextIPTypeForPDNType(normalized.PDNType),
+		RequestTimeout: normalized.RequestTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("opening IMS PDN: %w", err)
+	}
+	return &IMSPDNSession{
+		info: func() IMSPDNInfo {
+			info := session.Info()
+			return IMSPDNInfo{
+				LocalIPv4:       info.LocalIPv4,
+				LocalIPv6:       info.LocalIPv6,
+				PCSCFIPs:        info.PCSCFIPs,
+				VoPSKnown:       info.VoPSKnown,
+				VoPSSupported:   info.VoPSSupported,
+				PacketDataReady: info.PacketDataReady,
+			}
+		},
+		close: session.Close,
+	}, nil
+}
+
 func (r *MBIM) ListApplications(ctx context.Context) ([]usimcard.Application, error) {
 	apps, err := r.reader.ListApplications(ctx)
 	if err != nil {
@@ -217,4 +250,15 @@ func mbimPACHostControl(profile stk.Profile) []byte {
 		}
 	}
 	return control
+}
+
+func mbimContextIPTypeForPDNType(pdnType string) mbim.ContextIPType {
+	switch pdnType {
+	case "ipv4":
+		return mbim.ContextIPTypeIPv4
+	case "ipv6":
+		return mbim.ContextIPTypeIPv6
+	default:
+		return mbim.ContextIPTypeIPv4v6
+	}
 }

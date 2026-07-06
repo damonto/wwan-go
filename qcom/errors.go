@@ -280,6 +280,91 @@ func (q QMIError) Error() string {
 	return fmt.Sprintf("QMI error %d", q)
 }
 
+// WDSStartNetworkError keeps modem call-end details attached to a QMI failure.
+type WDSStartNetworkError struct {
+	Err                     error
+	CallEndReason           WDSCallEndReason
+	HasCallEndReason        bool
+	VerboseCallEndReason    WDSVerboseCallEndReason
+	HasVerboseCallEndReason bool
+}
+
+func (e *WDSStartNetworkError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+
+	msg := "start WDS network"
+	if e.Err != nil {
+		msg += ": " + e.Err.Error()
+	}
+	if e.HasCallEndReason {
+		msg += fmt.Sprintf(": call end reason %s (%d)", e.CallEndReason, uint16(e.CallEndReason))
+	}
+	if e.HasVerboseCallEndReason {
+		reason := e.VerboseCallEndReason
+		msg += fmt.Sprintf(": verbose call end reason [%s] %s (%d,%d)",
+			reason.Type,
+			reason,
+			uint16(reason.Type),
+			reason.Reason,
+		)
+	}
+	return msg
+}
+
+func (e *WDSStartNetworkError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (r WDSCallEndReason) String() string {
+	if text, ok := wdsCallEndReasonText[r]; ok {
+		return text
+	}
+	return fmt.Sprintf("WDS call end reason %d", r)
+}
+
+func (t WDSVerboseCallEndReasonType) String() string {
+	if text, ok := wdsVerboseCallEndReasonTypeText[t]; ok {
+		return text
+	}
+	return fmt.Sprintf("type-%d", t)
+}
+
+func (r WDSVerboseCallEndReason) String() string {
+	if r.Type == WDSVerboseCallEndReasonTypeInternal {
+		if text, ok := wdsVerboseInternalReasonText[r.Reason]; ok {
+			return text
+		}
+	}
+	return fmt.Sprintf("reason-%d", r.Reason)
+}
+
+var wdsCallEndReasonText = map[WDSCallEndReason]string{
+	WDSCallEndReasonGenericUnspecified: "generic-unspecified",
+}
+
+var wdsVerboseCallEndReasonTypeText = map[WDSVerboseCallEndReasonType]string{
+	WDSVerboseCallEndReasonTypeMIP:      "mip",
+	WDSVerboseCallEndReasonTypeInternal: "internal",
+	WDSVerboseCallEndReasonTypeCM:       "cm",
+	WDSVerboseCallEndReasonType3GPP:     "3gpp",
+	WDSVerboseCallEndReasonTypePPP:      "ppp",
+	WDSVerboseCallEndReasonTypeEHRPD:    "ehrpd",
+	WDSVerboseCallEndReasonTypeIPv6:     "ipv6",
+}
+
+var wdsVerboseInternalReasonText = map[int16]string{
+	208: "pdn-ipv4-call-disallowed",
+	210: "pdn-ipv6-call-disallowed",
+	236: "call-already-present",
+	237: "interface-in-use",
+	241: "interface-in-use-config-match",
+}
+
 func ResultError(tlvs tlv.TLVs) error {
 	item, ok := tlvs.Find(0x02)
 	if !ok {

@@ -52,7 +52,11 @@ func (r *Reader) AuthenticateAKA(ctx context.Context, rand, autn []byte) (*AuthA
 }
 
 func (r *Reader) QueryUiccATR(ctx context.Context) ([]byte, error) {
-	request := UiccATRQueryRequest{TransactionID: r.nextTransactionID()}
+	request := UiccATRQueryRequest{
+		TransactionID: r.nextTransactionID(),
+		MBIMExVersion: r.mbimExVersion,
+		SlotID:        r.slot,
+	}
 	if err := r.transmit(ctx, request.Request()); err != nil {
 		return nil, fmt.Errorf("querying MBIM UICC ATR: %w", err)
 	}
@@ -62,6 +66,8 @@ func (r *Reader) QueryUiccATR(ctx context.Context) ([]byte, error) {
 func (r *Reader) OpenChannel(ctx context.Context, aid []byte) (uint32, error) {
 	request := OpenChannelRequest{
 		TransactionID: r.nextTransactionID(),
+		MBIMExVersion: r.mbimExVersion,
+		SlotID:        r.slot,
 		ApplicationID: slices.Clone(aid),
 		ChannelGroup:  uiccChannelGroupDefault,
 	}
@@ -77,6 +83,8 @@ func (r *Reader) OpenChannel(ctx context.Context, aid []byte) (uint32, error) {
 func (r *Reader) TransmitAPDU(ctx context.Context, channel uint32, command []byte) ([]byte, uint32, error) {
 	request := APDURequest{
 		TransactionID:   r.nextTransactionID(),
+		MBIMExVersion:   r.mbimExVersion,
+		SlotID:          r.slot,
 		Channel:         channel,
 		SecureMessaging: UiccSecureMessagingNone,
 		ClassByteType:   UiccClassByteTypeInterIndustry,
@@ -91,6 +99,8 @@ func (r *Reader) TransmitAPDU(ctx context.Context, channel uint32, command []byt
 func (r *Reader) SetUiccReset(ctx context.Context, action UiccPassThroughAction) (UiccPassThroughStatus, error) {
 	request := UiccResetSetRequest{
 		TransactionID: r.nextTransactionID(),
+		MBIMExVersion: r.mbimExVersion,
+		SlotID:        r.slot,
 		Action:        action,
 	}
 	if err := r.transmit(ctx, request.Request()); err != nil {
@@ -101,7 +111,11 @@ func (r *Reader) SetUiccReset(ctx context.Context, action UiccPassThroughAction)
 }
 
 func (r *Reader) QueryUiccReset(ctx context.Context) (UiccPassThroughStatus, error) {
-	request := UiccResetQueryRequest{TransactionID: r.nextTransactionID()}
+	request := UiccResetQueryRequest{
+		TransactionID: r.nextTransactionID(),
+		MBIMExVersion: r.mbimExVersion,
+		SlotID:        r.slot,
+	}
 	if err := r.transmit(ctx, request.Request()); err != nil {
 		return 0, fmt.Errorf("querying MBIM UICC reset: %w", err)
 	}
@@ -111,6 +125,8 @@ func (r *Reader) QueryUiccReset(ctx context.Context) (UiccPassThroughStatus, err
 func (r *Reader) SetUiccTerminalCapability(ctx context.Context, capabilities [][]byte) error {
 	request := UiccTerminalCapabilitySetRequest{
 		TransactionID: r.nextTransactionID(),
+		MBIMExVersion: r.mbimExVersion,
+		SlotID:        r.slot,
 		Capabilities:  cloneByteSlices(capabilities),
 	}
 	if err := r.transmit(ctx, request.Request()); err != nil {
@@ -120,7 +136,11 @@ func (r *Reader) SetUiccTerminalCapability(ctx context.Context, capabilities [][
 }
 
 func (r *Reader) QueryUiccTerminalCapability(ctx context.Context) ([][]byte, error) {
-	request := UiccTerminalCapabilityQueryRequest{TransactionID: r.nextTransactionID()}
+	request := UiccTerminalCapabilityQueryRequest{
+		TransactionID: r.nextTransactionID(),
+		MBIMExVersion: r.mbimExVersion,
+		SlotID:        r.slot,
+	}
 	if err := r.transmit(ctx, request.Request()); err != nil {
 		return nil, fmt.Errorf("querying MBIM UICC terminal capability: %w", err)
 	}
@@ -130,6 +150,8 @@ func (r *Reader) QueryUiccTerminalCapability(ctx context.Context) ([][]byte, err
 func (r *Reader) CloseChannel(ctx context.Context, channel uint32) error {
 	request := CloseChannelRequest{
 		TransactionID: r.nextTransactionID(),
+		MBIMExVersion: r.mbimExVersion,
+		SlotID:        r.slot,
 		Channel:       channel,
 		ChannelGroup:  uiccChannelGroupDefault,
 	}
