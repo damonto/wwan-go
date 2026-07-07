@@ -10,13 +10,20 @@ import (
 
 const (
 	pcoOptionPCSCFIPv6 uint16 = 0x0001
+	pcoOptionDNSIPv6   uint16 = 0x0003
 	pcoOptionPCSCFIPv4 uint16 = 0x000c
+	pcoOptionDNSIPv4   uint16 = 0x000d
+	pcoOptionIPv4MTU   uint16 = 0x0010
 )
 
 type ProtocolConfigurationOptions struct {
 	Extension             bool
 	ConfigurationProtocol byte
 	Options               []PCOOption
+	PCSCFIPs              []net.IP
+	DNSIPs                []net.IP
+	IPv4LinkMTU           uint16
+	IPv4LinkMTUKnown      bool
 }
 
 type PCOOption struct {
@@ -60,7 +67,7 @@ func (p *ProtocolConfigurationOptions) UnmarshalBinary(data []byte) error {
 		})
 		data = data[length:]
 	}
-	return nil
+	return p.parseOptions()
 }
 
 func PCSCFIPsFromPCO(data []byte) ([]net.IP, error) {
@@ -68,35 +75,59 @@ func PCSCFIPsFromPCO(data []byte) ([]net.IP, error) {
 	if err := pco.UnmarshalBinary(data); err != nil {
 		return nil, err
 	}
-	return pcscfIPsFromOptions(pco.Options)
+	return pco.PCSCFIPs, nil
 }
 
-func pcscfIPsFromPCOs(pcos []ProtocolConfigurationOptions) ([]net.IP, error) {
-	var ips []net.IP
-	for _, pco := range pcos {
-		pcoIPs, err := pcscfIPsFromOptions(pco.Options)
-		if err != nil {
-			return nil, err
-		}
-		ips = append(ips, pcoIPs...)
+func (p *ProtocolConfigurationOptions) parseOptions() error {
+	pcscfIPs, err := pcscfIPsFromOptions(p.Options)
+	if err != nil {
+		return err
 	}
-	return uniqueIPs(ips), nil
+	dnsIPs, err := dnsIPsFromOptions(p.Options)
+	if err != nil {
+		return err
+	}
+	mtu, mtuKnown, err := ipv4LinkMTUFromOptions(p.Options)
+	if err != nil {
+		return err
+	}
+	p.PCSCFIPs = pcscfIPs
+	p.DNSIPs = dnsIPs
+	p.IPv4LinkMTU = mtu
+	p.IPv4LinkMTUKnown = mtuKnown
+	return nil
 }
 
 func pcscfIPsFromOptions(options []PCOOption) ([]net.IP, error) {
+	ips, err := ipsFromOptions(options, pcoOptionPCSCFIPv4, pcoOptionPCSCFIPv6)
+	if err != nil {
+		return nil, fmt.Errorf("parsing PCO P-CSCF IPs: %w", err)
+	}
+	return ips, nil
+}
+
+func dnsIPsFromOptions(options []PCOOption) ([]net.IP, error) {
+	ips, err := ipsFromOptions(options, pcoOptionDNSIPv4, pcoOptionDNSIPv6)
+	if err != nil {
+		return nil, fmt.Errorf("parsing PCO DNS server IPs: %w", err)
+	}
+	return ips, nil
+}
+
+func ipsFromOptions(options []PCOOption, ipv4ID, ipv6ID uint16) ([]net.IP, error) {
 	var ips []net.IP
 	for _, option := range options {
 		switch option.ID {
-		case pcoOptionPCSCFIPv4:
+		case ipv4ID:
 			if len(option.Data)%4 != 0 {
-				return nil, fmt.Errorf("parsing PCO: P-CSCF IPv4 option length %d is not a multiple of 4", len(option.Data))
+				return nil, fmt.Errorf("IPv4 option length %d is not a multiple of 4", len(option.Data))
 			}
 			for chunk := range slices.Chunk(option.Data, 4) {
 				ips = append(ips, net.IPv4(chunk[0], chunk[1], chunk[2], chunk[3]))
 			}
-		case pcoOptionPCSCFIPv6:
+		case ipv6ID:
 			if len(option.Data)%16 != 0 {
-				return nil, fmt.Errorf("parsing PCO: P-CSCF IPv6 option length %d is not a multiple of 16", len(option.Data))
+				return nil, fmt.Errorf("IPv6 option length %d is not a multiple of 16", len(option.Data))
 			}
 			for chunk := range slices.Chunk(option.Data, 16) {
 				ips = append(ips, slices.Clone(net.IP(chunk)))
@@ -104,6 +135,19 @@ func pcscfIPsFromOptions(options []PCOOption) ([]net.IP, error) {
 		}
 	}
 	return uniqueIPs(ips), nil
+}
+
+func ipv4LinkMTUFromOptions(options []PCOOption) (uint16, bool, error) {
+	for _, option := range options {
+		if option.ID != pcoOptionIPv4MTU {
+			continue
+		}
+		if len(option.Data) != 2 {
+			return 0, false, fmt.Errorf("parsing PCO: IPv4 link MTU option length %d, want 2", len(option.Data))
+		}
+		return binary.BigEndian.Uint16(option.Data), true, nil
+	}
+	return 0, false, nil
 }
 
 func pcoOptionUsesUint16Length(optionID uint16) bool {

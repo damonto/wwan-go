@@ -79,7 +79,7 @@ func TestDMSRequestEncoding(t *testing.T) {
 	}
 }
 
-func TestUnmarshalDMSOperatingMode(t *testing.T) {
+func TestDMSGetOperatingModeResponseUnmarshalTLVs(t *testing.T) {
 	tests := []struct {
 		name    string
 		tlvs    tlv.TLVs
@@ -97,18 +97,19 @@ func TestUnmarshalDMSOperatingMode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := UnmarshalDMSOperatingMode(tt.tlvs)
+			var got DMSGetOperatingModeResponse
+			err := got.UnmarshalTLVs(tt.tlvs)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatal("UnmarshalDMSOperatingMode() error = nil, want non-nil")
+					t.Fatal("UnmarshalTLVs() error = nil, want non-nil")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("UnmarshalDMSOperatingMode() error = %v", err)
+				t.Fatalf("UnmarshalTLVs() error = %v", err)
 			}
-			if got != tt.want {
-				t.Fatalf("UnmarshalDMSOperatingMode() = %d, want %d", got, tt.want)
+			if got.Mode != tt.want {
+				t.Fatalf("Mode = %d, want %d", got.Mode, tt.want)
 			}
 		})
 	}

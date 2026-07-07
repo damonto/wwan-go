@@ -46,8 +46,8 @@ type WDSStartNetworkInterfaceResponse struct {
 	HasVerboseCallEndReason bool
 }
 
-// UnmarshalResponse reads the packet data handle returned by the modem.
-func (r *WDSStartNetworkInterfaceResponse) UnmarshalResponse(tlvs tlv.TLVs) error {
+// UnmarshalTLVs reads the packet data handle returned by the modem.
+func (r *WDSStartNetworkInterfaceResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	*r = WDSStartNetworkInterfaceResponse{}
 
 	if value, ok := tlv.Value(tlvs, 0x01); ok {
@@ -124,43 +124,48 @@ func (r WDSGetRuntimeSettingsRequest) Request() qcom.Request {
 	}
 }
 
-// UnmarshalWDSRuntimeSettings parses IMS PDN addressing and P-CSCF data.
-func UnmarshalWDSRuntimeSettings(tlvs tlv.TLVs) (qcom.WDSRuntimeSettings, error) {
-	var settings qcom.WDSRuntimeSettings
+// WDSGetRuntimeSettingsResponse is the parsed WDS runtime settings response.
+type WDSGetRuntimeSettingsResponse struct {
+	Settings qcom.WDSRuntimeSettings
+}
+
+// UnmarshalTLVs parses IMS PDN addressing and P-CSCF data.
+func (r *WDSGetRuntimeSettingsResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	*r = WDSGetRuntimeSettingsResponse{}
 	if value, ok := tlv.Value(tlvs, 0x1E); ok {
 		if len(value) < 4 {
-			return qcom.WDSRuntimeSettings{}, errors.New("parsing WDS runtime settings: IPv4 address TLV is truncated")
+			return errors.New("parsing WDS runtime settings: IPv4 address TLV is truncated")
 		}
-		settings.LocalIPv4 = qmiIPv4(value)
+		r.Settings.LocalIPv4 = qmiIPv4(value)
 	}
 	if value, ok := tlv.Value(tlvs, 0x25); ok {
 		if len(value) < 17 {
-			return qcom.WDSRuntimeSettings{}, errors.New("parsing WDS runtime settings: IPv6 address TLV is truncated")
+			return errors.New("parsing WDS runtime settings: IPv6 address TLV is truncated")
 		}
-		settings.LocalIPv6 = slices.Clone(value[:16])
+		r.Settings.LocalIPv6 = slices.Clone(value[:16])
 	}
 	if value, ok := tlv.Value(tlvs, 0x23); ok {
 		ips, err := parseWDSIPv4List(value)
 		if err != nil {
-			return qcom.WDSRuntimeSettings{}, err
+			return err
 		}
-		settings.PCSCFIPs = append(settings.PCSCFIPs, ips...)
+		r.Settings.PCSCFIPs = append(r.Settings.PCSCFIPs, ips...)
 	}
 	if value, ok := tlv.Value(tlvs, 0x2E); ok {
 		ips, err := parseWDSIPv6List(value)
 		if err != nil {
-			return qcom.WDSRuntimeSettings{}, err
+			return err
 		}
-		settings.PCSCFIPs = append(settings.PCSCFIPs, ips...)
+		r.Settings.PCSCFIPs = append(r.Settings.PCSCFIPs, ips...)
 	}
 	if value, ok := tlv.Value(tlvs, 0x2B); ok && len(value) > 0 {
-		settings.IPFamily = qcom.WDSIPFamily(value[0])
+		r.Settings.IPFamily = qcom.WDSIPFamily(value[0])
 	}
 	if value, ok := tlv.Value(tlvs, 0x2C); ok && len(value) > 0 {
-		settings.IMCN = value[0] == 1
+		r.Settings.IMCN = value[0] == 1
 	}
-	settings.PCSCFIPs = uniqueWDSIPs(settings.PCSCFIPs)
-	return settings, nil
+	r.Settings.PCSCFIPs = uniqueWDSIPs(r.Settings.PCSCFIPs)
+	return nil
 }
 
 func parseWDSIPv4List(value []byte) ([]net.IP, error) {

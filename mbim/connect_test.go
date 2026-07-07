@@ -95,7 +95,6 @@ func TestProtocolConfigurationOptionsUnmarshalBinary(t *testing.T) {
 		name          string
 		data          []byte
 		wantParseErr  bool
-		wantPCSCFErr  bool
 		wantOption    int
 		wantExtension bool
 		wantProtocol  byte
@@ -136,11 +135,9 @@ func TestProtocolConfigurationOptionsUnmarshalBinary(t *testing.T) {
 			wantParseErr: true,
 		},
 		{
-			name:          "bad pcscf length",
-			data:          []byte{0x80, 0x00, 0x0c, 0x03, 0xc6, 0x33, 0x64},
-			wantPCSCFErr:  true,
-			wantOption:    1,
-			wantExtension: true,
+			name:         "bad pcscf length",
+			data:         []byte{0x80, 0x00, 0x0c, 0x03, 0xc6, 0x33, 0x64},
+			wantParseErr: true,
 		},
 	}
 
@@ -166,13 +163,10 @@ func TestProtocolConfigurationOptionsUnmarshalBinary(t *testing.T) {
 			if pco.ConfigurationProtocol != tt.wantProtocol {
 				t.Fatalf("ConfigurationProtocol = %d, want %d", pco.ConfigurationProtocol, tt.wantProtocol)
 			}
-			gotPCSCF, err := PCSCFIPsFromPCO(tt.data)
-			if tt.wantPCSCFErr {
-				if err == nil {
-					t.Fatal("PCSCFIPsFromPCO() error = nil, want non-nil")
-				}
-				return
+			if len(pco.PCSCFIPs) != len(tt.wantPCSCF) {
+				t.Fatalf("pco.PCSCFIPs len = %d, want %d", len(pco.PCSCFIPs), len(tt.wantPCSCF))
 			}
+			gotPCSCF, err := PCSCFIPsFromPCO(tt.data)
 			if err != nil {
 				t.Fatalf("PCSCFIPsFromPCO() error = %v", err)
 			}
@@ -212,6 +206,78 @@ func TestProtocolConfigurationOptionsUnmarshalBinaryResetsReceiver(t *testing.T)
 			}
 			if len(pco.Options) != 0 {
 				t.Fatalf("Options len = %d, want 0", len(pco.Options))
+			}
+		})
+	}
+}
+
+func TestPCOExtractors(t *testing.T) {
+	dnsIPv6 := net.ParseIP("2001:db8::53").To16()
+	tests := []struct {
+		name    string
+		data    []byte
+		wantErr bool
+		wantDNS []net.IP
+		wantMTU uint16
+		wantOK  bool
+	}{
+		{
+			name: "dns and mtu",
+			data: pcoPayloadWithOptionsForTest(
+				pcoOptionForTest{id: pcoOptionDNSIPv4, value: []byte{8, 8, 8, 8}},
+				pcoOptionForTest{id: pcoOptionDNSIPv6, value: dnsIPv6},
+				pcoOptionForTest{id: pcoOptionDNSIPv4, value: []byte{8, 8, 8, 8}},
+				pcoOptionForTest{id: pcoOptionIPv4MTU, value: []byte{0x05, 0xdc}},
+			),
+			wantDNS: []net.IP{net.IPv4(8, 8, 8, 8), dnsIPv6},
+			wantMTU: 1500,
+			wantOK:  true,
+		},
+		{
+			name:    "bad dns length",
+			data:    pcoPayloadWithOptionsForTest(pcoOptionForTest{id: pcoOptionDNSIPv4, value: []byte{8, 8, 8}}),
+			wantErr: true,
+		},
+		{
+			name:    "bad mtu length",
+			data:    pcoPayloadWithOptionsForTest(pcoOptionForTest{id: pcoOptionIPv4MTU, value: []byte{0x05}}),
+			wantErr: true,
+		},
+		{
+			name: "missing mtu",
+			data: pcoPayloadWithOptionsForTest(pcoOptionForTest{id: pcoOptionDNSIPv4, value: []byte{1, 1, 1, 1}}),
+			wantDNS: []net.IP{
+				net.IPv4(1, 1, 1, 1),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var pco ProtocolConfigurationOptions
+			err := pco.UnmarshalBinary(tt.data)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalBinary() error = nil, want non-nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if len(pco.DNSIPs) != len(tt.wantDNS) {
+				t.Fatalf("DNS IPs len = %d, want %d", len(pco.DNSIPs), len(tt.wantDNS))
+			}
+			for i, want := range tt.wantDNS {
+				if !pco.DNSIPs[i].Equal(want) {
+					t.Fatalf("DNS IPs[%d] = %v, want %v", i, pco.DNSIPs[i], want)
+				}
+			}
+			if pco.IPv4LinkMTUKnown != tt.wantOK {
+				t.Fatalf("IPv4LinkMTUKnown = %v, want %v", pco.IPv4LinkMTUKnown, tt.wantOK)
+			}
+			if pco.IPv4LinkMTU != tt.wantMTU {
+				t.Fatalf("IPv4LinkMTU = %d, want %d", pco.IPv4LinkMTU, tt.wantMTU)
 			}
 		})
 	}
@@ -451,12 +517,21 @@ func TestConnectQueryRequestDataUsesVersionShape(t *testing.T) {
 
 func TestConnectInfoUnmarshalBinary(t *testing.T) {
 	pcscfIPv6 := net.ParseIP("2001:db8::1").To16()
+	pcoWithConfig := pcoPayloadWithOptionsForTest(
+		pcoOptionForTest{id: pcoOptionPCSCFIPv4, value: []byte{198, 51, 100, 10}},
+		pcoOptionForTest{id: pcoOptionPCSCFIPv6, value: pcscfIPv6},
+		pcoOptionForTest{id: pcoOptionDNSIPv4, value: []byte{8, 8, 8, 8}},
+		pcoOptionForTest{id: pcoOptionIPv4MTU, value: []byte{0x05, 0xdc}},
+	)
 	tests := []struct {
 		name         string
 		data         []byte
 		wantErr      bool
 		wantAccess   string
 		wantPCSCFLen int
+		wantDNSLen   int
+		wantMTU      uint16
+		wantMTUOK    bool
 	}{
 		{
 			name: "mbim 1",
@@ -464,9 +539,12 @@ func TestConnectInfoUnmarshalBinary(t *testing.T) {
 		},
 		{
 			name:         "mbim ex with pco",
-			data:         connectInfoPayloadExForTest(1, ActivationStateActivated, ContextIPTypeIPv4v6, ContextTypeIMS, "ims", pcoPayloadForTest(net.IPv4(198, 51, 100, 10), pcscfIPv6)),
+			data:         connectInfoPayloadExForTest(1, ActivationStateActivated, ContextIPTypeIPv4v6, ContextTypeIMS, "ims", pcoWithConfig),
 			wantAccess:   "ims",
 			wantPCSCFLen: 2,
+			wantDNSLen:   1,
+			wantMTU:      1500,
+			wantMTUOK:    true,
 		},
 		{
 			name:    "truncated",
@@ -499,12 +577,17 @@ func TestConnectInfoUnmarshalBinary(t *testing.T) {
 			if got.AccessString != tt.wantAccess {
 				t.Fatalf("AccessString = %q, want %q", got.AccessString, tt.wantAccess)
 			}
-			ips, err := pcscfIPsFromPCOs(got.PCO)
-			if err != nil {
-				t.Fatalf("pcscfIPsFromPCOs() error = %v", err)
+			if len(got.PCSCFIPs) != tt.wantPCSCFLen {
+				t.Fatalf("P-CSCF len = %d, want %d", len(got.PCSCFIPs), tt.wantPCSCFLen)
 			}
-			if len(ips) != tt.wantPCSCFLen {
-				t.Fatalf("P-CSCF len = %d, want %d", len(ips), tt.wantPCSCFLen)
+			if len(got.DNSIPs) != tt.wantDNSLen {
+				t.Fatalf("DNS len = %d, want %d", len(got.DNSIPs), tt.wantDNSLen)
+			}
+			if got.IPv4LinkMTUKnown != tt.wantMTUOK {
+				t.Fatalf("IPv4LinkMTUKnown = %v, want %v", got.IPv4LinkMTUKnown, tt.wantMTUOK)
+			}
+			if got.IPv4LinkMTU != tt.wantMTU {
+				t.Fatalf("IPv4LinkMTU = %d, want %d", got.IPv4LinkMTU, tt.wantMTU)
 			}
 		})
 	}
@@ -568,6 +651,7 @@ func TestReaderOpenIMSPDN(t *testing.T) {
 			t.Cleanup(func() { _ = client.Close() })
 
 			pcscfIPv6 := net.ParseIP("2001:db8::1").To16()
+			dnsIPv6 := net.ParseIP("2001:db8::53").To16()
 			localIPv6 := net.ParseIP("2001:db8::2").To16()
 
 			errc := make(chan error, 1)
@@ -603,7 +687,14 @@ func TestReaderOpenIMSPDN(t *testing.T) {
 					errc <- err
 					return
 				}
-				connectInfo := connectInfoPayloadExForTest(1, ActivationStateActivated, ContextIPTypeIPv4v6, ContextTypeIMS, DefaultIMSPDNAPN, pcoPayloadForTest(net.IPv4(198, 51, 100, 10), pcscfIPv6))
+				pco := pcoPayloadWithOptionsForTest(
+					pcoOptionForTest{id: pcoOptionPCSCFIPv4, value: []byte{198, 51, 100, 10}},
+					pcoOptionForTest{id: pcoOptionPCSCFIPv6, value: pcscfIPv6},
+					pcoOptionForTest{id: pcoOptionDNSIPv4, value: []byte{8, 8, 8, 8}},
+					pcoOptionForTest{id: pcoOptionDNSIPv6, value: dnsIPv6},
+					pcoOptionForTest{id: pcoOptionIPv4MTU, value: []byte{0x05, 0xdc}},
+				)
+				connectInfo := connectInfoPayloadExForTest(1, ActivationStateActivated, ContextIPTypeIPv4v6, ContextTypeIMS, DefaultIMSPDNAPN, pco)
 				if _, err := server.Write(mbimCommandDone(transactionID, ServiceBasicConnect, CIDConnect, connectInfo)); err != nil {
 					errc <- err
 					return
@@ -648,6 +739,12 @@ func TestReaderOpenIMSPDN(t *testing.T) {
 			}
 			if len(info.PCSCFIPs) != 2 {
 				t.Fatalf("PCSCFIPs len = %d, want 2", len(info.PCSCFIPs))
+			}
+			if len(info.DNSIPs) != 2 {
+				t.Fatalf("DNSIPs len = %d, want 2", len(info.DNSIPs))
+			}
+			if !info.IPv4LinkMTUKnown || info.IPv4LinkMTU != 1500 {
+				t.Fatalf("IPv4LinkMTU = %d known %v, want 1500 known true", info.IPv4LinkMTU, info.IPv4LinkMTUKnown)
 			}
 			if info.VoPSKnown || info.VoPSSupported {
 				t.Fatalf("VoPS = known %v supported %v, want unknown", info.VoPSKnown, info.VoPSSupported)
@@ -757,6 +854,21 @@ func pcoPayloadForTest(ips ...net.IP) []byte {
 		v6 := ip.To16()
 		data = append(data, 0x00, 0x01, 0x10)
 		data = append(data, v6...)
+	}
+	return data
+}
+
+type pcoOptionForTest struct {
+	id    uint16
+	value []byte
+}
+
+func pcoPayloadWithOptionsForTest(options ...pcoOptionForTest) []byte {
+	data := []byte{0x80}
+	for _, option := range options {
+		data = binary.BigEndian.AppendUint16(data, option.id)
+		data = append(data, byte(len(option.value)))
+		data = append(data, option.value...)
 	}
 	return data
 }

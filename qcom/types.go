@@ -18,6 +18,7 @@ const (
 	ServiceNAS     ServiceType = 0x03 // Network Access Service
 	ServiceCAT2    ServiceType = 0x0A // Card Application Toolkit service v2
 	ServiceUIM     ServiceType = 0x0B // UIM service
+	ServiceIMSA    ServiceType = 0x21 // IMS Application service
 	ServiceCAT     ServiceType = 0xE0 // Card Application Toolkit service v1
 )
 
@@ -52,6 +53,10 @@ const (
 
 	// NAS service commands
 	MessageNASGetSysInfo MessageID = 0x004D
+
+	// IMSA service commands
+	MessageIMSAGetRegistrationStatus MessageID = 0x0020
+	MessageIMSAGetServiceStatus      MessageID = 0x0021
 
 	// UIM service commands
 	MessageReset                     MessageID = 0x0000
@@ -186,6 +191,57 @@ const (
 type NASSysInfo struct {
 	VoPSKnown     bool
 	VoPSSupported bool
+}
+
+// IMSRegistrationStatus is the QMI IMSA registration state.
+type IMSRegistrationStatus uint32
+
+const (
+	IMSRegistrationStatusNotRegistered IMSRegistrationStatus = 0
+	IMSRegistrationStatusRegistering   IMSRegistrationStatus = 1
+	IMSRegistrationStatusRegistered    IMSRegistrationStatus = 2
+)
+
+// IMSServiceStatus is the QMI IMSA per-service availability state.
+type IMSServiceStatus uint32
+
+const (
+	IMSServiceStatusNoService      IMSServiceStatus = 0
+	IMSServiceStatusLimitedService IMSServiceStatus = 1
+	IMSServiceStatusFullService    IMSServiceStatus = 2
+)
+
+// IMSServiceRAT is the access technology used by an IMS service.
+type IMSServiceRAT uint32
+
+const (
+	IMSServiceRATWLAN  IMSServiceRAT = 0
+	IMSServiceRATWWAN  IMSServiceRAT = 1
+	IMSServiceRATIWLAN IMSServiceRAT = 2
+)
+
+// IMSAStatus contains IMS registration and VoIP service information from QMI IMSA.
+type IMSAStatus struct {
+	RegistrationKnown bool
+	Registration      IMSRegistrationStatus
+	FailureCodeKnown  bool
+	FailureCode       uint16
+	VoIPServiceKnown  bool
+	VoIPService       IMSServiceStatus
+	VoIPRATKnown      bool
+	VoIPRAT           IMSServiceRAT
+}
+
+// IMSRegistered reports whether the modem is registered on IMS.
+func (s IMSAStatus) IMSRegistered() bool {
+	return s.RegistrationKnown && s.Registration == IMSRegistrationStatusRegistered
+}
+
+// VoLTERegistered reports whether IMS VoIP service is registered over WWAN.
+func (s IMSAStatus) VoLTERegistered() bool {
+	return s.IMSRegistered() &&
+		s.VoIPServiceKnown && s.VoIPService == IMSServiceStatusFullService &&
+		s.VoIPRATKnown && s.VoIPRAT == IMSServiceRATWWAN
 }
 
 type Request struct {

@@ -45,7 +45,7 @@ func TestNASGetSysInfoRequest(t *testing.T) {
 	}
 }
 
-func TestUnmarshalNASGetSysInfoResponse(t *testing.T) {
+func TestNASGetSysInfoResponseUnmarshalTLVs(t *testing.T) {
 	tests := []struct {
 		name          string
 		tlvs          tlv.TLVs
@@ -60,15 +60,16 @@ func TestUnmarshalNASGetSysInfoResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := UnmarshalNASGetSysInfoResponse(tt.tlvs)
+			var got NASGetSysInfoResponse
+			err := got.UnmarshalTLVs(tt.tlvs)
 			if err != nil {
-				t.Fatalf("UnmarshalNASGetSysInfoResponse() error = %v", err)
+				t.Fatalf("UnmarshalTLVs() error = %v", err)
 			}
-			if got.VoPSKnown != tt.wantKnown {
-				t.Fatalf("VoPSKnown = %v, want %v", got.VoPSKnown, tt.wantKnown)
+			if got.SysInfo.VoPSKnown != tt.wantKnown {
+				t.Fatalf("VoPSKnown = %v, want %v", got.SysInfo.VoPSKnown, tt.wantKnown)
 			}
-			if got.VoPSSupported != tt.wantSupported {
-				t.Fatalf("VoPSSupported = %v, want %v", got.VoPSSupported, tt.wantSupported)
+			if got.SysInfo.VoPSSupported != tt.wantSupported {
+				t.Fatalf("VoPSSupported = %v, want %v", got.SysInfo.VoPSSupported, tt.wantSupported)
 			}
 		})
 	}

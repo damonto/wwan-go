@@ -1,7 +1,7 @@
 package qcom
 
 import (
-	"fmt"
+	"errors"
 
 	"github.com/damonto/uicc-go/qcom/tlv"
 )
@@ -42,12 +42,13 @@ type AllocateClientIDResponse struct {
 	ClientID uint8
 }
 
-func (r *AllocateClientIDResponse) UnmarshalResponse(tlvs tlv.TLVs) error {
+func (r *AllocateClientIDResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	*r = AllocateClientIDResponse{}
 	if value, ok := tlvs.Find(0x01); ok && len(value.Value) >= 2 {
 		r.ClientID = value.Value[1]
 		return nil
 	}
-	return fmt.Errorf("could not find allocated client ID in response")
+	return errors.New("parsing QMI allocate client ID response: client ID TLV missing")
 }
 
 type ReleaseClientIDRequest struct {
@@ -71,10 +72,11 @@ type ReleaseClientIDResponse struct {
 	ClientID uint8
 }
 
-func (r *ReleaseClientIDResponse) UnmarshalResponse(tlvs tlv.TLVs) error {
+func (r *ReleaseClientIDResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	*r = ReleaseClientIDResponse{}
 	if value, ok := tlvs.Find(0x01); ok && len(value.Value) >= 2 {
 		r.ClientID = value.Value[1]
 		return nil
 	}
-	return fmt.Errorf("could not find released client ID in response")
+	return errors.New("parsing QMI release client ID response: client ID TLV missing")
 }

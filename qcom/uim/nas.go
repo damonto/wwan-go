@@ -25,14 +25,21 @@ func (r NASGetSysInfoRequest) Request() qcom.Request {
 	}
 }
 
-// UnmarshalNASGetSysInfoResponse parses the NAS Get System Info response fields used by IMS.
-func UnmarshalNASGetSysInfoResponse(tlvs tlv.TLVs) (qcom.NASSysInfo, error) {
+// NASGetSysInfoResponse is the parsed NAS Get System Info response.
+type NASGetSysInfoResponse struct {
+	SysInfo qcom.NASSysInfo
+}
+
+// UnmarshalTLVs parses the NAS Get System Info response fields used by IMS.
+func (r *NASGetSysInfoResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	*r = NASGetSysInfoResponse{}
 	value, ok := tlv.Value(tlvs, 0x29)
 	if !ok || len(value) == 0 {
-		return qcom.NASSysInfo{}, nil
+		return nil
 	}
-	return qcom.NASSysInfo{
+	r.SysInfo = qcom.NASSysInfo{
 		VoPSKnown:     true,
 		VoPSSupported: value[0] == 1,
-	}, nil
+	}
+	return nil
 }

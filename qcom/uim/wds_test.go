@@ -96,7 +96,7 @@ func TestWDSRequestEncoding(t *testing.T) {
 	}
 }
 
-func TestUnmarshalWDSRuntimeSettings(t *testing.T) {
+func TestWDSGetRuntimeSettingsResponseUnmarshalTLVs(t *testing.T) {
 	localIPv6 := net.ParseIP("2001:db8::1").To16()
 	pcscfIPv6 := net.ParseIP("2001:db8::2").To16()
 
@@ -140,41 +140,42 @@ func TestUnmarshalWDSRuntimeSettings(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := UnmarshalWDSRuntimeSettings(tt.tlvs)
+			var got WDSGetRuntimeSettingsResponse
+			err := got.UnmarshalTLVs(tt.tlvs)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatal("UnmarshalWDSRuntimeSettings() error = nil, want non-nil")
+					t.Fatal("UnmarshalTLVs() error = nil, want non-nil")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("UnmarshalWDSRuntimeSettings() error = %v", err)
+				t.Fatalf("UnmarshalTLVs() error = %v", err)
 			}
-			if !got.LocalIPv4.Equal(tt.wantIPv4) {
-				t.Fatalf("LocalIPv4 = %v, want %v", got.LocalIPv4, tt.wantIPv4)
+			if !got.Settings.LocalIPv4.Equal(tt.wantIPv4) {
+				t.Fatalf("LocalIPv4 = %v, want %v", got.Settings.LocalIPv4, tt.wantIPv4)
 			}
-			if !got.LocalIPv6.Equal(tt.wantIPv6) {
-				t.Fatalf("LocalIPv6 = %v, want %v", got.LocalIPv6, tt.wantIPv6)
+			if !got.Settings.LocalIPv6.Equal(tt.wantIPv6) {
+				t.Fatalf("LocalIPv6 = %v, want %v", got.Settings.LocalIPv6, tt.wantIPv6)
 			}
-			if got.IPFamily != tt.wantFamily {
-				t.Fatalf("IPFamily = %d, want %d", got.IPFamily, tt.wantFamily)
+			if got.Settings.IPFamily != tt.wantFamily {
+				t.Fatalf("IPFamily = %d, want %d", got.Settings.IPFamily, tt.wantFamily)
 			}
-			if got.IMCN != tt.wantIMCN {
-				t.Fatalf("IMCN = %v, want %v", got.IMCN, tt.wantIMCN)
+			if got.Settings.IMCN != tt.wantIMCN {
+				t.Fatalf("IMCN = %v, want %v", got.Settings.IMCN, tt.wantIMCN)
 			}
-			if len(got.PCSCFIPs) != len(tt.wantPCSCF) {
-				t.Fatalf("PCSCFIPs len = %d, want %d", len(got.PCSCFIPs), len(tt.wantPCSCF))
+			if len(got.Settings.PCSCFIPs) != len(tt.wantPCSCF) {
+				t.Fatalf("PCSCFIPs len = %d, want %d", len(got.Settings.PCSCFIPs), len(tt.wantPCSCF))
 			}
 			for i, want := range tt.wantPCSCF {
-				if !got.PCSCFIPs[i].Equal(want) {
-					t.Fatalf("PCSCFIPs[%d] = %v, want %v", i, got.PCSCFIPs[i], want)
+				if !got.Settings.PCSCFIPs[i].Equal(want) {
+					t.Fatalf("PCSCFIPs[%d] = %v, want %v", i, got.Settings.PCSCFIPs[i], want)
 				}
 			}
 		})
 	}
 }
 
-func TestWDSStartNetworkInterfaceResponseUnmarshalResponse(t *testing.T) {
+func TestWDSStartNetworkInterfaceResponseUnmarshalTLVs(t *testing.T) {
 	tests := []struct {
 		name           string
 		tlvs           tlv.TLVs
@@ -206,15 +207,15 @@ func TestWDSStartNetworkInterfaceResponseUnmarshalResponse(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got WDSStartNetworkInterfaceResponse
-			err := got.UnmarshalResponse(tt.tlvs)
+			err := got.UnmarshalTLVs(tt.tlvs)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatal("UnmarshalResponse() error = nil, want non-nil")
+					t.Fatal("UnmarshalTLVs() error = nil, want non-nil")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("UnmarshalResponse() error = %v", err)
+				t.Fatalf("UnmarshalTLVs() error = %v", err)
 			}
 			if got.PacketDataHandle != tt.want {
 				t.Fatalf("PacketDataHandle = 0x%08X, want 0x%08X", got.PacketDataHandle, tt.want)

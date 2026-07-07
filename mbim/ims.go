@@ -24,16 +24,19 @@ type IMSPDNConfig struct {
 }
 
 type IMSPDNInfo struct {
-	SessionID       uint32
-	LocalIPv4       net.IP
-	LocalIPv6       net.IP
-	PCSCFIPs        []net.IP
-	IPType          ContextIPType
-	AccessString    string
-	NwError         uint32
-	VoPSKnown       bool
-	VoPSSupported   bool
-	PacketDataReady bool
+	SessionID        uint32
+	LocalIPv4        net.IP
+	LocalIPv6        net.IP
+	PCSCFIPs         []net.IP
+	DNSIPs           []net.IP
+	IPv4LinkMTU      uint16
+	IPv4LinkMTUKnown bool
+	IPType           ContextIPType
+	AccessString     string
+	NwError          uint32
+	VoPSKnown        bool
+	VoPSSupported    bool
+	PacketDataReady  bool
 }
 
 type IMSPDNSession struct {
@@ -69,11 +72,6 @@ func (r *Reader) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSessi
 		return nil, fmt.Errorf("opening MBIM IMS PDN: activation state %d, want %d", connect.ActivationState, ActivationStateActivated)
 	}
 
-	pcsCfIPs, err := pcscfIPsFromPCOs(connect.PCO)
-	if err != nil {
-		_ = session.Close()
-		return nil, fmt.Errorf("opening MBIM IMS PDN: %w", err)
-	}
 	ipConfig, err := r.IPConfiguration(ctx, cfg.SessionID)
 	if err != nil {
 		_ = session.Close()
@@ -81,14 +79,17 @@ func (r *Reader) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSessi
 	}
 
 	session.info = IMSPDNInfo{
-		SessionID:       cfg.SessionID,
-		LocalIPv4:       firstIP(ipConfig.IPv4Addresses),
-		LocalIPv6:       firstIP(ipConfig.IPv6Addresses),
-		PCSCFIPs:        cloneIPs(pcsCfIPs),
-		IPType:          connect.IPType,
-		AccessString:    connect.AccessString,
-		NwError:         connect.NwError,
-		PacketDataReady: true,
+		SessionID:        cfg.SessionID,
+		LocalIPv4:        firstIP(ipConfig.IPv4Addresses),
+		LocalIPv6:        firstIP(ipConfig.IPv6Addresses),
+		PCSCFIPs:         cloneIPs(connect.PCSCFIPs),
+		DNSIPs:           cloneIPs(connect.DNSIPs),
+		IPv4LinkMTU:      connect.IPv4LinkMTU,
+		IPv4LinkMTUKnown: connect.IPv4LinkMTUKnown,
+		IPType:           connect.IPType,
+		AccessString:     connect.AccessString,
+		NwError:          connect.NwError,
+		PacketDataReady:  true,
 	}
 	return session, nil
 }
@@ -101,6 +102,7 @@ func (s *IMSPDNSession) Info() IMSPDNInfo {
 	info.LocalIPv4 = slices.Clone(info.LocalIPv4)
 	info.LocalIPv6 = slices.Clone(info.LocalIPv6)
 	info.PCSCFIPs = cloneIPs(info.PCSCFIPs)
+	info.DNSIPs = cloneIPs(info.DNSIPs)
 	return info
 }
 

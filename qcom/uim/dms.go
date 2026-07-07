@@ -98,8 +98,12 @@ func (r *Reader) OperatingMode(ctx context.Context) (qcom.DMSOperatingMode, erro
 			return err
 		}
 
-		mode, err = UnmarshalDMSOperatingMode(resp.TLVs)
-		return err
+		var parsed DMSGetOperatingModeResponse
+		if err := parsed.UnmarshalTLVs(resp.TLVs); err != nil {
+			return err
+		}
+		mode = parsed.Mode
+		return nil
 	})
 	if err != nil {
 		return 0, fmt.Errorf("querying QMI DMS operating mode: %w", err)
@@ -155,14 +159,21 @@ func (r *Reader) withServiceClient(ctx context.Context, service qcom.ServiceType
 	return releaseErr
 }
 
-// UnmarshalDMSOperatingMode parses QMI DMS Get Operating Mode response TLVs.
-func UnmarshalDMSOperatingMode(tlvs tlv.TLVs) (qcom.DMSOperatingMode, error) {
+// DMSGetOperatingModeResponse is the parsed QMI DMS Get Operating Mode response.
+type DMSGetOperatingModeResponse struct {
+	Mode qcom.DMSOperatingMode
+}
+
+// UnmarshalTLVs parses QMI DMS Get Operating Mode response TLVs.
+func (r *DMSGetOperatingModeResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	*r = DMSGetOperatingModeResponse{}
 	value, ok := tlv.Value(tlvs, dmsTLVOperatingMode)
 	if !ok {
-		return 0, errors.New("parsing QMI DMS operating mode: operating mode TLV missing")
+		return errors.New("parsing QMI DMS operating mode: operating mode TLV missing")
 	}
 	if len(value) < 1 {
-		return 0, errors.New("parsing QMI DMS operating mode: operating mode TLV is truncated")
+		return errors.New("parsing QMI DMS operating mode: operating mode TLV is truncated")
 	}
-	return qcom.DMSOperatingMode(value[0]), nil
+	r.Mode = qcom.DMSOperatingMode(value[0])
+	return nil
 }

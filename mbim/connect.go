@@ -81,16 +81,20 @@ func (r *ConnectQueryRequest) Request() *Request {
 }
 
 type ConnectInfo struct {
-	SessionID       uint32
-	ActivationState ActivationState
-	VoiceCallState  VoiceCallState
-	IPType          ContextIPType
-	ContextType     ContextType
-	NwError         uint32
-	AccessMedia     AccessMediaType
-	AccessString    string
-	TLVs            TLVs
-	PCO             []ProtocolConfigurationOptions
+	SessionID        uint32
+	ActivationState  ActivationState
+	VoiceCallState   VoiceCallState
+	IPType           ContextIPType
+	ContextType      ContextType
+	NwError          uint32
+	AccessMedia      AccessMediaType
+	AccessString     string
+	TLVs             TLVs
+	PCO              []ProtocolConfigurationOptions
+	PCSCFIPs         []net.IP
+	DNSIPs           []net.IP
+	IPv4LinkMTU      uint16
+	IPv4LinkMTUKnown bool
 }
 
 func (r *ConnectInfo) UnmarshalBinary(data []byte) error {
@@ -135,6 +139,12 @@ func (r *ConnectInfo) UnmarshalBinary(data []byte) error {
 				return fmt.Errorf("parsing MBIM connect PCO: %w", err)
 			}
 			r.PCO = append(r.PCO, pco)
+			r.PCSCFIPs = uniqueIPs(append(r.PCSCFIPs, pco.PCSCFIPs...))
+			r.DNSIPs = uniqueIPs(append(r.DNSIPs, pco.DNSIPs...))
+			if pco.IPv4LinkMTUKnown && !r.IPv4LinkMTUKnown {
+				r.IPv4LinkMTU = pco.IPv4LinkMTU
+				r.IPv4LinkMTUKnown = true
+			}
 		}
 	}
 	return nil

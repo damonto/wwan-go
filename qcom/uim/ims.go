@@ -146,7 +146,7 @@ func (s *IMSPDNSession) start(ctx context.Context, cfg IMSPDNConfig) error {
 		return err
 	}
 	var parsed WDSStartNetworkInterfaceResponse
-	if err := parsed.UnmarshalResponse(resp.TLVs); err != nil {
+	if err := parsed.UnmarshalTLVs(resp.TLVs); err != nil {
 		return err
 	}
 	if err := resultOK(resp); err != nil {
@@ -227,7 +227,11 @@ func (s *IMSPDNSession) runtimeSettings(ctx context.Context) (qcom.WDSRuntimeSet
 	if err := resultOK(resp); err != nil {
 		return qcom.WDSRuntimeSettings{}, err
 	}
-	return UnmarshalWDSRuntimeSettings(resp.TLVs)
+	var parsed WDSGetRuntimeSettingsResponse
+	if err := parsed.UnmarshalTLVs(resp.TLVs); err != nil {
+		return qcom.WDSRuntimeSettings{}, err
+	}
+	return parsed.Settings, nil
 }
 
 func (s *IMSPDNSession) nasSysInfo(ctx context.Context) (qcom.NASSysInfo, error) {
@@ -249,7 +253,11 @@ func (s *IMSPDNSession) nasSysInfo(ctx context.Context) (qcom.NASSysInfo, error)
 	if err := resultOK(resp); err != nil {
 		return qcom.NASSysInfo{}, err
 	}
-	return UnmarshalNASGetSysInfoResponse(resp.TLVs)
+	var parsed NASGetSysInfoResponse
+	if err := parsed.UnmarshalTLVs(resp.TLVs); err != nil {
+		return qcom.NASSysInfo{}, err
+	}
+	return parsed.SysInfo, nil
 }
 
 func cloneIPs(ips []net.IP) []net.IP {
