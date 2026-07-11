@@ -268,17 +268,17 @@ func newUSIMISIMTransport() *simTransport {
 			1: tlvTextRecord("sip:usim-smsc@example.com", 32),
 		},
 	}
-	files[simFileKey(uim.SessionCardSlot1, isimAID, []byte{0x6F, 0x02})] = simFile{
+	files[simFileKey(uim.SessionNonProvisioningSlot1, isimAID, []byte{0x3F, 0x00, 0x7F, 0xFF, 0x6F, 0x02})] = simFile{
 		attrs: makeAttrs(32, 0x6F02, 0, 0, 0, "62088202412180020020"),
 		data:  tlvTextBinary("alice@ims.example.com", 32),
 	}
-	files[simFileKey(uim.SessionCardSlot1, isimAID, []byte{0x6F, 0x04})] = simFile{
+	files[simFileKey(uim.SessionNonProvisioningSlot1, isimAID, []byte{0x3F, 0x00, 0x7F, 0xFF, 0x6F, 0x04})] = simFile{
 		attrs: makeAttrs(32, 0x6F04, 2, 32, 1, "620B8205422100200180020020"),
 		rows: map[uint16][]byte{
 			1: tlvTextRecord("sip:alice@ims.example.com", 32),
 		},
 	}
-	files[simFileKey(uim.SessionCardSlot1, isimAID, []byte{0x7F, 0x10, 0x6F, 0xE5})] = simFile{
+	files[simFileKey(uim.SessionNonProvisioningSlot1, isimAID, []byte{0x3F, 0x00, 0x7F, 0xFF, 0x7F, 0x10, 0x6F, 0xE5})] = simFile{
 		attrs: makeAttrs(32, 0x6FE5, 2, 32, 1, "620B8205422100200180020020"),
 		rows: map[uint16][]byte{
 			1: tlvTextRecord("sip:isim-smsc@example.com", 32),

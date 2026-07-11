@@ -91,6 +91,45 @@ type PacketServiceInfo struct {
 	DownlinkSpeed             uint64
 }
 
+type RegisterState uint32
+
+const (
+	RegisterStateUnknown RegisterState = iota
+	RegisterStateDeregistered
+	RegisterStateSearching
+	RegisterStateHome
+	RegisterStateRoaming
+	RegisterStatePartner
+	RegisterStateDenied
+)
+
+type RegisterMode uint32
+
+const (
+	RegisterModeUnknown RegisterMode = iota
+	RegisterModeAutomatic
+	RegisterModeManual
+)
+
+type RegistrationFlags uint32
+
+const (
+	RegistrationFlagManualSelectionNotAvailable RegistrationFlags = 1 << iota
+	RegistrationFlagPacketServiceAutomaticAttach
+)
+
+type RegistrationStateInfo struct {
+	NwError              uint32
+	RegisterState        RegisterState
+	RegisterMode         RegisterMode
+	AvailableDataClasses uint32
+	CurrentCellularClass uint32
+	ProviderID           string
+	ProviderName         string
+	RoamingText          string
+	RegistrationFlags    RegistrationFlags
+}
+
 type ActivationCommand uint32
 
 const (
@@ -166,6 +205,16 @@ var (
 	ContextTypeInternet = ContextType{0x7E, 0x5E, 0x2A, 0x7E, 0x4E, 0x6F, 0x72, 0x72, 0x73, 0x6B, 0x65, 0x6E, 0x7E, 0x5E, 0x2A, 0x7E}
 	ContextTypeIMS      = ContextType{0x21, 0x61, 0x0D, 0x01, 0x30, 0x74, 0x4B, 0xCE, 0x94, 0x25, 0xB5, 0x3A, 0x07, 0xD6, 0x97, 0xD6}
 )
+
+type ProvisionedContext struct {
+	ContextID    uint32
+	ContextType  ContextType
+	AccessString string
+	UserName     string
+	Password     string
+	Compression  Compression
+	AuthProtocol AuthProtocol
+}
 
 type TLVType uint16
 

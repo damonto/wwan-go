@@ -3,8 +3,10 @@ package mbim
 const (
 	CIDRadioState            = 0x00000003
 	CIDSubscriberReadyStatus = 0x00000002
+	CIDRegisterState         = 0x00000009
 	CIDPacketService         = 0x0000000A
 	CIDConnect               = 0x0000000C
+	CIDProvisionedContexts   = 0x0000000D
 	CIDIPConfiguration       = 0x0000000F
 	CIDDeviceServices        = 0x00000010
 
