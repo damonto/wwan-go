@@ -18,6 +18,7 @@ const (
 	ServiceNAS     ServiceType = 0x03 // Network Access Service
 	ServiceCAT2    ServiceType = 0x0A // Card Application Toolkit service v2
 	ServiceUIM     ServiceType = 0x0B // UIM service
+	ServiceIMSS    ServiceType = 0x12 // IMS Settings service
 	ServiceIMSA    ServiceType = 0x21 // IMS Application service
 	ServiceCAT     ServiceType = 0xE0 // Card Application Toolkit service v1
 )
@@ -57,6 +58,10 @@ const (
 	// IMSA service commands
 	MessageIMSAGetRegistrationStatus MessageID = 0x0020
 	MessageIMSAGetServiceStatus      MessageID = 0x0021
+
+	// IMSS service commands
+	MessageIMSSSetRegistrationManagerConfig MessageID = 0x0021
+	MessageIMSSGetRegistrationManagerConfig MessageID = 0x0026
 
 	// UIM service commands
 	MessageReset                     MessageID = 0x0000
