@@ -69,6 +69,21 @@ func TestWDSRequestEncoding(t *testing.T) {
 			wantTLV:       0x10,
 			wantValue:     uint32ValueForTest(uint32(qcom.WDSRuntimeRequestedIMSSettings)),
 		},
+		{
+			name: "legacy bind mux data port",
+			req: WDSLegacyBindMuxDataPortRequest{
+				ClientID:      10,
+				TransactionID: 12,
+				Timeout:       6 * time.Second,
+				DataPort:      qcom.WDSSIOPortA2MuxRMNET1,
+			}.Request(),
+			wantService:   qcom.ServiceWDS,
+			wantClientID:  10,
+			wantMessageID: qcom.MessageWDSLegacyBindMuxDataPort,
+			wantTimeout:   6 * time.Second,
+			wantTLV:       0x01,
+			wantValue:     []byte{0x05, 0x0E},
+		},
 	}
 
 	for _, tt := range tests {
@@ -91,6 +106,129 @@ func TestWDSRequestEncoding(t *testing.T) {
 			}
 			if !bytes.Equal(value, tt.wantValue) {
 				t.Fatalf("TLV 0x%02X = % X, want % X", tt.wantTLV, value, tt.wantValue)
+			}
+		})
+	}
+}
+
+func TestWDSStartNetworkInterfaceRequestKeepsConnectionTLVsWithProfile(t *testing.T) {
+	tests := []struct {
+		name string
+		req  WDSStartNetworkInterfaceRequest
+		want map[byte][]byte
+	}{
+		{
+			name: "profile and IPv6 IMS settings",
+			req: WDSStartNetworkInterfaceRequest{
+				APN:                  "ims",
+				IPFamily:             qcom.WDSIPFamilyIPv6,
+				TechnologyPreference: qcom.WDSTechnologyPreference3GPP,
+				ProfileIndex3GPP:     2,
+			},
+			want: map[byte][]byte{
+				0x14: []byte("ims"),
+				0x19: {byte(qcom.WDSIPFamilyIPv6)},
+				0x30: {byte(qcom.WDSTechnologyPreference3GPP)},
+				0x31: {2},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := tt.req.Request()
+			for kind, want := range tt.want {
+				got, ok := tlv.Value(req.TLVs, kind)
+				if !ok || !bytes.Equal(got, want) {
+					t.Fatalf("TLV 0x%02X = % X, want % X", kind, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestWDSBindMuxDataPortRequestEncoding(t *testing.T) {
+	tests := []struct {
+		name         string
+		dataPort     qcom.WDSMuxDataPort
+		wantEndpoint []byte
+		wantMuxID    byte
+		wantReversed bool
+	}{
+		{
+			name: "endpoint and mux",
+			dataPort: qcom.WDSMuxDataPort{
+				Endpoint: &qcom.WDSDataEndpoint{
+					Type:        qcom.WDSDataEndpointBAMDMUX,
+					InterfaceID: 1,
+				},
+				MuxID: 2,
+			},
+			wantEndpoint: []byte{0x05, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00},
+			wantMuxID:    2,
+		},
+		{
+			name:      "mux without endpoint",
+			dataPort:  qcom.WDSMuxDataPort{MuxID: 1},
+			wantMuxID: 1,
+		},
+		{
+			name: "reversed port",
+			dataPort: qcom.WDSMuxDataPort{
+				Endpoint: &qcom.WDSDataEndpoint{Type: qcom.WDSDataEndpointHSUSB, InterfaceID: 4},
+				MuxID:    3,
+				Reversed: true,
+			},
+			wantEndpoint: []byte{0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00},
+			wantMuxID:    3,
+			wantReversed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := WDSBindMuxDataPortRequest{
+				ClientID:      7,
+				TransactionID: 9,
+				Timeout:       3 * time.Second,
+				DataPort:      tt.dataPort,
+			}.Request()
+			if req.Service != qcom.ServiceWDS {
+				t.Fatalf("Service = 0x%02X, want 0x%02X", req.Service, qcom.ServiceWDS)
+			}
+			if req.ClientID != 7 {
+				t.Fatalf("ClientID = %d, want 7", req.ClientID)
+			}
+			if req.TransactionID != 9 {
+				t.Fatalf("TransactionID = %d, want 9", req.TransactionID)
+			}
+			if req.MessageID != qcom.MessageWDSBindMuxDataPort {
+				t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, qcom.MessageWDSBindMuxDataPort)
+			}
+			if req.Timeout != 3*time.Second {
+				t.Fatalf("Timeout = %v, want %v", req.Timeout, 3*time.Second)
+			}
+
+			endpoint, hasEndpoint := tlv.Value(req.TLVs, 0x10)
+			if hasEndpoint != (tt.wantEndpoint != nil) {
+				t.Fatalf("Endpoint TLV present = %v, want %v", hasEndpoint, tt.wantEndpoint != nil)
+			}
+			if !bytes.Equal(endpoint, tt.wantEndpoint) {
+				t.Fatalf("Endpoint TLV = % X, want % X", endpoint, tt.wantEndpoint)
+			}
+			muxID, ok := tlv.Value(req.TLVs, 0x11)
+			if !ok {
+				t.Fatal("Mux ID TLV missing")
+			}
+			if !bytes.Equal(muxID, []byte{tt.wantMuxID}) {
+				t.Fatalf("Mux ID TLV = % X, want %02X", muxID, tt.wantMuxID)
+			}
+			reversed, hasReversed := tlv.Value(req.TLVs, 0x12)
+			if hasReversed != tt.wantReversed {
+				t.Fatalf("Reversed TLV present = %v, want %v", hasReversed, tt.wantReversed)
+			}
+			if tt.wantReversed && !bytes.Equal(reversed, []byte{1}) {
+				t.Fatalf("Reversed TLV = % X, want 01", reversed)
 			}
 		})
 	}

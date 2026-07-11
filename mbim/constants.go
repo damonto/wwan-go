@@ -1,6 +1,7 @@
 package mbim
 
 const (
+	CIDDeviceCaps            = 0x00000001
 	CIDRadioState            = 0x00000003
 	CIDSubscriberReadyStatus = 0x00000002
 	CIDRegisterState         = 0x00000009

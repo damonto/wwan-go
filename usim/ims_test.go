@@ -17,6 +17,7 @@ import (
 type imsPDNTransport struct {
 	startAPN    string
 	startFamily qcom.WDSIPFamily
+	bindMessage qcom.MessageID
 	stopped     bool
 	released    []qcom.ServiceType
 	nextClient  uint8
@@ -46,6 +47,9 @@ func (t *imsPDNTransport) Do(_ context.Context, req qcom.Request) (qcom.Response
 			t.startFamily = qcom.WDSIPFamily(family[0])
 		}
 		return imsSuccessResponse(req, tlv.Uint(0x01, uint32(0x01020304))), nil
+	case qcom.MessageWDSBindMuxDataPort, qcom.MessageWDSLegacyBindMuxDataPort:
+		t.bindMessage = req.MessageID
+		return imsSuccessResponse(req), nil
 	case qcom.MessageWDSGetRuntimeSettings:
 		localIPv6 := net.ParseIP("2001:db8::2").To16()
 		pcscfIPv6 := net.ParseIP("2001:db8::1").To16()
@@ -77,6 +81,7 @@ func TestQCOMOpenIMSPDN(t *testing.T) {
 		cfg        usim.IMSPDNConfig
 		wantAPN    string
 		wantFamily qcom.WDSIPFamily
+		wantBind   qcom.MessageID
 	}{
 		{
 			name:       "defaults",
@@ -92,6 +97,20 @@ func TestQCOMOpenIMSPDN(t *testing.T) {
 			},
 			wantAPN:    "ims",
 			wantFamily: qcom.WDSIPFamilyIPv6,
+		},
+		{
+			name:       "modern mux data port",
+			cfg:        usim.IMSPDNConfig{MuxDataPort: &qcom.WDSMuxDataPort{MuxID: 2}},
+			wantAPN:    usim.DefaultIMSPDNAPN,
+			wantFamily: qcom.WDSIPFamilyIPv4v6,
+			wantBind:   qcom.MessageWDSBindMuxDataPort,
+		},
+		{
+			name:       "legacy mux data port",
+			cfg:        usim.IMSPDNConfig{LegacyMuxDataPort: qcom.WDSSIOPortA2MuxRMNET1},
+			wantAPN:    usim.DefaultIMSPDNAPN,
+			wantFamily: qcom.WDSIPFamilyIPv4v6,
+			wantBind:   qcom.MessageWDSLegacyBindMuxDataPort,
 		},
 	}
 
@@ -117,6 +136,9 @@ func TestQCOMOpenIMSPDN(t *testing.T) {
 			}
 			if transport.startFamily != tt.wantFamily {
 				t.Fatalf("start family = %d, want %d", transport.startFamily, tt.wantFamily)
+			}
+			if transport.bindMessage != tt.wantBind {
+				t.Fatalf("bind message = 0x%04X, want 0x%04X", transport.bindMessage, tt.wantBind)
 			}
 			if !info.LocalIPv4.Equal(net.IPv4(10, 0, 0, 2)) {
 				t.Fatalf("LocalIPv4 = %v, want 10.0.0.2", info.LocalIPv4)

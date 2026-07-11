@@ -119,6 +119,14 @@ func TestVersionRequestData(t *testing.T) {
 		want        []byte
 	}{
 		{
+			name:        "device capabilities",
+			req:         (&DeviceCapsRequest{TransactionID: 1}).Request(),
+			serviceID:   ServiceBasicConnect,
+			commandID:   CIDDeviceCaps,
+			commandType: CommandTypeQuery,
+			want:        nil,
+		},
+		{
 			name:        "device services",
 			req:         (&DeviceServicesRequest{TransactionID: 1}).Request(),
 			serviceID:   ServiceBasicConnect,
@@ -151,6 +159,35 @@ func TestVersionRequestData(t *testing.T) {
 			}
 			if !bytes.Equal(command.Data, tt.want) {
 				t.Fatalf("Data = %X, want %X", command.Data, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeviceCapsInfoUnmarshalBinary(t *testing.T) {
+	tests := []struct {
+		name         string
+		data         []byte
+		wantSessions uint32
+		wantErr      bool
+	}{
+		{name: "multiple sessions", data: deviceCapsPayload(3), wantSessions: 3},
+		{name: "single session", data: deviceCapsPayload(1), wantSessions: 1},
+		{name: "truncated payload", data: make([]byte, 31), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got DeviceCapsInfo
+			err := got.UnmarshalBinary(tt.data)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("UnmarshalBinary() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if got.MaxSessions != tt.wantSessions {
+				t.Fatalf("MaxSessions = %d, want %d", got.MaxSessions, tt.wantSessions)
 			}
 		})
 	}
@@ -2421,6 +2458,12 @@ func deviceServicesPayload(services ...DeviceService) []byte {
 	for _, element := range elements {
 		data = append(data, element...)
 	}
+	return data
+}
+
+func deviceCapsPayload(maxSessions uint32) []byte {
+	data := make([]byte, 32)
+	binary.LittleEndian.PutUint32(data[28:32], maxSessions)
 	return data
 }
 

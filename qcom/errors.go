@@ -17,6 +17,21 @@ var (
 // These correspond to the "Error" field in QMI Result TLVs
 type QMIError uint16
 
+// WDSBindMuxDataPortError reports an error from the WDS mux binding command.
+// Callers can use errors.As to distinguish bind compatibility failures from
+// errors returned by later WDS operations.
+type WDSBindMuxDataPortError struct {
+	Err error
+}
+
+func (e *WDSBindMuxDataPortError) Error() string {
+	return fmt.Sprintf("binding WDS mux data port: %v", e.Err)
+}
+
+func (e *WDSBindMuxDataPortError) Unwrap() error {
+	return e.Err
+}
+
 const (
 	QMIErrorNone                        QMIError = 0     /*< nick=None >*/
 	QMIErrorMalformedMessage            QMIError = 1     /*< nick=MalformedMessage >*/

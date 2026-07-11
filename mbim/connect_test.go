@@ -660,6 +660,16 @@ func TestReaderOpenIMSPDN(t *testing.T) {
 				defer server.Close()
 
 				transactionID := uint32(1)
+				if err := expectMBIMCommandWithService(server, transactionID, ServiceBasicConnect, CIDDeviceCaps, CommandTypeQuery, nil); err != nil {
+					errc <- err
+					return
+				}
+				if _, err := server.Write(mbimCommandDone(transactionID, ServiceBasicConnect, CIDDeviceCaps, deviceCapsPayload(2))); err != nil {
+					errc <- err
+					return
+				}
+				transactionID++
+
 				if err := expectMBIMCommandWithService(server, transactionID, ServiceBasicConnect, CIDPacketService, CommandTypeQuery, nil); err != nil {
 					errc <- err
 					return
@@ -754,6 +764,65 @@ func TestReaderOpenIMSPDN(t *testing.T) {
 			}
 			if err := session.Close(); err != nil {
 				t.Fatalf("Close() error = %v", err)
+			}
+			if err := <-errc; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestReaderOpenIMSPDNValidatesSessionCapacity(t *testing.T) {
+	tests := []struct {
+		name        string
+		maxSessions uint32
+		sessionID   uint32
+		want        string
+	}{
+		{
+			name:        "zero sessions",
+			maxSessions: 0,
+			want:        "opening MBIM IMS PDN: device reports zero IP sessions",
+		},
+		{
+			name:        "single session cannot open IMS session one",
+			maxSessions: 1,
+			sessionID:   1,
+			want:        "opening MBIM IMS PDN: session ID 1 is out of range for 1 supported sessions",
+		},
+		{
+			name:        "session equals capacity",
+			maxSessions: 2,
+			sessionID:   2,
+			want:        "opening MBIM IMS PDN: session ID 2 is out of range for 2 supported sessions",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			t.Cleanup(func() { _ = client.Close() })
+
+			errc := make(chan error, 1)
+			go func() {
+				defer close(errc)
+				defer server.Close()
+				if err := expectMBIMCommandWithService(server, 1, ServiceBasicConnect, CIDDeviceCaps, CommandTypeQuery, nil); err != nil {
+					errc <- err
+					return
+				}
+				if _, err := server.Write(mbimCommandDone(1, ServiceBasicConnect, CIDDeviceCaps, deviceCapsPayload(tt.maxSessions))); err != nil {
+					errc <- err
+				}
+			}()
+
+			reader := &Reader{conn: client}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			_, err := reader.OpenIMSPDN(ctx, IMSPDNConfig{SessionID: tt.sessionID})
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("OpenIMSPDN() error = %v, want %q", err, tt.want)
 			}
 			if err := <-errc; err != nil {
 				t.Fatal(err)

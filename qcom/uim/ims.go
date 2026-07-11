@@ -3,6 +3,7 @@ package uim
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -15,10 +16,12 @@ const DefaultIMSPDNAPN = "ims"
 
 // IMSPDNConfig describes the modem-side IMS PDN request.
 type IMSPDNConfig struct {
-	APN            string
-	IPFamily       qcom.WDSIPFamily
-	ProfileIndex   uint8
-	RequestTimeout time.Duration
+	APN               string
+	IPFamily          qcom.WDSIPFamily
+	ProfileIndex      uint8
+	RequestTimeout    time.Duration
+	MuxDataPort       *qcom.WDSMuxDataPort
+	LegacyMuxDataPort qcom.WDSSIOPort
 }
 
 // IMSPDNInfo contains IMS PDN addressing and LTE voice service state.
@@ -51,6 +54,9 @@ func (r *Reader) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSessi
 	if r == nil {
 		return nil, errors.New("opening IMS PDN: reader is nil")
 	}
+	if cfg.MuxDataPort != nil && cfg.LegacyMuxDataPort != 0 {
+		return nil, errors.New("opening IMS PDN: mux data port and legacy mux data port are mutually exclusive")
+	}
 	cfg.APN = strings.TrimSpace(cfg.APN)
 	if cfg.APN == "" {
 		cfg.APN = DefaultIMSPDNAPN
@@ -72,6 +78,17 @@ func (r *Reader) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSessi
 		return nil, err
 	}
 	session.wdsClientID = wdsClientID
+	if cfg.MuxDataPort != nil {
+		if err := session.bindMuxDataPort(ctx, *cfg.MuxDataPort); err != nil {
+			_ = session.Close()
+			return nil, err
+		}
+	} else if cfg.LegacyMuxDataPort != 0 {
+		if err := session.bindLegacyMuxDataPort(ctx, cfg.LegacyMuxDataPort); err != nil {
+			_ = session.Close()
+			return nil, err
+		}
+	}
 	nasClientID, err := r.allocateServiceClientID(ctx, qcom.ServiceNAS)
 	if err != nil {
 		_ = session.Close()
@@ -125,6 +142,52 @@ func (s *IMSPDNSession) Close() error {
 		s.closeErr = err
 	})
 	return s.closeErr
+}
+
+func (s *IMSPDNSession) bindMuxDataPort(ctx context.Context, dataPort qcom.WDSMuxDataPort) error {
+	req := WDSBindMuxDataPortRequest{
+		ClientID: s.wdsClientID,
+		Timeout:  s.timeout,
+		DataPort: dataPort,
+	}.Request()
+	resp, err := s.reader.requestServiceWithTimeout(
+		ctx,
+		req.Service,
+		req.ClientID,
+		req.MessageID,
+		req.TLVs,
+		req.Timeout,
+	)
+	if err != nil {
+		return &qcom.WDSBindMuxDataPortError{Err: err}
+	}
+	if err := resultOK(resp); err != nil {
+		return &qcom.WDSBindMuxDataPortError{Err: err}
+	}
+	return nil
+}
+
+func (s *IMSPDNSession) bindLegacyMuxDataPort(ctx context.Context, dataPort qcom.WDSSIOPort) error {
+	req := WDSLegacyBindMuxDataPortRequest{
+		ClientID: s.wdsClientID,
+		Timeout:  s.timeout,
+		DataPort: dataPort,
+	}.Request()
+	resp, err := s.reader.requestServiceWithTimeout(
+		ctx,
+		req.Service,
+		req.ClientID,
+		req.MessageID,
+		req.TLVs,
+		req.Timeout,
+	)
+	if err != nil {
+		return fmt.Errorf("binding WDS legacy mux data port: %w", err)
+	}
+	if err := resultOK(resp); err != nil {
+		return fmt.Errorf("binding WDS legacy mux data port: %w", err)
+	}
+	return nil
 }
 
 func (s *IMSPDNSession) start(ctx context.Context, cfg IMSPDNConfig) error {

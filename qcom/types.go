@@ -48,6 +48,8 @@ const (
 	MessageWDSGetProfileList        MessageID = 0x002A
 	MessageWDSGetProfileSettings    MessageID = 0x002B
 	MessageWDSGetRuntimeSettings    MessageID = 0x002D
+	MessageWDSLegacyBindMuxDataPort MessageID = 0x0089
+	MessageWDSBindMuxDataPort       MessageID = 0x00A2
 
 	// DMS service commands
 	MessageDMSSetEventReport   MessageID = 0x0001
@@ -127,6 +129,45 @@ type WDSTechnologyPreference uint8
 const (
 	WDSTechnologyPreference3GPP WDSTechnologyPreference = 1
 )
+
+// WDSSIOPort identifies a legacy modem SIO data port.
+type WDSSIOPort uint16
+
+const (
+	WDSSIOPortA2MuxRMNET0 WDSSIOPort = 0x0E04 + iota
+	WDSSIOPortA2MuxRMNET1
+	WDSSIOPortA2MuxRMNET2
+	WDSSIOPortA2MuxRMNET3
+	WDSSIOPortA2MuxRMNET4
+	WDSSIOPortA2MuxRMNET5
+	WDSSIOPortA2MuxRMNET6
+	WDSSIOPortA2MuxRMNET7
+)
+
+// WDSDataEndpointType identifies the physical data transport endpoint.
+type WDSDataEndpointType uint32
+
+const (
+	WDSDataEndpointReserved WDSDataEndpointType = iota
+	WDSDataEndpointHSIC
+	WDSDataEndpointHSUSB
+	WDSDataEndpointPCIe
+	WDSDataEndpointEmbedded
+	WDSDataEndpointBAMDMUX
+)
+
+// WDSDataEndpoint identifies a physical data channel exposed by the modem.
+type WDSDataEndpoint struct {
+	Type        WDSDataEndpointType
+	InterfaceID uint32
+}
+
+// WDSMuxDataPort describes the logical data channel assigned to a WDS client.
+type WDSMuxDataPort struct {
+	Endpoint *WDSDataEndpoint
+	MuxID    uint8
+	Reversed bool
+}
 
 // WDSProfileType identifies a modem data-profile technology family.
 type WDSProfileType uint8

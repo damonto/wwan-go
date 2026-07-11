@@ -54,6 +54,16 @@ func (r *Reader) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSessi
 		return nil, errors.New("opening MBIM IMS PDN: reader is nil")
 	}
 	cfg = normalizeIMSPDNConfig(cfg)
+	deviceCaps, err := r.DeviceCaps(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("opening MBIM IMS PDN: %w", err)
+	}
+	if deviceCaps.MaxSessions == 0 {
+		return nil, errors.New("opening MBIM IMS PDN: device reports zero IP sessions")
+	}
+	if cfg.SessionID >= deviceCaps.MaxSessions {
+		return nil, fmt.Errorf("opening MBIM IMS PDN: session ID %d is out of range for %d supported sessions", cfg.SessionID, deviceCaps.MaxSessions)
+	}
 	if err := r.ensurePacketServiceAttached(ctx); err != nil {
 		return nil, fmt.Errorf("opening MBIM IMS PDN: %w", err)
 	}

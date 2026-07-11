@@ -5,6 +5,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/damonto/uicc-go/qcom"
 )
 
 const (
@@ -16,10 +18,12 @@ const (
 
 // IMSPDNConfig describes the IMS packet data network requested from the modem.
 type IMSPDNConfig struct {
-	APN            string
-	PDNType        string
-	ProfileIndex   uint8
-	RequestTimeout time.Duration
+	APN               string
+	PDNType           string
+	ProfileIndex      uint8
+	RequestTimeout    time.Duration
+	MuxDataPort       *qcom.WDSMuxDataPort
+	LegacyMuxDataPort qcom.WDSSIOPort
 }
 
 // IMSPDNInfo contains the IMS PDN addresses and LTE voice support flags.
