@@ -3,6 +3,7 @@ package uim
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/damonto/uicc-go/qcom"
@@ -10,6 +11,34 @@ import (
 )
 
 var errReaderClosed = errors.New("QMI UIM client is closed")
+
+func (r *Reader) withServiceClient(ctx context.Context, service qcom.ServiceType, fn func(uint8) error) error {
+	r.mu.Lock()
+	transport := r.transport
+	closed := r.closed || transport == nil
+	r.mu.Unlock()
+	if closed {
+		return errReaderClosed
+	}
+
+	if boundService, ok := boundQMIService(transport); ok {
+		if boundService != service {
+			return fmt.Errorf("QMI transport is bound to service 0x%02X, want 0x%02X", boundService, service)
+		}
+		return fn(0)
+	}
+
+	clientID, err := r.allocateServiceClientID(ctx, service)
+	if err != nil {
+		return err
+	}
+	err = fn(clientID)
+	releaseErr := r.releaseServiceClientID(ctx, service, clientID)
+	if err != nil {
+		return errors.Join(err, releaseErr)
+	}
+	return releaseErr
+}
 
 func (r *Reader) allocateClientID(ctx context.Context) error {
 	r.mu.Lock()

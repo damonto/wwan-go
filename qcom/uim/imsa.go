@@ -60,24 +60,14 @@ func (r *Reader) IMSAStatus(ctx context.Context) (qcom.IMSAStatus, error) {
 	if r == nil {
 		return qcom.IMSAStatus{}, errors.New("querying QMI IMSA status: reader is nil")
 	}
-	r.mu.Lock()
-	closed := r.closed || r.transport == nil
-	r.mu.Unlock()
-	if closed {
-		return qcom.IMSAStatus{}, fmt.Errorf("querying QMI IMSA status: %w", errReaderClosed)
-	}
-
-	clientID, err := r.allocateServiceClientID(ctx, qcom.ServiceIMSA)
+	var status qcom.IMSAStatus
+	err := r.withServiceClient(ctx, qcom.ServiceIMSA, func(clientID uint8) error {
+		var err error
+		status, err = r.imsaStatus(ctx, clientID)
+		return err
+	})
 	if err != nil {
 		return qcom.IMSAStatus{}, fmt.Errorf("querying QMI IMSA status: %w", err)
-	}
-	status, err := r.imsaStatus(ctx, clientID)
-	releaseErr := r.releaseServiceClientID(ctx, qcom.ServiceIMSA, clientID)
-	if err != nil {
-		return qcom.IMSAStatus{}, fmt.Errorf("querying QMI IMSA status: %w", errors.Join(err, releaseErr))
-	}
-	if releaseErr != nil {
-		return qcom.IMSAStatus{}, fmt.Errorf("querying QMI IMSA status: %w", releaseErr)
 	}
 	return status, nil
 }
