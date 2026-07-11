@@ -52,6 +52,7 @@ func (r *MBIM) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSession
 		info: func() IMSPDNInfo {
 			info := session.Info()
 			return IMSPDNInfo{
+				SessionID:       info.SessionID,
 				LocalIPv4:       info.LocalIPv4,
 				LocalIPv6:       info.LocalIPv6,
 				PCSCFIPs:        info.PCSCFIPs,

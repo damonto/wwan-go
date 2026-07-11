@@ -28,6 +28,7 @@ type IMSPDNConfig struct {
 
 // IMSPDNInfo contains the IMS PDN addresses and LTE voice support flags.
 type IMSPDNInfo struct {
+	SessionID       uint32
 	LocalIPv4       net.IP
 	LocalIPv6       net.IP
 	PCSCFIPs        []net.IP
