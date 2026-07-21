@@ -19,6 +19,8 @@ var (
 	fileEFAD      = mustHex("6FAD")
 	fileEFSMSP    = mustHex("6F42")
 	fileEFGID1    = mustHex("6F3E")
+	fileEFGID2    = mustHex("6F3F")
+	fileEFSPN     = mustHex("6F46")
 	pathEFPSISMSC = mustHex("7F106FE5")
 	fileEFIMPI    = mustHex("6F02")
 	fileEFDomain  = mustHex("6F03")
@@ -39,6 +41,8 @@ type Card struct {
 	mnc             string
 	mncLength       int
 	gid1            string
+	gid2            string
+	spn             string
 	serviceCenter   ServiceCenter
 	privateIdentity string
 	publicIdentity  string
@@ -52,6 +56,8 @@ func (u *Card) MCC() string                                { return u.mcc }
 func (u *Card) MNC() string                                { return u.mnc }
 func (u *Card) MNCLength() int                             { return u.mncLength }
 func (u *Card) GID1() string                               { return u.gid1 }
+func (u *Card) GID2() string                               { return u.gid2 }
+func (u *Card) SPN() string                                { return u.spn }
 func (u *Card) SMSC() string                               { return u.serviceCenter.Address }
 func (u *Card) ServiceCenter() ServiceCenter               { return u.serviceCenter }
 func (u *Card) PrivateIdentity() string                    { return u.privateIdentity }
@@ -200,6 +206,21 @@ func (u *Card) load(ctx context.Context) error {
 		u.gid1 = strings.ToUpper(hex.EncodeToString(gid1))
 	} else {
 		u.logger.Debug("reading EF_GID1 from USIM failed", "err", err)
+	}
+	if gid2, err := usimApp.Transparent(ctx, fileEFGID2); err == nil {
+		u.gid2 = strings.ToUpper(hex.EncodeToString(gid2))
+	} else {
+		u.logger.Debug("reading EF_GID2 from USIM failed", "err", err)
+	}
+	if spn, err := usimApp.Transparent(ctx, fileEFSPN); err == nil {
+		var name simfile.ServiceProviderName
+		if err := name.UnmarshalBinary(spn); err == nil {
+			u.spn = name.String()
+		} else {
+			u.logger.Debug("decoding EF_SPN from USIM failed", "err", err)
+		}
+	} else {
+		u.logger.Debug("reading EF_SPN from USIM failed", "err", err)
 	}
 
 	records, err := usimApp.LinearFixed(ctx, fileEFSMSP)
