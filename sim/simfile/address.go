@@ -36,8 +36,11 @@ func (address Address) MarshalBinary() ([]byte, error) {
 	if value == "" {
 		return nil, errors.New("marshaling address: value is empty")
 	}
+	if err := validateDigits(value, 1); err != nil {
+		return nil, fmt.Errorf("marshaling address: %w", err)
+	}
 
-	body, err := encodeSwappedBCD(value)
+	body, err := NewBCD(value)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling address: %w", err)
 	}
@@ -50,8 +53,8 @@ func (address *Address) UnmarshalBinary(data []byte) error {
 		return nil
 	}
 
-	digits, err := decodeSwappedBCD(data[1:], false)
-	if err != nil {
+	digits := BCD(data[1:]).String()
+	if err := validateDigits(digits, 0); err != nil {
 		return fmt.Errorf("parsing address: %w", err)
 	}
 	if digits == "" {

@@ -28,6 +28,16 @@ func TestICCIDBinary(t *testing.T) {
 			data: []byte{0x09, 0x21, 0x43, 0xF5},
 			want: "9012345",
 		},
+		{
+			name: "iccid with hexadecimal digits",
+			data: []byte{0x98, 0x68, 0x00, 0x6E, 0x51, 0x91, 0xA8, 0x55, 0x65, 0x80},
+			want: "898600E615198A555608",
+		},
+		{
+			name: "iccid with internal F digit",
+			data: []byte{0x98, 0x68, 0x10, 0x01, 0x9F, 0x09, 0x10, 0x06, 0x75, 0xF0},
+			want: "89860110F9900160570",
+		},
 	}
 
 	for _, tt := range tests {
@@ -57,9 +67,10 @@ func TestICCIDBinary(t *testing.T) {
 
 func TestIMSIUnmarshalBinary(t *testing.T) {
 	tests := []struct {
-		name string
-		data []byte
-		want IMSI
+		name    string
+		data    []byte
+		want    IMSI
+		wantErr bool
 	}{
 		{
 			name: "standard imsi",
@@ -71,12 +82,24 @@ func TestIMSIUnmarshalBinary(t *testing.T) {
 			data: []byte{0x08, 0x99, 0x10, 0x07, 0x10, 0x32, 0x54, 0x76, 0x98},
 			want: IMSI{Digits: "901700123456789", MCC: "901"},
 		},
+		{
+			name:    "hexadecimal digit",
+			data:    []byte{0x04, 0x09, 0x1A, 0x32, 0xF4},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got IMSI
-			if err := got.UnmarshalBinary(tt.data); err != nil {
+			err := got.UnmarshalBinary(tt.data)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalBinary() error = nil")
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 			if got != tt.want {

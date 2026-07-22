@@ -73,3 +73,22 @@ func TestAddressText(t *testing.T) {
 		t.Fatalf("MarshalText() = %q, want +1234", got)
 	}
 }
+
+func TestAddressUnmarshalBinaryError(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "hexadecimal digit", data: []byte{0x81, 0x1A}},
+		{name: "internal F digit", data: []byte{0x81, 0x21, 0x3F, 0x54}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var address Address
+			if err := address.UnmarshalBinary(tt.data); err == nil {
+				t.Fatal("UnmarshalBinary() error = nil")
+			}
+		})
+	}
+}

@@ -13,19 +13,20 @@ func (id ICCID) String() string {
 }
 
 func (id ICCID) MarshalBinary() ([]byte, error) {
-	if err := validateDigits(string(id), 1); err != nil {
+	if id == "" {
+		return nil, errors.New("marshaling ICCID: value is too short")
+	}
+	bcd, err := NewBCD(string(id))
+	if err != nil {
 		return nil, fmt.Errorf("marshaling ICCID: %w", err)
 	}
-	return encodeSwappedBCD(string(id))
+	return bcd, nil
 }
 
 func (id *ICCID) UnmarshalBinary(data []byte) error {
-	digits, err := decodeSwappedBCD(data, false)
-	if err != nil {
-		return fmt.Errorf("parsing EF_ICCID: %w", err)
-	}
-	if err := validateDigits(digits, 1); err != nil {
-		return fmt.Errorf("parsing EF_ICCID: %w", err)
+	digits := BCD(data).String()
+	if digits == "" {
+		return errors.New("parsing EF_ICCID: value is too short")
 	}
 
 	*id = ICCID(digits)
@@ -33,19 +34,26 @@ func (id *ICCID) UnmarshalBinary(data []byte) error {
 }
 
 func (id ICCID) MarshalText() ([]byte, error) {
-	if err := validateDigits(string(id), 1); err != nil {
+	if id == "" {
+		return nil, errors.New("marshaling ICCID: value is too short")
+	}
+	bcd, err := NewBCD(string(id))
+	if err != nil {
 		return nil, fmt.Errorf("marshaling ICCID: %w", err)
 	}
-	return []byte(string(id)), nil
+	return []byte(bcd.String()), nil
 }
 
 func (id *ICCID) UnmarshalText(text []byte) error {
-	digits := string(text)
-	if err := validateDigits(digits, 1); err != nil {
+	if len(text) == 0 {
+		return errors.New("parsing ICCID: value is too short")
+	}
+	bcd, err := NewBCD(string(text))
+	if err != nil {
 		return fmt.Errorf("parsing ICCID: %w", err)
 	}
 
-	*id = ICCID(digits)
+	*id = ICCID(bcd.String())
 	return nil
 }
 
@@ -63,9 +71,9 @@ func (imsi IMSI) MarshalBinary() ([]byte, error) {
 		return nil, fmt.Errorf("marshaling IMSI: %w", err)
 	}
 
-	body, err := encodeSwappedBCD("9" + imsi.Digits)
+	body, err := NewBCD("9" + imsi.Digits)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("marshaling IMSI: %w", err)
 	}
 	if len(body) > 0xFF {
 		return nil, errors.New("marshaling IMSI: encoded payload exceeds 255 bytes")
@@ -86,10 +94,7 @@ func (imsi *IMSI) UnmarshalBinary(data []byte) error {
 		return errors.New("reading EF_IMSI: truncated payload")
 	}
 
-	digits, err := decodeSwappedBCD(data[1:1+length], true)
-	if err != nil {
-		return fmt.Errorf("reading EF_IMSI: %w", err)
-	}
+	digits := strings.TrimPrefix(BCD(data[1:1+length]).String(), "9")
 	if err := imsi.setDigits(digits); err != nil {
 		return fmt.Errorf("reading EF_IMSI: %w", err)
 	}
@@ -130,60 +135,4 @@ func validateDigits(value string, minLength int) error {
 		return errors.New("value contains non-decimal digits")
 	}
 	return nil
-}
-
-func encodeSwappedBCD(digits string) ([]byte, error) {
-	out := make([]byte, 0, (len(digits)+1)/2)
-	for i := 0; i < len(digits); i += 2 {
-		low, ok := decimalNibble(digits[i])
-		if !ok {
-			return nil, errors.New("encoding BCD: invalid decimal digit")
-		}
-
-		high := byte(0x0F)
-		if i+1 < len(digits) {
-			var valid bool
-			high, valid = decimalNibble(digits[i+1])
-			if !valid {
-				return nil, errors.New("encoding BCD: invalid decimal digit")
-			}
-		}
-		out = append(out, high<<4|low)
-	}
-	return out, nil
-}
-
-func decodeSwappedBCD(data []byte, stripLeadingNine bool) (string, error) {
-	var buf strings.Builder
-	buf.Grow(len(data) * 2)
-
-	padding := false
-	for _, b := range data {
-		for _, nibble := range [2]byte{b & 0x0F, b >> 4} {
-			switch {
-			case nibble <= 9:
-				if padding {
-					return "", errors.New("invalid BCD digit after padding")
-				}
-				buf.WriteByte('0' + nibble)
-			case nibble == 0x0F:
-				padding = true
-			default:
-				return "", fmt.Errorf("invalid BCD nibble 0x%X", nibble)
-			}
-		}
-	}
-
-	out := buf.String()
-	if stripLeadingNine && strings.HasPrefix(out, "9") {
-		out = out[1:]
-	}
-	return out, nil
-}
-
-func decimalNibble(b byte) (byte, bool) {
-	if b < '0' || b > '9' {
-		return 0, false
-	}
-	return b - '0', true
 }
