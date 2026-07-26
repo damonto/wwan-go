@@ -101,7 +101,7 @@ func (c *Client) OpenPDN(ctx context.Context, cfg PDNConfig) (*PDNSession, error
 }
 
 // OpenIMSPDN starts an IMS PDN and reads the matching NAS voice state. When
-// IPPreference is WDSIPPreferenceUnspecified, a 3GPP IPv4-only or IPv6-only
+// IPPreference leaves the family to the modem, a 3GPP IPv4-only or IPv6-only
 // response starts one new WDS call with that family. Info reports the family
 // negotiated by the successful call.
 func (c *Client) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSession, error) {
@@ -128,7 +128,8 @@ func (c *Client) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSessi
 			WDSRuntimeRequestedNetworkSettings,
 	}
 	pdn, err := c.openPDN(ctx, pdnCfg)
-	if err != nil && cfg.IPPreference == WDSIPPreferenceUnspecified && cfg.LegacyMuxDataPort == 0 {
+	if err != nil && cfg.LegacyMuxDataPort == 0 &&
+		(cfg.IPPreference == WDSIPPreferenceDefault || cfg.IPPreference == WDSIPPreferenceUnspecified) {
 		if restricted, ok := wdsRestrictedIPPreference(err); ok {
 			initialErr := err
 			pdnCfg.IPPreference = restricted

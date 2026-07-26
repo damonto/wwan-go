@@ -75,22 +75,39 @@ func TestOpenIMSPDNNormalizesAPN(t *testing.T) {
 
 func TestOpenIMSPDNNegotiatesNetworkIPFamilyRestriction(t *testing.T) {
 	tests := []struct {
-		name       string
-		reason     int16
-		preference WDSIPPreference
-		family     WDSIPFamily
+		name              string
+		initialPreference WDSIPPreference
+		reason            int16
+		retryPreference   WDSIPPreference
+		family            WDSIPFamily
 	}{
 		{
-			name:       "IPv4 only",
-			reason:     WDSVerboseCallEndReason3GPPIPv4OnlyAllowed,
-			preference: WDSIPPreferenceIPv4,
-			family:     WDSIPFamilyIPv4,
+			name:              "default negotiates IPv4 only",
+			initialPreference: WDSIPPreferenceDefault,
+			reason:            WDSVerboseCallEndReason3GPPIPv4OnlyAllowed,
+			retryPreference:   WDSIPPreferenceIPv4,
+			family:            WDSIPFamilyIPv4,
 		},
 		{
-			name:       "IPv6 only",
-			reason:     WDSVerboseCallEndReason3GPPIPv6OnlyAllowed,
-			preference: WDSIPPreferenceIPv6,
-			family:     WDSIPFamilyIPv6,
+			name:              "default negotiates IPv6 only",
+			initialPreference: WDSIPPreferenceDefault,
+			reason:            WDSVerboseCallEndReason3GPPIPv6OnlyAllowed,
+			retryPreference:   WDSIPPreferenceIPv6,
+			family:            WDSIPFamilyIPv6,
+		},
+		{
+			name:              "unspecified negotiates IPv4 only",
+			initialPreference: WDSIPPreferenceUnspecified,
+			reason:            WDSVerboseCallEndReason3GPPIPv4OnlyAllowed,
+			retryPreference:   WDSIPPreferenceIPv4,
+			family:            WDSIPFamilyIPv4,
+		},
+		{
+			name:              "unspecified negotiates IPv6 only",
+			initialPreference: WDSIPPreferenceUnspecified,
+			reason:            WDSVerboseCallEndReason3GPPIPv6OnlyAllowed,
+			retryPreference:   WDSIPPreferenceIPv6,
+			family:            WDSIPFamilyIPv6,
 		},
 	}
 
@@ -101,7 +118,13 @@ func TestOpenIMSPDNNegotiatesNetworkIPFamilyRestriction(t *testing.T) {
 				{resp: successResponse(MessageWDSBindMuxDataPort)},
 				{
 					check: func(req Request) {
-						assertTLV(t, req.TLVs, 0x19, []byte{byte(WDSIPPreferenceUnspecified)})
+						if tt.initialPreference == WDSIPPreferenceDefault {
+							if _, ok := tlv.Value(req.TLVs, 0x19); ok {
+								t.Fatal("default WDS request included an IP Family TLV")
+							}
+							return
+						}
+						assertTLV(t, req.TLVs, 0x19, []byte{byte(tt.initialPreference)})
 					},
 					resp: errorResponse(
 						MessageWDSStartNetworkInterface,
@@ -123,7 +146,7 @@ func TestOpenIMSPDNNegotiatesNetworkIPFamilyRestriction(t *testing.T) {
 				{resp: successResponse(MessageWDSBindMuxDataPort)},
 				{
 					check: func(req Request) {
-						assertTLV(t, req.TLVs, 0x19, []byte{byte(tt.preference)})
+						assertTLV(t, req.TLVs, 0x19, []byte{byte(tt.retryPreference)})
 					},
 					resp: successResponse(MessageWDSStartNetworkInterface, tlv.Uint(0x01, uint32(0x01020304))),
 				},
@@ -141,7 +164,7 @@ func TestOpenIMSPDNNegotiatesNetworkIPFamilyRestriction(t *testing.T) {
 			}
 			session, err := reader.OpenIMSPDN(context.Background(), IMSPDNConfig{
 				APN:          "ims",
-				IPPreference: WDSIPPreferenceUnspecified,
+				IPPreference: tt.initialPreference,
 				MuxDataPort:  &WDSMuxDataPort{MuxID: 2},
 			})
 			if err != nil {
@@ -527,6 +550,65 @@ func TestOpenIMSPDNLegacyMuxUsesProfileIPFamily(t *testing.T) {
 			}
 			if err := reader.Close(); err != nil {
 				t.Fatalf("reader.Close() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenIMSPDNLegacyMuxKeepsNetworkIPFamilyRestriction(t *testing.T) {
+	tests := []struct {
+		name        string
+		reason      int16
+		restriction error
+	}{
+		{
+			name:        "IPv4 only",
+			reason:      WDSVerboseCallEndReason3GPPIPv4OnlyAllowed,
+			restriction: ErrWDSIPv4Only,
+		},
+		{
+			name:        "IPv6 only",
+			reason:      WDSVerboseCallEndReason3GPPIPv6OnlyAllowed,
+			restriction: ErrWDSIPv6Only,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeTransport{t: t, calls: []transportCall{
+				{resp: allocatedClientResponse(ServiceWDS, 2)},
+				{resp: successResponse(MessageWDSLegacyBindMuxDataPort)},
+				{
+					check: func(req Request) {
+						if _, ok := tlv.Value(req.TLVs, 0x19); ok {
+							t.Fatal("legacy mux WDS request included an IP Family TLV")
+						}
+					},
+					resp: errorResponse(
+						MessageWDSStartNetworkInterface,
+						QMIErrorCallFailed,
+						tlv.Bytes(0x11, verboseCallEndReasonForTest(WDSVerboseCallEndReasonType3GPP, tt.reason)),
+					),
+				},
+				{resp: successResponse(MessageReleaseClientID)},
+			}}
+
+			reader, err := NewClient(transport)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			_, err = reader.OpenIMSPDN(context.Background(), IMSPDNConfig{
+				IPPreference:      WDSIPPreferenceDefault,
+				LegacyMuxDataPort: WDSSIOPortA2MuxRMNET0,
+			})
+			if !errors.Is(err, tt.restriction) {
+				t.Fatalf("OpenIMSPDN() error = %v, want %v", err, tt.restriction)
+			}
+			if err := reader.Close(); err != nil {
+				t.Fatalf("reader.Close() error = %v", err)
+			}
+			if got := transport.callCount(); got != len(transport.calls) {
+				t.Fatalf("Do() calls = %d, want %d", got, len(transport.calls))
 			}
 		})
 	}
