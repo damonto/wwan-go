@@ -3,12 +3,16 @@ package qcom
 import (
 	"bytes"
 	"encoding"
+	"io"
 	"testing"
 )
 
 var (
-	_ encoding.BinaryMarshaler = DataEndpoint{}
-	_ encoding.BinaryAppender  = DataEndpoint{}
+	_ encoding.BinaryMarshaler   = DataEndpoint{}
+	_ encoding.BinaryAppender    = DataEndpoint{}
+	_ encoding.BinaryUnmarshaler = (*DataEndpoint)(nil)
+	_ io.WriterTo                = DataEndpoint{}
+	_ io.ReaderFrom              = (*DataEndpoint)(nil)
 )
 
 func TestDataEndpointBinaryEncoding(t *testing.T) {
@@ -48,6 +52,32 @@ func TestDataEndpointBinaryEncoding(t *testing.T) {
 			wantMarshaled := tt.want[len(tt.prefix):]
 			if !bytes.Equal(marshaled, wantMarshaled) {
 				t.Fatalf("MarshalBinary() = % X, want % X", marshaled, wantMarshaled)
+			}
+
+			var decoded DataEndpoint
+			if err := decoded.UnmarshalBinary(wantMarshaled); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if decoded != tt.endpoint {
+				t.Fatalf("UnmarshalBinary() = %+v, want %+v", decoded, tt.endpoint)
+			}
+
+			var written bytes.Buffer
+			n, err := tt.endpoint.WriteTo(&written)
+			if err != nil {
+				t.Fatalf("WriteTo() error = %v", err)
+			}
+			if n != int64(len(wantMarshaled)) || !bytes.Equal(written.Bytes(), wantMarshaled) {
+				t.Fatalf("WriteTo() = (%d, % X), want (%d, % X)", n, written.Bytes(), len(wantMarshaled), wantMarshaled)
+			}
+
+			var read DataEndpoint
+			n, err = read.ReadFrom(bytes.NewReader(wantMarshaled))
+			if err != nil {
+				t.Fatalf("ReadFrom() error = %v", err)
+			}
+			if n != int64(len(wantMarshaled)) || read != tt.endpoint {
+				t.Fatalf("ReadFrom() = (%d, %+v), want (%d, %+v)", n, read, len(wantMarshaled), tt.endpoint)
 			}
 		})
 	}

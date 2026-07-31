@@ -9,7 +9,13 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"time"
+)
+
+const (
+	defaultMaxControlTransfer = 4096
+	maxFrameLength            = 2 * 1024 * 1024
 )
 
 type Request struct {
@@ -24,6 +30,9 @@ type Request struct {
 func (r *Request) Transmit(ctx context.Context, conn Conn) error {
 	if _, err := r.writeConn(ctx, conn); err != nil {
 		return err
+	}
+	if r.MessageType == MessageTypeHostError {
+		return nil
 	}
 	if _, err := r.readConn(ctx, conn); err != nil {
 		return err
@@ -66,78 +75,95 @@ func (r *Request) writeConn(ctx context.Context, conn Conn) (int, error) {
 }
 
 func (r *Request) readConn(ctx context.Context, conn Conn) (int, error) {
-	deadline, hasDeadline := requestDeadline(ctx, r.timeout())
-	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
-
-	var collector *fragmentCollector
+	deadline, _ := requestDeadline(ctx, r.timeout())
+	collectors := make(map[fragmentKey]*incomingFragmentCollection)
 	expectedService, expectedCommand, expectCommand := r.expectedCommand()
+	expectedMessageType, ok := responseMessageType(r.MessageType)
+	if !ok {
+		return 0, fmt.Errorf("reading MBIM response: unsupported request message type %#x", r.MessageType)
+	}
 
 	for {
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
-		if hasDeadline && !time.Now().Before(deadline) {
+		if !time.Now().Before(deadline) {
 			return 0, fmt.Errorf("reading MBIM response: transaction ID %d not found", r.TransactionID)
 		}
 
-		readDeadline := time.Now().Add(time.Second)
-		if hasDeadline && deadline.Before(readDeadline) {
-			readDeadline = deadline
-		}
-		if err := conn.SetReadDeadline(readDeadline); err != nil {
-			return 0, fmt.Errorf("setting MBIM read deadline: %w", err)
+		waitDeadline := deadline
+		fragmentDeadline, waitingForFragment := nextFragmentDeadline(collectors)
+		if waitingForFragment && fragmentDeadline.Before(waitDeadline) {
+			waitDeadline = fragmentDeadline
 		}
 
-		buf, err := readFrame(conn)
-		if err != nil {
-			if timeoutError(err) {
+		resultCh := make(chan frameResult, 1)
+		go func() {
+			buf, err := readFrame(conn)
+			resultCh <- frameResult{data: buf, err: err}
+		}()
+		timer := time.NewTimer(time.Until(waitDeadline))
+
+		var result frameResult
+		select {
+		case result = <-resultCh:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		case <-ctx.Done():
+			timer.Stop()
+			if err := interruptFrameRead(conn, resultCh); err != nil {
+				return 0, err
+			}
+			return 0, ctx.Err()
+		case now := <-timer.C:
+			if err := interruptFrameRead(conn, resultCh); err != nil {
+				return 0, err
+			}
+			expired := expireFragmentCollectors(collectors, now)
+			if len(expired) == 0 {
+				return 0, fmt.Errorf("reading MBIM response: transaction ID %d not found", r.TransactionID)
+			}
+			for _, transactionID := range expired {
+				if err := writeFragmentHostError(ctx, conn, transactionID, ProtocolErrorTimeoutFragment); err != nil {
+					return 0, err
+				}
+			}
+			return 0, ProtocolErrorTimeoutFragment
+		}
+
+		if result.err != nil {
+			if timeoutError(result.err) {
 				continue
 			}
-			return 0, fmt.Errorf("reading MBIM response: %w", err)
+			return 0, fmt.Errorf("reading MBIM response: %w", result.err)
 		}
+		buf := result.data
 
 		messageType := MessageType(binary.LittleEndian.Uint32(buf[:4]))
 		transactionID := binary.LittleEndian.Uint32(buf[8:12])
 		if transactionID != r.TransactionID {
 			continue
 		}
-		expectedMessageType, ok := responseMessageType(r.MessageType)
-		if !ok {
-			return 0, fmt.Errorf("reading MBIM response: unsupported request message type %#x", r.MessageType)
-		}
 		if messageType != expectedMessageType && messageType != MessageTypeFunctionError {
 			continue
 		}
 
 		if isFragmentMessage(messageType) {
-			if collector != nil {
-				if err := collector.add(buf); err != nil {
+			complete, fault := collectReceivedFrame(collectors, buf, time.Now())
+			if fault != nil {
+				if err := writeFragmentHostError(ctx, conn, fault.transactionID, fault.status); err != nil {
 					return 0, err
 				}
-				if !collector.complete() {
-					continue
-				}
-				completeFrame, err := collector.MarshalBinary()
-				if err != nil {
-					return 0, err
-				}
-				buf = completeFrame
-				collector = nil
-			} else if len(buf) >= 20 && binary.LittleEndian.Uint32(buf[12:16]) > 1 {
-				var err error
-				collector, err = newFragmentCollector(buf)
-				if err != nil {
-					return 0, err
-				}
-				if !collector.complete() {
-					continue
-				}
-				buf, err = collector.MarshalBinary()
-				if err != nil {
-					return 0, err
-				}
-				collector = nil
+				return len(buf), fault.status
 			}
+			if complete == nil {
+				continue
+			}
+			buf = complete
 		}
 
 		if messageType == MessageTypeCommandDone && expectCommand {
@@ -157,6 +183,25 @@ func (r *Request) readConn(ctx context.Context, conn Conn) (int, error) {
 	}
 }
 
+func interruptFrameRead(conn Conn, result <-chan frameResult) error {
+	if err := conn.SetReadDeadline(time.Now()); err != nil {
+		return fmt.Errorf("interrupting MBIM frame read: %w", err)
+	}
+	<-result
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("clearing MBIM read deadline: %w", err)
+	}
+	return nil
+}
+
+func writeFragmentHostError(ctx context.Context, conn Conn, transactionID uint32, status ProtocolError) error {
+	request := (&HostErrorRequest{TransactionID: transactionID, Status: status}).Request()
+	if _, err := request.writeConn(ctx, conn); err != nil {
+		return fmt.Errorf("sending MBIM host error for transaction %d: %w", transactionID, err)
+	}
+	return nil
+}
+
 func (r *Request) expectedCommand() ([16]byte, uint32, bool) {
 	command, ok := r.Command.(*Command)
 	if !ok || r.MessageType != MessageTypeCommand {
@@ -174,9 +219,15 @@ func timeoutError(err error) bool {
 }
 
 func (r *Request) MarshalBinary() ([]byte, error) {
+	if r == nil {
+		return nil, errors.New("encoding MBIM request: request is nil")
+	}
+	if r.Command == nil {
+		return nil, errors.New("encoding MBIM request: command is nil")
+	}
 	command, err := r.Command.MarshalBinary()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("encoding MBIM request: %w", err)
 	}
 	r.MessageLength = uint32(12 + len(command))
 	buf := make([]byte, 0, r.MessageLength)
@@ -220,9 +271,9 @@ func (r *Request) unmarshalResponse(data []byte) error {
 	var response CommandResponse
 	err := response.UnmarshalBinary(data)
 	if err != nil {
-		ok, responseErr := unmarshalStatusResponse(err, response.ResponseBuffer, r.Response)
+		ok, responseErr := r.unmarshalStatusResponse(err, response.ResponseBuffer)
 		if responseErr != nil {
-			return responseErr
+			return fmt.Errorf("parsing MBIM status response: %v: %w", responseErr, err)
 		}
 		if !ok {
 			return err
@@ -237,18 +288,43 @@ func (r *Request) unmarshalResponse(data []byte) error {
 	return nil
 }
 
-func unmarshalStatusResponse(err error, data []byte, response encoding.BinaryUnmarshaler) (bool, error) {
-	if response == nil {
+func (r *Request) unmarshalStatusResponse(err error, data []byte) (bool, error) {
+	if r.Response == nil {
 		return false, nil
 	}
 	var status Status
-	if !errors.As(err, &status) || status != StatusAuthSyncFailure {
+	if !errors.As(err, &status) {
 		return false, nil
 	}
-	if err := response.UnmarshalBinary(data); err != nil {
+	if !r.statusCarriesResponse(status, data) {
+		return false, nil
+	}
+	if response, ok := r.Response.(*PacketServiceInfo); ok {
+		response.expectedState = PacketServiceStateUnknown
+	}
+	if err := r.Response.UnmarshalBinary(data); err != nil {
 		return true, err
 	}
 	return true, nil
+}
+
+func (r *Request) statusCarriesResponse(status Status, data []byte) bool {
+	if status == StatusAuthSyncFailure || status == StatusMatchingPDUSessionFound {
+		return true
+	}
+	if len(data) == 0 {
+		return false
+	}
+	command, ok := r.Command.(*Command)
+	if !ok || command.ServiceID != ServiceBasicConnect {
+		return false
+	}
+	switch command.CommandID {
+	case CIDPin, CIDRegisterState, CIDPacketService, CIDConnect, CIDServiceActivation:
+		return true
+	default:
+		return false
+	}
 }
 
 func requestDeadline(ctx context.Context, timeout time.Duration) (time.Time, bool) {
@@ -309,18 +385,24 @@ type Command struct {
 	CommandID       uint32
 	CommandType     CommandType
 	Data            []byte
+	marshalErr      error
 }
 
 func (c *Command) MarshalBinary() ([]byte, error) {
-	dataLength := len(c.Data)
-	paddedDataLength := align4(dataLength)
+	if c == nil {
+		return nil, errors.New("encoding MBIM command: command is nil")
+	}
+	if c.marshalErr != nil {
+		return nil, c.marshalErr
+	}
+	paddedDataLength := align4(len(c.Data))
 	buf := make([]byte, 0, 36+paddedDataLength)
 	buf = binary.LittleEndian.AppendUint32(buf, c.FragmentTotal)
 	buf = binary.LittleEndian.AppendUint32(buf, c.FragmentCurrent)
 	buf = append(buf, c.ServiceID[:]...)
 	buf = binary.LittleEndian.AppendUint32(buf, c.CommandID)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(c.CommandType))
-	buf = binary.LittleEndian.AppendUint32(buf, uint32(dataLength))
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(paddedDataLength))
 	buf = append(buf, c.Data...)
 	for len(buf) < 36+paddedDataLength {
 		buf = append(buf, 0)
@@ -428,10 +510,10 @@ func (r *CommandResponse) unmarshalCommandDone(data []byte) error {
 		return fmt.Errorf("parsing MBIM command response: unsupported fragment %d of %d", r.FragmentCurrent, r.FragmentTotal)
 	}
 	r.ResponseLength = binary.LittleEndian.Uint32(data[44:48])
-	if r.ResponseLength > uint32(len(data)-48) {
-		return fmt.Errorf("parsing MBIM command response: response length %d exceeds remaining %d", r.ResponseLength, len(data)-48)
+	if uint64(r.ResponseLength) != uint64(len(data)-48) {
+		return fmt.Errorf("parsing MBIM command response: response length %d does not match remaining %d", r.ResponseLength, len(data)-48)
 	}
-	r.ResponseBuffer = data[48 : 48+r.ResponseLength]
+	r.ResponseBuffer = slices.Clone(data[48 : 48+r.ResponseLength])
 	if r.Status != StatusNone {
 		return r.Status
 	}
@@ -472,9 +554,9 @@ func (r *Indication) UnmarshalBinary(data []byte) error {
 	copy(r.ServiceID[:], data[20:36])
 	r.CommandID = binary.LittleEndian.Uint32(data[36:40])
 	r.InformationLength = binary.LittleEndian.Uint32(data[40:44])
-	if r.InformationLength > uint32(len(data)-44) {
-		return fmt.Errorf("parsing MBIM indication: information length %d exceeds remaining %d", r.InformationLength, len(data)-44)
+	if uint64(r.InformationLength) != uint64(len(data)-44) {
+		return fmt.Errorf("parsing MBIM indication: information length %d does not match remaining %d", r.InformationLength, len(data)-44)
 	}
-	r.InformationBuffer = data[44 : 44+r.InformationLength]
+	r.InformationBuffer = slices.Clone(data[44 : 44+r.InformationLength])
 	return nil
 }

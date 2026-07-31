@@ -12,9 +12,54 @@ import (
 )
 
 const (
+	eventRegistrationCardStatus         uint32 = 1 << 0
 	eventRegistrationPhysicalSlotStatus uint32 = 1 << 4
 	monitorCleanupTimeout                      = 5 * time.Second
+	uimRefreshFilesMax                         = 100
 )
+
+// WatchCardStatus subscribes to logical UIM card and application changes.
+func (c *Client) WatchCardStatus(ctx context.Context) (<-chan CardStatus, error) {
+	transport, err := c.indicationTransport()
+	if err != nil {
+		return nil, err
+	}
+	clientID, err := c.uimClientID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("watching QMI UIM card status: %w", err)
+	}
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	indications, err := transport.Indications(watchCtx, ServiceUIM, clientID, MessageCardStatus)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("watching QMI UIM card status: %w", err)
+	}
+	if err := c.acquireUIMEvents(ctx, eventRegistrationCardStatus); err != nil {
+		cancel()
+		return nil, fmt.Errorf("watching QMI UIM card status: %w", err)
+	}
+
+	out := make(chan CardStatus, 8)
+	go func() {
+		defer close(out)
+		defer cancel()
+		defer c.releaseUIMEvents(eventRegistrationCardStatus)
+
+		for ind := range indications {
+			var status CardStatus
+			if err := status.UnmarshalTLVs(ind.TLVs); err != nil {
+				return
+			}
+			select {
+			case out <- status:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, nil
+}
 
 func (c *Client) WatchSlotStatus(ctx context.Context) (<-chan SlotStatus, error) {
 	transport, err := c.indicationTransport()
@@ -33,7 +78,7 @@ func (c *Client) WatchSlotStatus(ctx context.Context) (<-chan SlotStatus, error)
 		return nil, fmt.Errorf("watching QMI UIM slot status: %w", err)
 	}
 
-	if err := c.registerEvents(ctx, eventRegistrationPhysicalSlotStatus); err != nil {
+	if err := c.acquireUIMEvents(ctx, eventRegistrationPhysicalSlotStatus); err != nil {
 		cancel()
 		return nil, fmt.Errorf("watching QMI UIM slot status: %w", err)
 	}
@@ -42,12 +87,12 @@ func (c *Client) WatchSlotStatus(ctx context.Context) (<-chan SlotStatus, error)
 	go func() {
 		defer close(out)
 		defer cancel()
-		defer c.unregisterEvents()
+		defer c.releaseUIMEvents(eventRegistrationPhysicalSlotStatus)
 
 		for ind := range indications {
-			status, err := decodeSlotStatus(Response{TLVs: ind.TLVs})
-			if err != nil {
-				continue
+			var status SlotStatus
+			if err := status.UnmarshalTLVs(ind.TLVs); err != nil {
+				return
 			}
 			select {
 			case out <- status:
@@ -67,8 +112,8 @@ func (c *Client) WatchRefreshFiles(ctx context.Context, req RefreshRegisterReque
 	if len(req.Files) == 0 {
 		return nil, errors.New("watching QMI UIM refresh files: file list is empty")
 	}
-	if len(req.AID) > 0xff {
-		return nil, fmt.Errorf("watching QMI UIM refresh files: AID length %d exceeds 255", len(req.AID))
+	if err := validateUIMAIDLength(req.AID); err != nil {
+		return nil, fmt.Errorf("watching QMI UIM refresh files: %w", err)
 	}
 	clientID, err := c.uimClientID(ctx)
 	if err != nil {
@@ -105,8 +150,8 @@ func (c *Client) WatchRefreshAll(ctx context.Context, session Session, aid []byt
 	if err != nil {
 		return nil, err
 	}
-	if len(aid) > 0xff {
-		return nil, fmt.Errorf("watching all QMI UIM refresh files: AID length %d exceeds 255", len(aid))
+	if err := validateUIMAIDLength(aid); err != nil {
+		return nil, fmt.Errorf("watching all QMI UIM refresh files: %w", err)
 	}
 	clientID, err := c.uimClientID(ctx)
 	if err != nil {
@@ -150,10 +195,57 @@ func (c *Client) registerEvents(ctx context.Context, mask uint32) error {
 	return c.sendMonitorRequest(ctx, MessageRegisterEvents, registerEventsTLVs(mask))
 }
 
-func (c *Client) unregisterEvents() {
+func (c *Client) acquireUIMEvents(ctx context.Context, mask uint32) error {
+	c.watchMu.Lock()
+	defer c.watchMu.Unlock()
+
+	if c.uimEventRefs == nil {
+		c.uimEventRefs = make(map[uint32]int)
+	}
+	oldMask := combinedUIMEventMask(c.uimEventRefs)
+	c.uimEventRefs[mask]++
+	newMask := combinedUIMEventMask(c.uimEventRefs)
+	if oldMask == newMask {
+		return nil
+	}
+	if err := c.registerEvents(ctx, newMask); err != nil {
+		c.uimEventRefs[mask]--
+		if c.uimEventRefs[mask] == 0 {
+			delete(c.uimEventRefs, mask)
+		}
+		return err
+	}
+	return nil
+}
+
+func (c *Client) releaseUIMEvents(mask uint32) {
 	ctx, cancel := context.WithTimeout(context.Background(), monitorCleanupTimeout)
 	defer cancel()
-	_ = c.registerEvents(ctx, 0)
+
+	c.watchMu.Lock()
+	defer c.watchMu.Unlock()
+	if c.uimEventRefs[mask] == 0 {
+		return
+	}
+	oldMask := combinedUIMEventMask(c.uimEventRefs)
+	c.uimEventRefs[mask]--
+	if c.uimEventRefs[mask] == 0 {
+		delete(c.uimEventRefs, mask)
+	}
+	newMask := combinedUIMEventMask(c.uimEventRefs)
+	if oldMask != newMask {
+		_ = c.registerEvents(ctx, newMask)
+	}
+}
+
+func combinedUIMEventMask(refs map[uint32]int) uint32 {
+	var mask uint32
+	for eventMask, count := range refs {
+		if count > 0 {
+			mask |= eventMask
+		}
+	}
+	return mask
 }
 
 func (c *Client) sendMonitorRequest(ctx context.Context, id MessageID, tlvs tlv.TLVs) error {
@@ -198,9 +290,9 @@ func (c *Client) forwardRefreshEvents(
 	defer cleanup()
 
 	for ind := range indications {
-		event, err := decodeRefreshEvent(ind.TLVs)
-		if err != nil {
-			continue
+		var event RefreshEvent
+		if err := event.UnmarshalTLVs(ind.TLVs); err != nil {
+			return
 		}
 		if event.Stage == RefreshStageStart && event.Mode != RefreshModeReset {
 			c.completeRefresh(event)
@@ -234,7 +326,11 @@ func (c *Client) completeRefresh(event RefreshEvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultRequestTimeout)
 	defer cancel()
 
-	_ = c.sendMonitorRequest(ctx, MessageRefreshComplete, refreshCompleteTLVs(event.Session, event.AID, true))
+	tlvs, err := refreshCompleteTLVs(event.Session, event.AID, true)
+	if err != nil {
+		return
+	}
+	_ = c.sendMonitorRequest(ctx, MessageRefreshComplete, tlvs)
 }
 
 func registerEventsTLVs(mask uint32) tlv.TLVs {
@@ -243,20 +339,25 @@ func registerEventsTLVs(mask uint32) tlv.TLVs {
 	}
 }
 
-func refreshCompleteTLVs(session Session, aid []byte, success bool) tlv.TLVs {
+func refreshCompleteTLVs(session Session, aid []byte, success bool) (tlv.TLVs, error) {
+	sessionValue, err := putSessionValue(session, aid)
+	if err != nil {
+		return nil, err
+	}
 	flag := uint8(0)
 	if success {
 		flag = 1
 	}
 	return tlv.TLVs{
-		tlv.Bytes(0x01, putSessionValue(session, aid)),
+		tlv.Bytes(0x01, sessionValue),
 		tlv.Bytes(0x02, []byte{flag}),
-	}
+	}, nil
 }
 
 func refreshRegisterTLVs(req RefreshRegisterRequest, register bool) (tlv.TLVs, error) {
-	if len(req.AID) > 0xff {
-		return nil, fmt.Errorf("AID length %d exceeds 255", len(req.AID))
+	sessionValue, err := putSessionValue(req.Session, req.AID)
+	if err != nil {
+		return nil, err
 	}
 
 	info, err := encodeRefreshRegisterInfo(req.Files, register, req.VoteForInit)
@@ -264,28 +365,29 @@ func refreshRegisterTLVs(req RefreshRegisterRequest, register bool) (tlv.TLVs, e
 		return nil, err
 	}
 	return tlv.TLVs{
-		tlv.Bytes(0x01, putSessionValue(req.Session, req.AID)),
+		tlv.Bytes(0x01, sessionValue),
 		tlv.Bytes(0x02, info),
 	}, nil
 }
 
 func refreshRegisterAllTLVs(session Session, aid []byte, register bool) (tlv.TLVs, error) {
-	if len(aid) > 0xff {
-		return nil, fmt.Errorf("AID length %d exceeds 255", len(aid))
+	sessionValue, err := putSessionValue(session, aid)
+	if err != nil {
+		return nil, err
 	}
 	flag := uint8(0)
 	if register {
 		flag = 1
 	}
 	return tlv.TLVs{
-		tlv.Bytes(0x01, putSessionValue(session, aid)),
+		tlv.Bytes(0x01, sessionValue),
 		tlv.Bytes(0x02, []byte{flag}),
 	}, nil
 }
 
 func encodeRefreshRegisterInfo(files []RefreshFile, register bool, voteForInit bool) ([]byte, error) {
-	if len(files) > 0xffff {
-		return nil, fmt.Errorf("file count %d exceeds 65535", len(files))
+	if len(files) > uimRefreshFilesMax {
+		return nil, fmt.Errorf("file count %d exceeds %d", len(files), uimRefreshFilesMax)
 	}
 
 	registerFlag := uint8(0)
@@ -304,8 +406,8 @@ func encodeRefreshRegisterInfo(files []RefreshFile, register bool, voteForInit b
 		if err != nil {
 			return nil, err
 		}
-		if len(path) > 0xff {
-			return nil, fmt.Errorf("encoding SIM path %X: QMI path length %d exceeds 255", file.Path, len(path))
+		if len(path) > uimPathMaxLength {
+			return nil, fmt.Errorf("encoding SIM path %X: QMI path length %d exceeds %d", file.Path, len(path), uimPathMaxLength)
 		}
 		value = binary.LittleEndian.AppendUint16(value, fileID)
 		value = append(value, byte(len(path)))
@@ -314,14 +416,16 @@ func encodeRefreshRegisterInfo(files []RefreshFile, register bool, voteForInit b
 	return value, nil
 }
 
-func decodeRefreshEvent(tlvs tlv.TLVs) (RefreshEvent, error) {
+// UnmarshalTLVs parses a QMI UIM refresh event.
+func (event *RefreshEvent) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	*event = RefreshEvent{}
 	value, ok := tlv.Value(tlvs, 0x10)
 	if !ok {
-		return RefreshEvent{}, errors.New("reading refresh event: event TLV missing")
+		return errors.New("reading refresh event: event TLV missing")
 	}
 
 	payload := newPayloadReader(value)
-	event := RefreshEvent{
+	*event = RefreshEvent{
 		Stage:   RefreshStage(payload.Uint8()),
 		Mode:    RefreshMode(payload.Uint8()),
 		Session: Session(payload.Uint8()),
@@ -329,7 +433,7 @@ func decodeRefreshEvent(tlvs tlv.TLVs) (RefreshEvent, error) {
 	}
 	fileCount := payload.Uint16()
 	if err := payload.Err(); err != nil {
-		return RefreshEvent{}, fmt.Errorf("reading refresh event: %w", err)
+		return fmt.Errorf("reading refresh event: %w", err)
 	}
 
 	event.Files = make([]RefreshFile, 0, fileCount)
@@ -337,18 +441,18 @@ func decodeRefreshEvent(tlvs tlv.TLVs) (RefreshEvent, error) {
 		fileID := payload.Uint16()
 		path := payload.Bytes8()
 		if err := payload.Err(); err != nil {
-			return RefreshEvent{}, fmt.Errorf("reading refresh event: %w", err)
+			return fmt.Errorf("reading refresh event: %w", err)
 		}
 		fullPath, err := joinQMIFilePath(fileID, path)
 		if err != nil {
-			return RefreshEvent{}, fmt.Errorf("reading refresh event: %w", err)
+			return fmt.Errorf("reading refresh event: %w", err)
 		}
 		event.Files = append(event.Files, RefreshFile{
 			FileID: fileID,
 			Path:   fullPath,
 		})
 	}
-	return event, nil
+	return nil
 }
 
 func joinQMIFilePath(fileID uint16, path []byte) ([]byte, error) {

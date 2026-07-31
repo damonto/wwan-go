@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -11,15 +12,44 @@ import (
 )
 
 const (
-	wdsTLVProfileList    = 0x01
-	wdsTLVProfileID      = 0x01
-	wdsTLVProfileType    = 0x10
-	wdsTLVProfileName    = 0x10
-	wdsTLVProfilePDPType = 0x11
-	wdsTLVProfileAPN     = 0x14
-	wdsTLVPCSCFUsingPCO  = 0x1F
-	wdsTLVPCSCFUsingDHCP = 0x21
-	wdsTLVIMCNFlag       = 0x22
+	wdsTLVProfileList                 = 0x01
+	wdsTLVProfileID                   = 0x01
+	wdsTLVProfileType                 = 0x10
+	wdsTLVProfileName                 = 0x10
+	wdsTLVProfilePDPType              = 0x11
+	wdsTLVProfileHeaderCompression    = 0x12
+	wdsTLVProfileDataCompression      = 0x13
+	wdsTLVProfileAPN                  = 0x14
+	wdsTLVProfilePrimaryIPv4DNS       = 0x15
+	wdsTLVProfileSecondaryIPv4DNS     = 0x16
+	wdsTLVProfileUMTSRequestedQoS     = 0x17
+	wdsTLVProfileUMTSMinimumQoS       = 0x18
+	wdsTLVProfileGPRSRequestedQoS     = 0x19
+	wdsTLVProfileGPRSMinimumQoS       = 0x1A
+	wdsTLVProfileUsername             = 0x1B
+	wdsTLVProfilePassword             = 0x1C
+	wdsTLVProfileAuth                 = 0x1D
+	wdsTLVProfileIPv4Preference       = 0x1E
+	wdsTLVPCSCFUsingPCO               = 0x1F
+	wdsTLVProfilePDPAccessControl     = 0x20
+	wdsTLVPCSCFUsingDHCP              = 0x21
+	wdsTLVIMCNFlag                    = 0x22
+	wdsTLVProfilePDPContextNumber     = 0x25
+	wdsTLVProfilePDPContextSecondary  = 0x26
+	wdsTLVProfilePDPContextPrimaryID  = 0x27
+	wdsTLVProfileIPv6Preference       = 0x28
+	wdsTLVProfileUMTSRequestedQoSSig  = 0x29
+	wdsTLVProfileUMTSMinimumQoSSig    = 0x2A
+	wdsTLVProfilePrimaryIPv6DNS       = 0x2B
+	wdsTLVProfileSecondaryIPv6DNS     = 0x2C
+	wdsTLVProfileAddressAllocation    = 0x2D
+	wdsTLVProfileLTEQoS               = 0x2E
+	wdsTLVProfileAPNDisabled          = 0x2F
+	wdsTLVProfileRoamingDisallowed    = 0x3E
+	wdsTLVProfileVLAN                 = 0x50
+	wdsTLVProfileAPNType              = 0xDD
+	wdsTLVProfileCLATEnabled          = 0xDE
+	wdsTLVProfileIPv6PrefixDelegation = 0xDF
 )
 
 var ErrWDSProfileNotFound = errors.New("WDS profile not found")
@@ -28,24 +58,22 @@ type WDSCreateProfileRequest struct {
 	ClientID      uint8
 	TransactionID uint16
 	Timeout       time.Duration
-	APN           string
-	PDPType       WDSPDPType
+	Config        WDSProfileConfig
 }
 
-func (r WDSCreateProfileRequest) Request() Request {
+func (r WDSCreateProfileRequest) Request() (Request, error) {
+	tlvs, err := r.Config.MarshalTLVs()
+	if err != nil {
+		return Request{}, fmt.Errorf("encoding QMI WDS create profile: %w", err)
+	}
 	return Request{
 		Service:       ServiceWDS,
 		ClientID:      r.ClientID,
 		TransactionID: r.TransactionID,
 		MessageID:     MessageWDSCreateProfile,
 		Timeout:       r.Timeout,
-		TLVs: tlv.TLVs{
-			tlv.Uint(wdsTLVProfileID, uint8(WDSProfileType3GPP)),
-			tlv.Bytes(wdsTLVProfileName, fmt.Appendf(nil, "wwan-go-%d", r.PDPType)),
-			tlv.Uint(wdsTLVProfilePDPType, uint8(r.PDPType)),
-			tlv.Bytes(wdsTLVProfileAPN, []byte(r.APN)),
-		},
-	}
+		TLVs:          tlvs,
+	}, nil
 }
 
 type WDSDeleteProfileRequest struct {
@@ -92,6 +120,15 @@ type WDSModifyProfileRequest struct {
 	PCSCFUsingPCO bool
 }
 
+// WDSUpdateProfileRequest encodes optional changes for a stored WDS profile.
+type WDSUpdateProfileRequest struct {
+	ClientID      uint8
+	TransactionID uint16
+	Timeout       time.Duration
+	Profile       WDSProfileID
+	Update        WDSProfileUpdate
+}
+
 func (r WDSModifyProfileRequest) Request() Request {
 	return Request{
 		Service:       ServiceWDS,
@@ -104,6 +141,32 @@ func (r WDSModifyProfileRequest) Request() Request {
 			tlv.Bytes(wdsTLVPCSCFUsingPCO, []byte{boolByte(r.PCSCFUsingPCO)}),
 		},
 	}
+}
+
+func (r WDSUpdateProfileRequest) Request() (Request, error) {
+	if err := validateWDSProfileType(r.Profile.Type); err != nil {
+		return Request{}, err
+	}
+	if wdsProfileUpdateEmpty(r.Update) {
+		return Request{}, errors.New("no profile fields selected")
+	}
+	if err := validateWDSProfileUpdate(r.Update); err != nil {
+		return Request{}, err
+	}
+	tlvs := tlv.TLVs{tlv.Bytes(wdsTLVProfileID, []byte{byte(r.Profile.Type), r.Profile.Index})}
+	updateTLVs, err := r.Update.MarshalTLVs()
+	if err != nil {
+		return Request{}, err
+	}
+	tlvs = append(tlvs, updateTLVs...)
+	return Request{
+		Service:       ServiceWDS,
+		ClientID:      r.ClientID,
+		TransactionID: r.TransactionID,
+		MessageID:     MessageWDSModifyProfile,
+		Timeout:       r.Timeout,
+		TLVs:          tlvs,
+	}, nil
 }
 
 type WDSSetDefaultProfileRequest struct {
@@ -181,15 +244,33 @@ func (c *Client) WDSProfileSettings(ctx context.Context, id WDSProfileID) (WDSPr
 	return settings, nil
 }
 
-// WDSModifyProfile enables P-CSCF address delivery through PCO for a stored profile.
+// WDSModifyProfile sets P-CSCF address delivery through PCO for a stored profile.
 func (c *Client) WDSModifyProfile(ctx context.Context, id WDSProfileID, pcscfUsingPCO bool) error {
+	return c.WDSUpdateProfile(ctx, id, WDSProfileUpdate{PCSCFUsingPCO: &pcscfUsingPCO})
+}
+
+// WDSUpdateProfile applies selected changes to a stored profile.
+func (c *Client) WDSUpdateProfile(ctx context.Context, id WDSProfileID, update WDSProfileUpdate) error {
+	if err := validateWDSProfileType(id.Type); err != nil {
+		return fmt.Errorf("modifying QMI WDS profile %d: %w", id.Index, err)
+	}
+	if wdsProfileUpdateEmpty(update) {
+		return errors.New("modifying QMI WDS profile: no fields selected")
+	}
+	if err := validateWDSProfileUpdate(update); err != nil {
+		return fmt.Errorf("modifying QMI WDS profile %d: %w", id.Index, err)
+	}
+
 	err := c.withServiceClient(ctx, ServiceWDS, func(clientID uint8) error {
-		req := WDSModifyProfileRequest{
-			ClientID:      clientID,
-			Timeout:       DefaultRequestTimeout,
-			Profile:       id,
-			PCSCFUsingPCO: pcscfUsingPCO,
-		}.Request()
+		req, err := (WDSUpdateProfileRequest{
+			ClientID: clientID,
+			Timeout:  DefaultRequestTimeout,
+			Profile:  id,
+			Update:   update,
+		}).Request()
+		if err != nil {
+			return err
+		}
 		resp, err := c.requestServiceWithTimeout(ctx, req.Service, req.ClientID, req.MessageID, req.TLVs, req.Timeout)
 		if err != nil {
 			return err
@@ -198,6 +279,95 @@ func (c *Client) WDSModifyProfile(ctx context.Context, id WDSProfileID, pcscfUsi
 	})
 	if err != nil {
 		return fmt.Errorf("modify QMI WDS profile %d: %w", id.Index, err)
+	}
+	return nil
+}
+
+func wdsProfileUpdateEmpty(update WDSProfileUpdate) bool {
+	return update.Name == nil && update.APN == nil && update.PDPType == nil &&
+		update.Username == nil && update.Password == nil && update.Authentication == nil &&
+		update.HeaderCompression == nil && update.DataCompression == nil &&
+		update.PrimaryIPv4DNS == nil && update.SecondaryIPv4DNS == nil &&
+		update.UMTSRequestedQoS == nil && update.UMTSMinimumQoS == nil &&
+		update.GPRSRequestedQoS == nil && update.GPRSMinimumQoS == nil &&
+		update.IPv4AddressPreference == nil && update.PCSCFUsingPCO == nil &&
+		update.PDPAccessControl == nil && update.PCSCFUsingDHCP == nil && update.IMCN == nil &&
+		update.PDPContextNumber == nil && update.PDPContextSecondary == nil &&
+		update.PDPContextPrimaryID == nil && update.IPv6AddressPreference == nil &&
+		update.UMTSRequestedQoSWithSignaling == nil && update.UMTSMinimumQoSWithSignaling == nil &&
+		update.PrimaryIPv6DNS == nil && update.SecondaryIPv6DNS == nil &&
+		update.AddressAllocationPreference == nil && update.LTEQoS == nil &&
+		update.APNDisabled == nil && update.RoamingDisallowed == nil && update.VLAN == nil &&
+		update.APNType == nil && update.CLATEnabled == nil && update.IPv6PrefixDelegation == nil
+}
+
+func validateWDSProfileUpdate(update WDSProfileUpdate) error {
+	if update.Name != nil {
+		if err := validateWDSString(*update.Name, wdsProfileNameMaxLength); err != nil {
+			return fmt.Errorf("validating WDS profile name: %w", err)
+		}
+	}
+	if update.APN != nil {
+		if err := validateWDSString(*update.APN, wdsAPNMaxLength); err != nil {
+			return fmt.Errorf("validating WDS APN: %w", err)
+		}
+	}
+	if update.PDPType != nil && *update.PDPType > WDSPDPTypeNonIP {
+		return fmt.Errorf("unsupported WDS PDP type %d", *update.PDPType)
+	}
+	if update.Username != nil {
+		if err := validateWDSString(*update.Username, wdsUsernameMaxLength); err != nil {
+			return fmt.Errorf("validating WDS username: %w", err)
+		}
+	}
+	if update.Password != nil {
+		if err := validateWDSString(*update.Password, wdsPasswordMaxLength); err != nil {
+			return fmt.Errorf("validating WDS password: %w", err)
+		}
+	}
+	if update.Authentication != nil {
+		if err := validateWDSAuthentication(*update.Authentication); err != nil {
+			return err
+		}
+	}
+	if update.HeaderCompression != nil && *update.HeaderCompression > WDSPDPHeaderCompressionRFC3095 {
+		return fmt.Errorf("WDS PDP header compression %d is out of range", *update.HeaderCompression)
+	}
+	if update.DataCompression != nil && *update.DataCompression > WDSPDPDataCompressionV44 {
+		return fmt.Errorf("WDS PDP data compression %d is out of range", *update.DataCompression)
+	}
+	if err := validateWDSProfileIPv4(update.PrimaryIPv4DNS); err != nil {
+		return fmt.Errorf("validating WDS primary IPv4 DNS: %w", err)
+	}
+	if err := validateWDSProfileIPv4(update.SecondaryIPv4DNS); err != nil {
+		return fmt.Errorf("validating WDS secondary IPv4 DNS: %w", err)
+	}
+	if err := validateWDSProfileIPv4(update.IPv4AddressPreference); err != nil {
+		return fmt.Errorf("validating WDS IPv4 address preference: %w", err)
+	}
+	if update.PDPAccessControl != nil && *update.PDPAccessControl > WDSPDPAccessControlPermission {
+		return fmt.Errorf("WDS PDP access control %d is out of range", *update.PDPAccessControl)
+	}
+	if err := validateWDSProfileIPv6(update.IPv6AddressPreference); err != nil {
+		return fmt.Errorf("validating WDS IPv6 address preference: %w", err)
+	}
+	if err := validateWDSProfileIPv6(update.PrimaryIPv6DNS); err != nil {
+		return fmt.Errorf("validating WDS primary IPv6 DNS: %w", err)
+	}
+	if err := validateWDSProfileIPv6(update.SecondaryIPv6DNS); err != nil {
+		return fmt.Errorf("validating WDS secondary IPv6 DNS: %w", err)
+	}
+	if update.AddressAllocationPreference != nil && *update.AddressAllocationPreference > WDSAddressAllocationDHCP {
+		return fmt.Errorf("WDS address allocation preference %d is out of range", *update.AddressAllocationPreference)
+	}
+	if update.LTEQoS != nil && update.LTEQoS.ClassIdentifier > WDSQoSClassNonGuaranteedBitrate8 {
+		return fmt.Errorf("WDS LTE QoS class %d is out of range", update.LTEQoS.ClassIdentifier)
+	}
+	if update.VLAN != nil && update.VLAN.Start > update.VLAN.End {
+		return fmt.Errorf("WDS VLAN range start %d exceeds end %d", update.VLAN.Start, update.VLAN.End)
+	}
+	if update.APNType != nil && *update.APNType&^wdsAPNTypeAll != 0 {
+		return fmt.Errorf("unsupported WDS APN type mask 0x%X", uint64(*update.APNType))
 	}
 	return nil
 }
@@ -223,20 +393,42 @@ func (c *Client) WDSSetDefaultProfile(ctx context.Context, id WDSProfileID, fami
 	return nil
 }
 
-// WDSCreateProfile creates a persistent 3GPP profile. The caller owns the
-// returned profile and should delete it when it is no longer needed.
+// WDSCreateProfile creates a persistent 3GPP profile with APN and PDP type.
+// The caller owns the returned profile and should delete it when it is no
+// longer needed.
 func (c *Client) WDSCreateProfile(ctx context.Context, apn string, pdpType WDSPDPType) (uint8, error) {
-	apn = strings.TrimSpace(apn)
-	if apn == "" {
-		return 0, errors.New("creating QMI WDS profile: APN is required")
+	id, err := c.WDSCreateProfileWithConfig(ctx, WDSProfileConfig{APN: apn, PDPType: pdpType})
+	if err != nil {
+		return 0, err
 	}
-	if pdpType > WDSPDPTypeIPv4v6 {
-		return 0, fmt.Errorf("creating QMI WDS profile: unsupported PDP type %d", pdpType)
+	return id.Index, nil
+}
+
+// WDSCreateProfileWithConfig creates a persistent 3GPP profile with optional
+// authentication and IMS-related settings.
+func (c *Client) WDSCreateProfileWithConfig(ctx context.Context, cfg WDSProfileConfig) (WDSProfileID, error) {
+	cfg.APN = strings.TrimSpace(cfg.APN)
+	cfg.Name = strings.TrimSpace(cfg.Name)
+	if cfg.APN == "" {
+		return WDSProfileID{}, errors.New("creating QMI WDS profile: APN is required")
+	}
+	if cfg.Name == "" {
+		cfg.Name = fmt.Sprintf("wwan-go-%d", cfg.PDPType)
+	}
+	if err := validateWDSProfileConfig(cfg); err != nil {
+		return WDSProfileID{}, fmt.Errorf("creating QMI WDS profile: %w", err)
 	}
 
-	var index uint8
+	var id WDSProfileID
 	err := c.withServiceClient(ctx, ServiceWDS, func(clientID uint8) error {
-		req := WDSCreateProfileRequest{ClientID: clientID, Timeout: DefaultRequestTimeout, APN: apn, PDPType: pdpType}.Request()
+		req, err := (WDSCreateProfileRequest{
+			ClientID: clientID,
+			Timeout:  DefaultRequestTimeout,
+			Config:   cfg,
+		}).Request()
+		if err != nil {
+			return err
+		}
 		resp, err := c.requestServiceWithTimeout(ctx, req.Service, req.ClientID, req.MessageID, req.TLVs, req.Timeout)
 		if err != nil {
 			return err
@@ -245,19 +437,49 @@ func (c *Client) WDSCreateProfile(ctx context.Context, apn string, pdpType WDSPD
 			return err
 		}
 		value, ok := tlv.Value(resp.TLVs, wdsTLVProfileID)
-		if !ok || len(value) < 2 {
+		if !ok {
 			return errors.New("parsing QMI WDS create profile: profile identifier is missing")
 		}
-		if WDSProfileType(value[0]) != WDSProfileType3GPP {
-			return fmt.Errorf("parsing QMI WDS create profile: profile type %d is not 3GPP", value[0])
+		if len(value) != 2 {
+			return fmt.Errorf("parsing QMI WDS create profile: profile identifier length %d, want 2", len(value))
 		}
-		index = value[1]
+		if WDSProfileType(value[0]) != cfg.Type {
+			return fmt.Errorf("parsing QMI WDS create profile: profile type %d, want %d", value[0], cfg.Type)
+		}
+		id = WDSProfileID{Type: WDSProfileType(value[0]), Index: value[1]}
 		return nil
 	})
 	if err != nil {
-		return 0, fmt.Errorf("creating QMI WDS profile: %w", err)
+		return WDSProfileID{}, fmt.Errorf("creating QMI WDS profile: %w", err)
 	}
-	return index, nil
+	return id, nil
+}
+
+func validateWDSProfileConfig(cfg WDSProfileConfig) error {
+	if err := validateWDSProfileType(cfg.Type); err != nil {
+		return err
+	}
+	return validateWDSProfileUpdate(wdsProfileUpdateFromConfig(cfg))
+}
+
+func validateWDSProfileIPv4(address *netip.Addr) error {
+	if address == nil {
+		return nil
+	}
+	if !address.Unmap().Is4() {
+		return fmt.Errorf("address %q is not IPv4", *address)
+	}
+	return nil
+}
+
+func validateWDSProfileIPv6(address *netip.Addr) error {
+	if address == nil {
+		return nil
+	}
+	if !address.Unmap().Is6() {
+		return fmt.Errorf("address %q is not IPv6", *address)
+	}
+	return nil
 }
 
 // WDSDeleteProfile removes a persistent 3GPP profile.
@@ -322,6 +544,9 @@ func (r *WDSGetProfileListResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		r.Profiles = append(r.Profiles, WDSProfile{ID: WDSProfileID{Type: WDSProfileType(rest[0]), Index: rest[1]}, Name: string(rest[3 : 3+nameLen])})
 		rest = rest[3+nameLen:]
 	}
+	if len(rest) != 0 {
+		return errors.New("parsing QMI WDS profile list: trailing data")
+	}
 	return nil
 }
 
@@ -330,34 +555,5 @@ type WDSGetProfileSettingsResponse struct{ Settings WDSProfileSettings }
 func (r *WDSGetProfileSettingsResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	id := r.Settings.ID
 	*r = WDSGetProfileSettingsResponse{Settings: WDSProfileSettings{ID: id}}
-	if value, ok := tlv.Value(tlvs, wdsTLVProfileName); ok {
-		r.Settings.Name, r.Settings.NameKnown = string(value), true
-	}
-	if value, ok := tlv.Value(tlvs, wdsTLVProfileAPN); ok {
-		r.Settings.APN, r.Settings.APNKnown = string(value), true
-	}
-	if value, ok := tlv.Value(tlvs, wdsTLVProfilePDPType); ok {
-		if len(value) < 1 {
-			return errors.New("parsing QMI WDS profile settings: PDP type is truncated")
-		}
-		r.Settings.PDPType, r.Settings.PDPKnown = WDSPDPType(value[0]), true
-	}
-	readBool := func(kind byte, known *bool, target *bool) error {
-		value, ok := tlv.Value(tlvs, kind)
-		if !ok {
-			return nil
-		}
-		if len(value) < 1 {
-			return fmt.Errorf("parsing QMI WDS profile settings: TLV 0x%02X is truncated", kind)
-		}
-		*known, *target = true, value[0] != 0
-		return nil
-	}
-	if err := readBool(wdsTLVPCSCFUsingPCO, &r.Settings.PCSCFUsingPCOKnown, &r.Settings.PCSCFUsingPCO); err != nil {
-		return err
-	}
-	if err := readBool(wdsTLVPCSCFUsingDHCP, &r.Settings.PCSCFUsingDHCPKnown, &r.Settings.PCSCFUsingDHCP); err != nil {
-		return err
-	}
-	return readBool(wdsTLVIMCNFlag, &r.Settings.IMCNKnown, &r.Settings.IMCN)
+	return unmarshalWDSProfileSettings(tlvs, &r.Settings)
 }

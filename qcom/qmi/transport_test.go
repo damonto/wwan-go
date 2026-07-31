@@ -17,6 +17,8 @@ import (
 func TestResponseImplementsStandardInterfaces(t *testing.T) {
 	var _ encoding.BinaryMarshaler = Request{}
 	var _ encoding.BinaryUnmarshaler = (*Response)(nil)
+	var _ io.WriterTo = Request{}
+	var _ io.ReaderFrom = (*Response)(nil)
 }
 
 func TestMarshalRequest(t *testing.T) {
@@ -109,6 +111,14 @@ func TestMarshalRequestRejectsInvalidRequest(t *testing.T) {
 				Service:       qcom.ServiceControl,
 				TransactionID: 256,
 				MessageID:     qcom.MessageGetVersionInfo,
+			},
+		},
+		{
+			name: "extended QRTR service",
+			req: qcom.Request{
+				Service:       qcom.ServiceType(0x0302),
+				TransactionID: 1,
+				MessageID:     1,
 			},
 		},
 	}
@@ -216,6 +226,58 @@ func TestResponseUnmarshalBinary(t *testing.T) {
 	}
 }
 
+func TestResponseClassifiesMessageTypes(t *testing.T) {
+	tests := []struct {
+		name           string
+		frame          []byte
+		wantResponse   bool
+		wantIndication bool
+	}{
+		{
+			name:           "control response",
+			frame:          controlResultFrame(1, qcom.MessageCTLSync),
+			wantResponse:   true,
+			wantIndication: false,
+		},
+		{
+			name:           "control indication",
+			frame:          controlIndicationFrame(0, qcom.MessageCTLSync),
+			wantResponse:   false,
+			wantIndication: true,
+		},
+		{
+			name:           "service response",
+			frame:          serviceResultFrame(3, qcom.MessageReadTransparent),
+			wantResponse:   true,
+			wantIndication: false,
+		},
+		{
+			name: "service indication",
+			frame: []byte{
+				0x01, 0x0C, 0x00, 0x80, byte(qcom.ServiceUIM), 0x07,
+				byte(qcom.MessageTypeIndication), 0x00, 0x00, byte(qcom.MessageSlotStatus), byte(qcom.MessageSlotStatus >> 8), 0x00, 0x00,
+			},
+			wantResponse:   false,
+			wantIndication: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var wire Response
+			if err := wire.UnmarshalBinary(tt.frame); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if got := wire.isResponse(); got != tt.wantResponse {
+				t.Errorf("isResponse() = %t, want %t", got, tt.wantResponse)
+			}
+			if got := wire.isIndication(); got != tt.wantIndication {
+				t.Errorf("isIndication() = %t, want %t", got, tt.wantIndication)
+			}
+		})
+	}
+}
+
 func TestTransportDispatchesIndications(t *testing.T) {
 	mismatch := []byte{
 		0x01, 0x18, 0x00, 0x80, 0x0B, 0x07,
@@ -233,8 +295,9 @@ func TestTransportDispatchesIndications(t *testing.T) {
 		0x02, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x10, 0x02, 0x00, 0x90, 0x00,
 	}
-	conn := &deadlineConn{read: bytes.NewReader(joinFrames(mismatch, indication, match))}
+	conn := newAsyncDeadlineConn()
 	transport := New(conn)
+	defer transport.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -243,15 +306,29 @@ func TestTransportDispatchesIndications(t *testing.T) {
 		t.Fatalf("Indications() error = %v", err)
 	}
 
-	_, err = transport.Do(context.Background(), qcom.Request{
-		Service:       qcom.ServiceUIM,
-		ClientID:      7,
-		TransactionID: 3,
-		MessageID:     qcom.MessageReadTransparent,
-		Timeout:       time.Second,
-	})
-	if err != nil {
-		t.Fatalf("Do() error = %v", err)
+	results := make(chan error, 1)
+	go func() {
+		_, err := transport.Do(context.Background(), qcom.Request{
+			Service:       qcom.ServiceUIM,
+			ClientID:      7,
+			TransactionID: 3,
+			MessageID:     qcom.MessageReadTransparent,
+			Timeout:       time.Second,
+		})
+		results <- err
+	}()
+	conn.waitWrites(t, 1)
+	conn.frames <- mismatch
+	conn.frames <- indication
+	conn.frames <- match
+
+	select {
+	case err := <-results:
+		if err != nil {
+			t.Fatalf("Do() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Do()")
 	}
 
 	select {
@@ -261,6 +338,63 @@ func TestTransportDispatchesIndications(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for indication")
+	}
+}
+
+func TestTransportDoesNotDeliverControlIndicationAsResponse(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "sync indication before response"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newAsyncDeadlineConn()
+			transport := New(conn)
+			defer transport.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			indications, err := transport.Indications(ctx, qcom.ServiceControl, 0, qcom.MessageCTLSync)
+			if err != nil {
+				t.Fatalf("Indications() error = %v", err)
+			}
+
+			results := make(chan error, 1)
+			go func() {
+				_, err := transport.Do(context.Background(), qcom.Request{
+					Service:       qcom.ServiceControl,
+					TransactionID: 1,
+					MessageID:     qcom.MessageCTLSync,
+					Timeout:       time.Second,
+				})
+				results <- err
+			}()
+			conn.waitWrites(t, 1)
+
+			conn.frames <- controlIndicationFrame(1, qcom.MessageCTLSync)
+			select {
+			case ind := <-indications:
+				if ind.Service != qcom.ServiceControl || ind.MessageID != qcom.MessageCTLSync {
+					t.Fatalf("indication = %+v, want CTL sync", ind)
+				}
+			case err := <-results:
+				t.Fatalf("Do() completed from indication with error %v", err)
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for control indication")
+			}
+
+			conn.frames <- controlResultFrame(1, qcom.MessageCTLSync)
+			select {
+			case err := <-results:
+				if err != nil {
+					t.Fatalf("Do() error = %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for control response")
+			}
+		})
 	}
 }
 
@@ -400,16 +534,11 @@ func TestTransportCanUnsubscribeWhileDeliveringIndication(t *testing.T) {
 	}
 
 	for range 1000 {
-		ch := make(chan qcom.Indication, 1)
+		sub := newSubscription(context.Background(), qcom.ServiceUIM, 7, qcom.MessageSlotStatus)
 		transport.mu.Lock()
 		transport.nextSub++
 		id := transport.nextSub
-		transport.subs[id] = subscription{
-			service: qcom.ServiceUIM,
-			client:  7,
-			message: qcom.MessageSlotStatus,
-			ch:      ch,
-		}
+		transport.subs[id] = sub
 		transport.mu.Unlock()
 
 		done := make(chan struct{})
@@ -424,6 +553,50 @@ func TestTransportCanUnsubscribeWhileDeliveringIndication(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("timed out waiting for indication delivery")
 		}
+	}
+}
+
+func TestTransportQueuesSlowSubscriberIndications(t *testing.T) {
+	tests := []struct {
+		name  string
+		count int
+	}{
+		{name: "more than channel capacity", count: 64},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newAsyncDeadlineConn()
+			transport := New(conn)
+			defer transport.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			indications, err := transport.Indications(ctx, qcom.ServiceUIM, 7, qcom.MessageSlotStatus)
+			if err != nil {
+				t.Fatalf("Indications() error = %v", err)
+			}
+
+			for i := range tt.count {
+				transport.deliverIndication(qcom.Indication{
+					Service:       qcom.ServiceUIM,
+					ClientID:      7,
+					TransactionID: uint16(i + 1),
+					MessageID:     qcom.MessageSlotStatus,
+				})
+			}
+
+			for i := range tt.count {
+				select {
+				case ind := <-indications:
+					if want := uint16(i + 1); ind.TransactionID != want {
+						t.Fatalf("indication %d transaction = %d, want %d", i, ind.TransactionID, want)
+					}
+				case <-time.After(time.Second):
+					t.Fatalf("timed out waiting for indication %d", i)
+				}
+			}
+		})
 	}
 }
 
@@ -538,6 +711,21 @@ func serviceResultFrame(txn uint16, message qcom.MessageID) []byte {
 		0x01, 0x13, 0x00, 0x80, byte(qcom.ServiceUIM), 0x07,
 		byte(qcom.MessageTypeResponse), byte(txn), byte(txn >> 8), byte(message), byte(message >> 8), 0x07, 0x00,
 		0x02, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+}
+
+func controlResultFrame(txn uint8, message qcom.MessageID) []byte {
+	return []byte{
+		0x01, 0x12, 0x00, 0x80, byte(qcom.ServiceControl), 0x00,
+		byte(controlMessageTypeResponse), txn, byte(message), byte(message >> 8), 0x07, 0x00,
+		0x02, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+}
+
+func controlIndicationFrame(txn uint8, message qcom.MessageID) []byte {
+	return []byte{
+		0x01, 0x0B, 0x00, 0x80, byte(qcom.ServiceControl), 0x00,
+		byte(controlMessageTypeIndication), txn, byte(message), byte(message >> 8), 0x00, 0x00,
 	}
 }
 

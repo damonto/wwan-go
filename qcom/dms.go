@@ -2,6 +2,7 @@ package qcom
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
@@ -11,10 +12,22 @@ import (
 
 const (
 	dmsTLVOperatingMode       = 0x01
+	dmsTLVOfflineReason       = 0x10
+	dmsTLVHardwareRestricted  = 0x11
 	dmsTLVReportOperatingMode = 0x14
 	dmsTLVVoiceNumber         = 0x01
 	dmsTLVMobileIDNumber      = 0x10
 	dmsTLVIMSI                = 0x11
+)
+
+// DMSOfflineReason is a mask describing why the modem entered offline mode.
+type DMSOfflineReason uint16
+
+const (
+	DMSOfflineHostImageMisconfiguration DMSOfflineReason = 1 << iota
+	DMSOfflinePRIImageMisconfiguration
+	DMSOfflinePRIVersionIncompatible
+	DMSOfflineDeviceMemoryFull
 )
 
 // DMSGetMSISDNRequest encodes QMI DMS Get MSISDN.
@@ -81,13 +94,18 @@ type DMSSetEventReportRequest struct {
 	TransactionID       uint16
 	Timeout             time.Duration
 	ReportOperatingMode bool
+	Config              *DMSEventReportConfig
 }
 
 // Request converts the request into a QMI DMS request.
 func (r DMSSetEventReportRequest) Request() Request {
-	report := uint8(0)
-	if r.ReportOperatingMode {
-		report = 1
+	var tlvs tlv.TLVs
+	if r.Config != nil {
+		tlvs = dmsEventReportTLVs(*r.Config)
+	} else {
+		tlvs = tlv.TLVs{
+			tlv.Uint(dmsTLVReportOperatingMode, boolByte(r.ReportOperatingMode)),
+		}
 	}
 
 	return Request{
@@ -96,15 +114,23 @@ func (r DMSSetEventReportRequest) Request() Request {
 		TransactionID: r.TransactionID,
 		MessageID:     MessageDMSSetEventReport,
 		Timeout:       r.Timeout,
-		TLVs: tlv.TLVs{
-			tlv.Uint(dmsTLVReportOperatingMode, report),
-		},
+		TLVs:          tlvs,
 	}
 }
 
 // OperatingMode reads the current QMI DMS modem operating mode.
 func (c *Client) OperatingMode(ctx context.Context) (DMSOperatingMode, error) {
-	var mode DMSOperatingMode
+	info, err := c.OperatingModeInfo(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return info.Mode, nil
+}
+
+// OperatingModeInfo reads the modem operating mode and its optional offline
+// and hardware-restriction details.
+func (c *Client) OperatingModeInfo(ctx context.Context) (DMSGetOperatingModeResponse, error) {
+	var result DMSGetOperatingModeResponse
 	err := c.withServiceClient(ctx, ServiceDMS, func(clientID uint8) error {
 		req := DMSGetOperatingModeRequest{
 			ClientID: clientID,
@@ -118,17 +144,12 @@ func (c *Client) OperatingMode(ctx context.Context) (DMSOperatingMode, error) {
 			return err
 		}
 
-		var parsed DMSGetOperatingModeResponse
-		if err := parsed.UnmarshalTLVs(resp.TLVs); err != nil {
-			return err
-		}
-		mode = parsed.Mode
-		return nil
+		return result.UnmarshalTLVs(resp.TLVs)
 	})
 	if err != nil {
-		return 0, fmt.Errorf("querying QMI DMS operating mode: %w", err)
+		return DMSGetOperatingModeResponse{}, fmt.Errorf("querying QMI DMS operating mode: %w", err)
 	}
-	return mode, nil
+	return result, nil
 }
 
 // SetOperatingMode sets the QMI DMS modem operating mode.
@@ -200,7 +221,11 @@ func (r *DMSGetMSISDNResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 
 // DMSGetOperatingModeResponse is the parsed QMI DMS Get Operating Mode response.
 type DMSGetOperatingModeResponse struct {
-	Mode DMSOperatingMode
+	Mode                    DMSOperatingMode
+	OfflineReason           DMSOfflineReason
+	OfflineReasonKnown      bool
+	HardwareRestricted      bool
+	HardwareRestrictedKnown bool
 }
 
 // UnmarshalTLVs parses QMI DMS Get Operating Mode response TLVs.
@@ -210,9 +235,23 @@ func (r *DMSGetOperatingModeResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	if !ok {
 		return errors.New("parsing QMI DMS operating mode: operating mode TLV missing")
 	}
-	if len(value) < 1 {
-		return errors.New("parsing QMI DMS operating mode: operating mode TLV is truncated")
+	if len(value) != 1 {
+		return fmt.Errorf("parsing QMI DMS operating mode: operating mode TLV length %d, want 1", len(value))
 	}
 	r.Mode = DMSOperatingMode(value[0])
+	if value, ok := tlv.Value(tlvs, dmsTLVOfflineReason); ok {
+		if len(value) != 2 {
+			return fmt.Errorf("parsing QMI DMS operating mode: offline reason TLV length %d, want 2", len(value))
+		}
+		r.OfflineReason = DMSOfflineReason(binary.LittleEndian.Uint16(value))
+		r.OfflineReasonKnown = true
+	}
+	if value, ok := tlv.Value(tlvs, dmsTLVHardwareRestricted); ok {
+		if len(value) != 1 {
+			return fmt.Errorf("parsing QMI DMS operating mode: hardware restriction TLV length %d, want 1", len(value))
+		}
+		r.HardwareRestricted = value[0] != 0
+		r.HardwareRestrictedKnown = true
+	}
 	return nil
 }

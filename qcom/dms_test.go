@@ -254,16 +254,34 @@ func TestDMSGetOperatingModeResponseUnmarshalTLVs(t *testing.T) {
 	tests := []struct {
 		name    string
 		tlvs    tlv.TLVs
-		want    DMSOperatingMode
+		want    DMSGetOperatingModeResponse
 		wantErr bool
 	}{
 		{
 			name: "online",
 			tlvs: tlv.TLVs{tlv.Bytes(dmsTLVOperatingMode, []byte{byte(DMSOperatingModeOnline)})},
-			want: DMSOperatingModeOnline,
+			want: DMSGetOperatingModeResponse{Mode: DMSOperatingModeOnline},
+		},
+		{
+			name: "offline details",
+			tlvs: tlv.TLVs{
+				tlv.Bytes(dmsTLVOperatingMode, []byte{byte(DMSOperatingModeOffline)}),
+				tlv.Uint(dmsTLVOfflineReason, uint16(DMSOfflinePRIImageMisconfiguration|DMSOfflineDeviceMemoryFull)),
+				tlv.Uint(dmsTLVHardwareRestricted, uint8(1)),
+			},
+			want: DMSGetOperatingModeResponse{
+				Mode:                    DMSOperatingModeOffline,
+				OfflineReason:           DMSOfflinePRIImageMisconfiguration | DMSOfflineDeviceMemoryFull,
+				OfflineReasonKnown:      true,
+				HardwareRestricted:      true,
+				HardwareRestrictedKnown: true,
+			},
 		},
 		{name: "missing", wantErr: true},
 		{name: "truncated", tlvs: tlv.TLVs{tlv.Bytes(dmsTLVOperatingMode, nil)}, wantErr: true},
+		{name: "mode trailing", tlvs: tlv.TLVs{tlv.Bytes(dmsTLVOperatingMode, []byte{0, 0})}, wantErr: true},
+		{name: "offline reason length", tlvs: tlv.TLVs{tlv.Uint(dmsTLVOperatingMode, uint8(0)), tlv.Bytes(dmsTLVOfflineReason, []byte{1})}, wantErr: true},
+		{name: "hardware restriction length", tlvs: tlv.TLVs{tlv.Uint(dmsTLVOperatingMode, uint8(0)), tlv.Bytes(dmsTLVHardwareRestricted, []byte{1, 0})}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -279,8 +297,8 @@ func TestDMSGetOperatingModeResponseUnmarshalTLVs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("UnmarshalTLVs() error = %v", err)
 			}
-			if got.Mode != tt.want {
-				t.Fatalf("Mode = %d, want %d", got.Mode, tt.want)
+			if got != tt.want {
+				t.Fatalf("response = %+v, want %+v", got, tt.want)
 			}
 		})
 	}

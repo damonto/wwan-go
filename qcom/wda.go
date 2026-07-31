@@ -28,7 +28,138 @@ const (
 	wdaTLVResponseDownlinkPadding = 0x1A
 	wdaTLVResponseFlowControl     = 0x1B
 	wdaTLVGetEndpoint             = 0x10
+	wdaTLVQMAPInBandFlowControl   = 0x10
+	wdaTLVQMAPSetEndpoint         = 0x11
+	wdaTLVQMAPDataFlowControl     = 0x12
+	wdaTLVQMAPResponseDataFlow    = 0x11
+	wdaTLVQMAPGetEndpoint         = 0x10
 )
+
+// WDAQMAPSettingsConfig contains optional QMAP settings to apply to an
+// endpoint. A nil endpoint selects the data channel associated with the QMI
+// control channel.
+type WDAQMAPSettingsConfig struct {
+	InBandFlowControl *bool
+	Endpoint          *DataEndpoint
+	DataFlowControl   *bool
+}
+
+// WDASetQMAPSettingsRequest encodes QMI WDA Set QMAP Settings.
+type WDASetQMAPSettingsRequest struct {
+	ClientID      uint8
+	TransactionID uint16
+	Timeout       time.Duration
+	Config        WDAQMAPSettingsConfig
+}
+
+// Request converts the requested QMAP settings into WDA TLVs.
+func (r WDASetQMAPSettingsRequest) Request() Request {
+	tlvs := make(tlv.TLVs, 0, 3)
+	if r.Config.InBandFlowControl != nil {
+		tlvs = append(tlvs, tlv.Uint(wdaTLVQMAPInBandFlowControl, boolByte(*r.Config.InBandFlowControl)))
+	}
+	if r.Config.Endpoint != nil {
+		endpoint, _ := r.Config.Endpoint.MarshalBinary() // Fixed-width endpoint encoding cannot fail.
+		tlvs = append(tlvs, tlv.Bytes(wdaTLVQMAPSetEndpoint, endpoint))
+	}
+	if r.Config.DataFlowControl != nil {
+		tlvs = append(tlvs, tlv.Uint(wdaTLVQMAPDataFlowControl, boolByte(*r.Config.DataFlowControl)))
+	}
+	return wdaRequest(r.ClientID, r.TransactionID, r.Timeout, MessageWDASetQMAPSettings, tlvs)
+}
+
+// WDAGetQMAPSettingsRequest encodes QMI WDA Get QMAP Settings.
+type WDAGetQMAPSettingsRequest struct {
+	ClientID      uint8
+	TransactionID uint16
+	Timeout       time.Duration
+	Endpoint      *DataEndpoint
+}
+
+// Request queries the default data channel unless Endpoint is provided.
+func (r WDAGetQMAPSettingsRequest) Request() Request {
+	var tlvs tlv.TLVs
+	if r.Endpoint != nil {
+		endpoint, _ := r.Endpoint.MarshalBinary() // Fixed-width endpoint encoding cannot fail.
+		tlvs = tlv.TLVs{tlv.Bytes(wdaTLVQMAPGetEndpoint, endpoint)}
+	}
+	return wdaRequest(r.ClientID, r.TransactionID, r.Timeout, MessageWDAGetQMAPSettings, tlvs)
+}
+
+// WDAQMAPSettings contains QMAP flow-control state returned by the modem.
+type WDAQMAPSettings struct {
+	InBandFlowControl      bool
+	InBandFlowControlKnown bool
+	DataFlowControl        bool
+	DataFlowControlKnown   bool
+}
+
+// WDAQMAPSettingsResponse is shared by Set and Get QMAP Settings because both
+// responses use the same TLV layout.
+type WDAQMAPSettingsResponse struct {
+	Settings WDAQMAPSettings
+}
+
+// UnmarshalTLVs parses QMI WDA QMAP settings.
+func (r *WDAQMAPSettingsResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	*r = WDAQMAPSettingsResponse{}
+	if value, ok := tlv.Value(tlvs, wdaTLVQMAPInBandFlowControl); ok {
+		enabled, err := decodeWDABool(value)
+		if err != nil {
+			return err
+		}
+		r.Settings.InBandFlowControl = enabled
+		r.Settings.InBandFlowControlKnown = true
+	}
+	if value, ok := tlv.Value(tlvs, wdaTLVQMAPResponseDataFlow); ok {
+		enabled, err := decodeWDABool(value)
+		if err != nil {
+			return err
+		}
+		r.Settings.DataFlowControl = enabled
+		r.Settings.DataFlowControlKnown = true
+	}
+	return nil
+}
+
+// WDAGetEthernetConfigRequest encodes QMI WDA Get Ethernet Config.
+type WDAGetEthernetConfigRequest struct {
+	ClientID      uint8
+	TransactionID uint16
+	Timeout       time.Duration
+}
+
+// Request converts the query into a WDA request.
+func (r WDAGetEthernetConfigRequest) Request() Request {
+	return Request{
+		Service:       ServiceWDA,
+		ClientID:      r.ClientID,
+		TransactionID: r.TransactionID,
+		MessageID:     MessageWDAGetEthernetConfig,
+		Timeout:       r.Timeout,
+	}
+}
+
+// WDAEthernetConfigResponse contains the modem's Ethernet hardware layout.
+type WDAEthernetConfigResponse struct {
+	Config      WDAEthernetHardwareConfig
+	ConfigKnown bool
+}
+
+// UnmarshalTLVs parses QMI WDA Get Ethernet Config.
+func (r *WDAEthernetConfigResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	*r = WDAEthernetConfigResponse{}
+	value, ok := tlv.Value(tlvs, 0x10)
+	if !ok {
+		return nil
+	}
+	if len(value) != 4 {
+		return fmt.Errorf("parsing QMI WDA Ethernet config: hardware config TLV length %d, want 4", len(value))
+	}
+	r.Config = WDAEthernetHardwareConfig(binary.LittleEndian.Uint32(value))
+	r.ConfigKnown = true
+	return nil
+}
 
 // WDASetDataFormatRequest encodes QMI WDA Set Data Format.
 type WDASetDataFormatRequest struct {
@@ -121,14 +252,14 @@ func (r *WDADataFormatResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	format := &r.Format
 
 	if value, ok := tlv.Value(tlvs, wdaTLVQoSFormat); ok {
-		if len(value) < 1 {
-			return errors.New("parsing QMI WDA data format: QoS format TLV is truncated")
+		if len(value) != 1 {
+			return fmt.Errorf("parsing QMI WDA data format: QoS format TLV length %d, want 1", len(value))
 		}
 		format.QoSEnabled = value[0] == 1
 		format.QoSEnabledKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, wdaTLVLinkProtocol); ok {
-		parsed, err := wdaUint32(value, "link protocol")
+		parsed, err := wdaUint32(value)
 		if err != nil {
 			return err
 		}
@@ -136,7 +267,7 @@ func (r *WDADataFormatResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		format.LinkLayerProtocolKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, wdaTLVUplinkAggregation); ok {
-		parsed, err := wdaUint32(value, "uplink aggregation")
+		parsed, err := wdaUint32(value)
 		if err != nil {
 			return err
 		}
@@ -144,42 +275,42 @@ func (r *WDADataFormatResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		format.UplinkAggregationKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, wdaTLVDownlinkAggregation); ok {
-		parsed, err := wdaUint32(value, "downlink aggregation")
+		parsed, err := wdaUint32(value)
 		if err != nil {
 			return err
 		}
 		format.DownlinkAggregation = WDAAggregationProtocol(parsed)
 		format.DownlinkAggregationKnown = true
 	}
-	if err := parseWDAUint32(tlvs, wdaTLVNDPSignature, "NDP signature", &format.NDPSignature, &format.NDPSignatureKnown); err != nil {
+	if err := parseWDAUint32(tlvs, wdaTLVNDPSignature, &format.NDPSignature, &format.NDPSignatureKnown); err != nil {
 		return err
 	}
-	if err := parseWDAUint32(tlvs, wdaTLVDownlinkMaxDatagrams, "downlink max datagrams", &format.DownlinkMaxDatagrams, &format.DownlinkMaxDatagramsKnown); err != nil {
+	if err := parseWDAUint32(tlvs, wdaTLVDownlinkMaxDatagrams, &format.DownlinkMaxDatagrams, &format.DownlinkMaxDatagramsKnown); err != nil {
 		return err
 	}
-	if err := parseWDAUint32(tlvs, wdaTLVDownlinkMaxSize, "downlink max size", &format.DownlinkMaxSize, &format.DownlinkMaxSizeKnown); err != nil {
+	if err := parseWDAUint32(tlvs, wdaTLVDownlinkMaxSize, &format.DownlinkMaxSize, &format.DownlinkMaxSizeKnown); err != nil {
 		return err
 	}
-	if err := parseWDAUint32(tlvs, wdaTLVUplinkMaxDatagrams, "uplink max datagrams", &format.UplinkMaxDatagrams, &format.UplinkMaxDatagramsKnown); err != nil {
+	if err := parseWDAUint32(tlvs, wdaTLVUplinkMaxDatagrams, &format.UplinkMaxDatagrams, &format.UplinkMaxDatagramsKnown); err != nil {
 		return err
 	}
-	if err := parseWDAUint32(tlvs, wdaTLVUplinkMaxSize, "uplink max size", &format.UplinkMaxSize, &format.UplinkMaxSizeKnown); err != nil {
+	if err := parseWDAUint32(tlvs, wdaTLVUplinkMaxSize, &format.UplinkMaxSize, &format.UplinkMaxSizeKnown); err != nil {
 		return err
 	}
 	if value, ok := tlv.Value(tlvs, wdaTLVResponseQoSHeader); ok {
-		parsed, err := wdaUint32(value, "QoS header format")
+		parsed, err := wdaUint32(value)
 		if err != nil {
 			return err
 		}
 		format.QoSHeaderFormat = WDAQoSHeaderFormat(parsed)
 		format.QoSHeaderFormatKnown = true
 	}
-	if err := parseWDAUint32(tlvs, wdaTLVResponseDownlinkPadding, "downlink minimum padding", &format.DownlinkMinimumPadding, &format.DownlinkMinimumPaddingKnown); err != nil {
+	if err := parseWDAUint32(tlvs, wdaTLVResponseDownlinkPadding, &format.DownlinkMinimumPadding, &format.DownlinkMinimumPaddingKnown); err != nil {
 		return err
 	}
 	if value, ok := tlv.Value(tlvs, wdaTLVResponseFlowControl); ok {
-		if len(value) < 1 {
-			return errors.New("parsing QMI WDA data format: flow control TLV is truncated")
+		if len(value) != 1 {
+			return fmt.Errorf("parsing QMI WDA data format: flow control TLV length %d, want 1", len(value))
 		}
 		format.TerminalEquipmentFlowControl = value[0] == 1
 		format.TerminalEquipmentFlowControlKnown = true
@@ -249,21 +380,71 @@ func (c *Client) SetWDALinkLayerProtocol(ctx context.Context, protocol WDALinkLa
 	return err
 }
 
-func wdaUint32(value []byte, name string) (uint32, error) {
-	if len(value) < 4 {
-		return 0, fmt.Errorf("parsing QMI WDA data format: %s TLV is truncated", name)
+// WDAQMAPSettingsForEndpoint reads QMAP settings for the default data channel
+// or the provided endpoint.
+func (c *Client) WDAQMAPSettingsForEndpoint(ctx context.Context, endpoint *DataEndpoint) (WDAQMAPSettings, error) {
+	req := WDAGetQMAPSettingsRequest{Timeout: DefaultRequestTimeout, Endpoint: endpoint}.Request()
+	var parsed WDAQMAPSettingsResponse
+	if err := c.wdaRequest(ctx, req, &parsed); err != nil {
+		return WDAQMAPSettings{}, fmt.Errorf("querying QMI WDA QMAP settings: %w", err)
 	}
-	return binary.LittleEndian.Uint32(value[:4]), nil
+	return parsed.Settings, nil
 }
 
-func parseWDAUint32(tlvs tlv.TLVs, kind byte, name string, dst *uint32, known *bool) error {
+// SetWDAQMAPSettings applies QMAP settings and returns the values honored by
+// the modem.
+func (c *Client) SetWDAQMAPSettings(ctx context.Context, config WDAQMAPSettingsConfig) (WDAQMAPSettings, error) {
+	req := WDASetQMAPSettingsRequest{Timeout: DefaultRequestTimeout, Config: config}.Request()
+	var parsed WDAQMAPSettingsResponse
+	if err := c.wdaRequest(ctx, req, &parsed); err != nil {
+		return WDAQMAPSettings{}, fmt.Errorf("setting QMI WDA QMAP settings: %w", err)
+	}
+	return parsed.Settings, nil
+}
+
+// WDAEthernetHardwareConfig returns the modem's Ethernet PDU layout.
+func (c *Client) WDAEthernetHardwareConfig(ctx context.Context) (WDAEthernetHardwareConfig, error) {
+	var config WDAEthernetHardwareConfig
+	err := c.withServiceClient(ctx, ServiceWDA, func(clientID uint8) error {
+		req := WDAGetEthernetConfigRequest{ClientID: clientID, Timeout: DefaultRequestTimeout}.Request()
+		resp, err := c.requestServiceWithTimeout(ctx, req.Service, req.ClientID, req.MessageID, req.TLVs, req.Timeout)
+		if err != nil {
+			return err
+		}
+		if err := resultOK(resp); err != nil {
+			return err
+		}
+		var parsed WDAEthernetConfigResponse
+		if err := parsed.UnmarshalTLVs(resp.TLVs); err != nil {
+			return err
+		}
+		if !parsed.ConfigKnown {
+			return errors.New("hardware config TLV missing")
+		}
+		config = parsed.Config
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("querying QMI WDA Ethernet hardware config: %w", err)
+	}
+	return config, nil
+}
+
+func wdaUint32(value []byte) (uint32, error) {
+	if len(value) != 4 {
+		return 0, fmt.Errorf("parsing QMI WDA uint32: TLV length %d, want 4", len(value))
+	}
+	return binary.LittleEndian.Uint32(value), nil
+}
+
+func parseWDAUint32(tlvs tlv.TLVs, kind byte, dst *uint32, known *bool) error {
 	value, ok := tlv.Value(tlvs, kind)
 	if !ok {
 		return nil
 	}
-	parsed, err := wdaUint32(value, name)
+	parsed, err := wdaUint32(value)
 	if err != nil {
-		return err
+		return fmt.Errorf("parsing QMI WDA TLV 0x%02X: %w", kind, err)
 	}
 	*dst = parsed
 	*known = true

@@ -16,6 +16,11 @@ var (
 	errUnexpectedServiceMessageType = errors.New("unexpected service QMI message type")
 )
 
+const (
+	controlMessageTypeResponse   qcom.MessageType = 0x01
+	controlMessageTypeIndication qcom.MessageType = 0x02
+)
+
 type Response struct {
 	QMUXHeader
 	TransactionID uint16
@@ -27,7 +32,7 @@ type Response struct {
 
 func (r Response) qcomResponse() qcom.Response {
 	return qcom.Response{
-		Service:       r.ServiceType,
+		Service:       qcom.ServiceType(r.ServiceType),
 		ClientID:      r.ClientID,
 		TransactionID: r.TransactionID,
 		MessageID:     r.MessageID,
@@ -37,12 +42,26 @@ func (r Response) qcomResponse() qcom.Response {
 
 func (r Response) qcomIndication() qcom.Indication {
 	return qcom.Indication{
-		Service:       r.ServiceType,
+		Service:       qcom.ServiceType(r.ServiceType),
 		ClientID:      r.ClientID,
 		TransactionID: r.TransactionID,
 		MessageID:     r.MessageID,
 		TLVs:          r.TLVs,
 	}
+}
+
+func (r Response) isResponse() bool {
+	if qcom.ServiceType(r.QMUXHeader.ServiceType) == qcom.ServiceControl {
+		return r.MessageType == controlMessageTypeResponse
+	}
+	return r.MessageType == qcom.MessageTypeResponse
+}
+
+func (r Response) isIndication() bool {
+	if qcom.ServiceType(r.QMUXHeader.ServiceType) == qcom.ServiceControl {
+		return r.MessageType == controlMessageTypeIndication
+	}
+	return r.MessageType == qcom.MessageTypeIndication
 }
 
 func (r *Response) UnmarshalBinary(data []byte) error {
@@ -62,7 +81,7 @@ func (r *Response) UnmarshalBinary(data []byte) error {
 		return fmt.Errorf("parsing QMI message: QMUX length mismatch: got %d bytes, header declares %d", got, want)
 	}
 
-	if r.QMUXHeader.ServiceType == qcom.ServiceControl {
+	if qcom.ServiceType(r.QMUXHeader.ServiceType) == qcom.ServiceControl {
 		var header Header[uint8]
 		if err := binary.Read(reader, binary.LittleEndian, &header); err != nil {
 			return fmt.Errorf("parsing QMI message: read control QMI header: %w", err)
@@ -82,8 +101,8 @@ func (r *Response) UnmarshalBinary(data []byte) error {
 		r.MessageLength = header.MessageLength
 	}
 
-	if r.QMUXHeader.ServiceType == qcom.ServiceControl {
-		if r.MessageType != 0x01 {
+	if qcom.ServiceType(r.QMUXHeader.ServiceType) == qcom.ServiceControl {
+		if !r.isResponse() && !r.isIndication() {
 			return fmt.Errorf("parsing QMI message: %w: 0x%02X", errUnexpectedControlMessageType, r.MessageType)
 		}
 	} else if r.MessageType != qcom.MessageTypeResponse && r.MessageType != qcom.MessageTypeIndication {
@@ -100,21 +119,38 @@ func (r *Response) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+func (r *Response) ReadFrom(reader io.Reader) (int64, error) {
+	frame, read, err := readFrame(reader)
+	if err != nil {
+		return read, err
+	}
+	return read, r.UnmarshalBinary(frame)
+}
+
 func ReadFrame(r io.Reader) ([]byte, error) {
+	frame, _, err := readFrame(r)
+	return frame, err
+}
+
+func readFrame(r io.Reader) ([]byte, int64, error) {
 	header := make([]byte, 3)
-	if _, err := io.ReadFull(r, header); err != nil {
-		return nil, err
+	n, err := io.ReadFull(r, header)
+	read := int64(n)
+	if err != nil {
+		return nil, read, err
 	}
 
 	length := int(binary.LittleEndian.Uint16(header[1:3])) + 1
 	if length < len(header) {
-		return nil, errors.New("reading QMI frame: invalid length")
+		return nil, read, errors.New("reading QMI frame: invalid length")
 	}
 
 	frame := make([]byte, length)
 	copy(frame, header)
-	if _, err := io.ReadFull(r, frame[len(header):]); err != nil {
-		return nil, err
+	n, err = io.ReadFull(r, frame[len(header):])
+	read += int64(n)
+	if err != nil {
+		return nil, read, err
 	}
-	return frame, nil
+	return frame, read, nil
 }

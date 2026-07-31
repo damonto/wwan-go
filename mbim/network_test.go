@@ -104,28 +104,15 @@ func registrationStatePayloadForTest(providerID, providerName, roamingText strin
 	data := make([]byte, 48)
 	binary.LittleEndian.PutUint32(data[4:8], uint32(RegisterStateHome))
 	binary.LittleEndian.PutUint32(data[8:12], uint32(RegisterModeAutomatic))
-	offset := 48
 	for i, value := range values {
-		binary.LittleEndian.PutUint32(data[20+i*8:24+i*8], uint32(offset))
-		binary.LittleEndian.PutUint32(data[24+i*8:28+i*8], uint32(len(value)))
-		data = append(data, value...)
-		offset += len(value)
+		data = appendRefValue(data, 20+i*8, value)
 	}
 	return data
 }
 
 func provisionedContextsPayloadForTest(contexts ...[]byte) []byte {
-	headerSize := 4 + len(contexts)*8
-	data := make([]byte, headerSize)
-	binary.LittleEndian.PutUint32(data[:4], uint32(len(contexts)))
-	offset := headerSize
-	for i, context := range contexts {
-		binary.LittleEndian.PutUint32(data[4+i*8:8+i*8], uint32(offset))
-		binary.LittleEndian.PutUint32(data[8+i*8:12+i*8], uint32(len(context)))
-		data = append(data, context...)
-		offset += len(context)
-	}
-	return data
+	header := binary.LittleEndian.AppendUint32(nil, uint32(len(contexts)))
+	return appendOffsetSizeElements(header, contexts)
 }
 
 func provisionedContextPayloadForTest(id uint32, contextType ContextType, accessString string) []byte {
@@ -133,7 +120,5 @@ func provisionedContextPayloadForTest(id uint32, contextType ContextType, access
 	data := make([]byte, 52)
 	binary.LittleEndian.PutUint32(data[:4], id)
 	copy(data[4:20], contextType[:])
-	binary.LittleEndian.PutUint32(data[20:24], 52)
-	binary.LittleEndian.PutUint32(data[24:28], uint32(len(access)))
-	return append(data, access...)
+	return appendRefValue(data, 20, access)
 }

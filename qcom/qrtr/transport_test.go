@@ -17,6 +17,7 @@ import (
 func TestResponseImplementsStandardInterfaces(t *testing.T) {
 	var _ encoding.BinaryMarshaler = Request{}
 	var _ encoding.BinaryUnmarshaler = (*Response)(nil)
+	var _ io.WriterTo = Request{}
 }
 
 func TestMarshalRequest(t *testing.T) {
@@ -229,34 +230,80 @@ func TestTransportUsesBoundServiceInResponses(t *testing.T) {
 
 func TestTransportCanUnsubscribeWhileDeliveringIndication(t *testing.T) {
 	transport := New(&deadlinePacketConn{})
+	transport.mu.Lock()
+	endpoint := transport.services[qcom.ServiceUIM]
+	transport.mu.Unlock()
 	ind := qcom.Indication{
 		Service:   qcom.ServiceUIM,
 		MessageID: qcom.MessageSlotStatus,
 	}
 
 	for range 1000 {
-		ch := make(chan qcom.Indication, 1)
-		transport.mu.Lock()
-		transport.nextSub++
-		id := transport.nextSub
-		transport.subs[id] = subscription{
-			message: qcom.MessageSlotStatus,
-			ch:      ch,
-		}
-		transport.mu.Unlock()
+		sub := newSubscription(context.Background(), qcom.MessageSlotStatus)
+		endpoint.mu.Lock()
+		endpoint.nextSub++
+		id := endpoint.nextSub
+		endpoint.subs[id] = sub
+		endpoint.mu.Unlock()
 
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			transport.deliverIndication(ind)
+			endpoint.deliverIndication(ind)
 		}()
-		transport.removeSubscription(id)
+		endpoint.removeSubscription(id)
 
 		select {
 		case <-done:
 		case <-time.After(time.Second):
 			t.Fatal("timed out waiting for indication delivery")
 		}
+	}
+}
+
+func TestTransportQueuesSlowSubscriberIndications(t *testing.T) {
+	tests := []struct {
+		name  string
+		count int
+	}{
+		{name: "more than channel capacity", count: 64},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newAsyncPacketConn()
+			transport := New(conn)
+			defer transport.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			indications, err := transport.Indications(ctx, qcom.ServiceUIM, 0, qcom.MessageSlotStatus)
+			if err != nil {
+				t.Fatalf("Indications() error = %v", err)
+			}
+
+			transport.mu.Lock()
+			endpoint := transport.services[qcom.ServiceUIM]
+			transport.mu.Unlock()
+			for i := range tt.count {
+				endpoint.deliverIndication(qcom.Indication{
+					Service:       qcom.ServiceUIM,
+					TransactionID: uint16(i + 1),
+					MessageID:     qcom.MessageSlotStatus,
+				})
+			}
+
+			for i := range tt.count {
+				select {
+				case ind := <-indications:
+					if want := uint16(i + 1); ind.TransactionID != want {
+						t.Fatalf("indication %d transaction = %d, want %d", i, ind.TransactionID, want)
+					}
+				case <-time.After(time.Second):
+					t.Fatalf("timed out waiting for indication %d", i)
+				}
+			}
+		})
 	}
 }
 

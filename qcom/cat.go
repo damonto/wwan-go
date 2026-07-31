@@ -18,12 +18,13 @@ func (c *Client) catClient(ctx context.Context) (ServiceType, uint8, error) {
 	}
 
 	if c.catService != 0 {
-		if clientID := c.clientIDs[c.catService]; clientID != 0 {
-			return c.catService, clientID, nil
-		}
+		clientID, err := c.serviceClientIDLocked(ctx, c.catService)
+		return c.catService, clientID, err
 	}
 	if service, ok := boundQMIService(c.transport); ok {
-		return 0, 0, fmt.Errorf("running QMI CAT envelope: transport is bound to service 0x%02X and cannot switch to CAT/CAT2", service)
+		if _, managed := c.transport.(transportClientIDProvider); !managed {
+			return 0, 0, fmt.Errorf("running QMI CAT envelope: transport is bound to service 0x%02X and cannot switch to CAT/CAT2", service)
+		}
 	}
 	if c.catService == 0 {
 		service, err := c.catServiceType(ctx)
@@ -50,7 +51,7 @@ func (c *Client) releaseCATClient(ctx context.Context, service ServiceType, clie
 		return nil
 	}
 
-	if _, serviceBound := boundQMIService(c.transport); !serviceBound {
+	if !transportManagesClientIDs(c.transport) {
 		if err := c.releaseServiceClientIDLocked(ctx, service, clientID); err != nil {
 			return err
 		}
@@ -60,6 +61,16 @@ func (c *Client) releaseCATClient(ctx context.Context, service ServiceType, clie
 }
 
 func (c *Client) catServiceType(ctx context.Context) (ServiceType, error) {
+	if transport, ok := c.transport.(transportClientIDProvider); ok {
+		if _, err := transport.ClientID(ctx, ServiceCAT2); err == nil {
+			return ServiceCAT2, nil
+		}
+		if _, err := transport.ClientID(ctx, ServiceCAT); err == nil {
+			return ServiceCAT, nil
+		}
+		return 0, errors.New("detecting QMI CAT service: CAT2/CAT service is not exposed")
+	}
+
 	versions, err := c.serviceVersions(ctx)
 	if err != nil {
 		return 0, err
@@ -78,6 +89,11 @@ func (c *Client) catServiceType(ctx context.Context) (ServiceType, error) {
 }
 
 func (c *Client) serviceVersions(ctx context.Context) ([]serviceVersion, error) {
+	return c.ServiceVersions(ctx)
+}
+
+// ServiceVersions returns the QMI services advertised by the device.
+func (c *Client) ServiceVersions(ctx context.Context) ([]ServiceVersion, error) {
 	resp, err := c.sendRequest(ctx, ServiceControl, 0, MessageGetVersionInfo, nil, DefaultRequestTimeout)
 	if err != nil {
 		return nil, err
@@ -85,5 +101,9 @@ func (c *Client) serviceVersions(ctx context.Context) ([]serviceVersion, error) 
 	if err := resultOK(resp); err != nil {
 		return nil, err
 	}
-	return decodeServiceVersions(resp)
+	var versions ServiceVersionList
+	if err := versions.UnmarshalTLVs(resp.TLVs); err != nil {
+		return nil, err
+	}
+	return versions, nil
 }

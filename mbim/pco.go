@@ -16,6 +16,13 @@ const (
 	pcoOptionIPv4MTU   uint16 = 0x0010
 )
 
+type PCOType uint32
+
+const (
+	PCOTypeComplete PCOType = 0
+	PCOTypePartial  PCOType = 1
+)
+
 type ProtocolConfigurationOptions struct {
 	Extension             bool
 	ConfigurationProtocol byte

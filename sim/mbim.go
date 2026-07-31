@@ -133,7 +133,7 @@ func (m *MBIM) Commands(ctx context.Context, profile stk.Profile) (<-chan STKSes
 	}
 
 	watchCtx, cancel := context.WithCancel(ctx)
-	pacs, err := m.client.WatchSTKPAC(watchCtx)
+	pacs, err := m.client.WatchSTKPACResults(watchCtx)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("watching MBIM STK commands: %w", err)
@@ -149,13 +149,25 @@ func (m *MBIM) Commands(ctx context.Context, profile stk.Profile) (<-chan STKSes
 		defer cancel()
 		defer m.clearSTKPAC()
 
-		for pac := range pacs {
+		for result := range pacs {
+			if result.Err != nil {
+				select {
+				case out <- STKSession{Err: result.Err}:
+				case <-ctx.Done():
+				}
+				return
+			}
+			pac := result.Value
 			if pac.Type != mbim.STKPACTypeProactiveCommand {
 				continue
 			}
 			var proactive stk.ProactiveCommand
 			if err := proactive.UnmarshalBinary(pac.Command); err != nil {
-				continue
+				select {
+				case out <- STKSession{Err: fmt.Errorf("parsing MBIM STK proactive command: %w", err)}:
+				case <-ctx.Done():
+				}
+				return
 			}
 			select {
 			case out <- STKSession{Command: proactive.Command}:

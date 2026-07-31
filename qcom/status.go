@@ -60,16 +60,17 @@ type CardApplication struct {
 	PUK2Retries                   byte
 }
 
-func decodeSlotStatus(resp Response) (SlotStatus, error) {
-	value, ok := tlv.Value(resp.TLVs, 0x10)
+// UnmarshalTLVs parses a UIM slot-status response or indication.
+func (s *SlotStatus) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	value, ok := tlv.Value(tlvs, 0x10)
 	if !ok {
-		return SlotStatus{}, errors.New("reading slot status: status TLV missing")
+		return errors.New("reading slot status: status TLV missing")
 	}
 
 	payload := newPayloadReader(value)
 	count := payload.Uint8()
 	if err := payload.Err(); err != nil {
-		return SlotStatus{}, fmt.Errorf("reading slot status: %w", err)
+		return fmt.Errorf("reading slot status: %w", err)
 	}
 
 	status := SlotStatus{
@@ -83,7 +84,7 @@ func decodeSlotStatus(resp Response) (SlotStatus, error) {
 			ICCID:              payload.Bytes8(),
 		}
 		if err := payload.Err(); err != nil {
-			return SlotStatus{}, fmt.Errorf("reading slot status: %w", err)
+			return fmt.Errorf("reading slot status: %w", err)
 		}
 
 		status.Slots = append(status.Slots, slot)
@@ -91,12 +92,16 @@ func decodeSlotStatus(resp Response) (SlotStatus, error) {
 			status.ActiveSlot = uint8(i + 1)
 		}
 	}
-	if value, ok := tlv.Value(resp.TLVs, 0x11); ok {
+	if err := payload.Done(); err != nil {
+		return fmt.Errorf("reading slot status: %w", err)
+	}
+	if value, ok := tlv.Value(tlvs, 0x11); ok {
 		if err := decodeSlotInformation(&status, value); err != nil {
-			return SlotStatus{}, fmt.Errorf("reading slot status: %w", err)
+			return fmt.Errorf("reading slot status: %w", err)
 		}
 	}
-	return status, nil
+	*s = status
+	return nil
 }
 
 func decodeSlotInformation(status *SlotStatus, value []byte) error {
@@ -118,13 +123,14 @@ func decodeSlotInformation(status *SlotStatus, value []byte) error {
 			return err
 		}
 	}
-	return nil
+	return payload.Done()
 }
 
-func decodeCardStatus(resp Response) (CardStatus, error) {
-	value, ok := tlv.Value(resp.TLVs, 0x10)
+// UnmarshalTLVs parses a UIM card-status response or indication.
+func (s *CardStatus) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	value, ok := tlv.Value(tlvs, 0x10)
 	if !ok {
-		return CardStatus{}, errors.New("reading card status: status TLV missing")
+		return errors.New("reading card status: status TLV missing")
 	}
 
 	payload := newPayloadReader(value)
@@ -136,7 +142,7 @@ func decodeCardStatus(resp Response) (CardStatus, error) {
 
 	cardCount := payload.Uint8()
 	if err := payload.Err(); err != nil {
-		return CardStatus{}, fmt.Errorf("reading card status: %w", err)
+		return fmt.Errorf("reading card status: %w", err)
 	}
 
 	status.Cards = make([]Card, 0, cardCount)
@@ -150,7 +156,7 @@ func decodeCardStatus(resp Response) (CardStatus, error) {
 		}
 		appCount := payload.Uint8()
 		if err := payload.Err(); err != nil {
-			return CardStatus{}, fmt.Errorf("reading card status: %w", err)
+			return fmt.Errorf("reading card status: %w", err)
 		}
 
 		entry.Applications = make([]CardApplication, 0, appCount)
@@ -172,14 +178,18 @@ func decodeCardStatus(resp Response) (CardStatus, error) {
 			app.PIN2Retries = payload.Uint8()
 			app.PUK2Retries = payload.Uint8()
 			if err := payload.Err(); err != nil {
-				return CardStatus{}, fmt.Errorf("reading card status: %w", err)
+				return fmt.Errorf("reading card status: %w", err)
 			}
 
 			entry.Applications = append(entry.Applications, app)
 		}
 		status.Cards = append(status.Cards, entry)
 	}
-	return status, nil
+	if err := payload.Done(); err != nil {
+		return fmt.Errorf("reading card status: %w", err)
+	}
+	*s = status
+	return nil
 }
 
 func (s CardStatus) Ready() bool {
@@ -251,4 +261,14 @@ func (r *payloadReader) Bytes(n int) []byte {
 
 func (r *payloadReader) Err() error {
 	return r.err
+}
+
+func (r *payloadReader) Done() error {
+	if r.err != nil {
+		return r.err
+	}
+	if r.r.Len() != 0 {
+		return fmt.Errorf("payload has %d trailing bytes", r.r.Len())
+	}
+	return nil
 }

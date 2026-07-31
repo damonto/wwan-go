@@ -319,6 +319,64 @@ func TestClientReusesServiceClientUntilClose(t *testing.T) {
 	}
 }
 
+func TestAllocateServiceClientIDRejectsMalformedTLV(t *testing.T) {
+	tests := []struct {
+		name  string
+		value []byte
+	}{
+		{name: "truncated", value: []byte{byte(ServiceDMS)}},
+		{name: "trailing byte", value: []byte{byte(ServiceDMS), 5, 0}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeTransport{t: t, calls: []transportCall{{
+				resp: successResponse(MessageAllocateClientID, tlv.Bytes(0x01, tt.value)),
+			}}}
+			client := &Client{transport: transport}
+			if _, err := client.allocateServiceClientIDLocked(context.Background(), ServiceDMS); err == nil {
+				t.Fatal("allocateServiceClientIDLocked() error = nil, want non-nil")
+			}
+		})
+	}
+}
+
+func TestQMUXClientIDRejectsExtendedService(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, *Client) error
+	}{
+		{
+			name: "allocate",
+			run: func(ctx context.Context, client *Client) error {
+				_, err := client.allocateServiceClientID(ctx, ServiceSSC)
+				return err
+			},
+		},
+		{
+			name: "release",
+			run: func(ctx context.Context, client *Client) error {
+				return client.releaseServiceClientID(ctx, ServiceIMSDCM, 7)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeTransport{t: t}
+			client := &Client{transport: transport}
+
+			err := tt.run(context.Background(), client)
+			if err == nil || !strings.Contains(err.Error(), "QMUX 8-bit limit") {
+				t.Fatalf("client ID operation error = %v, want QMUX service limit", err)
+			}
+			if got := transport.callCount(); got != 0 {
+				t.Fatalf("Do() calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
 func TestClientReallocatesInvalidServiceClient(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1125,7 +1183,7 @@ func encodeCardStatus(ready bool) []byte {
 		state = 0x07
 	}
 	value = append(value, 0x02, state)
-	value = append(value, make([]byte, 28)...)
+	value = append(value, make([]byte, 12)...)
 	return value
 }
 

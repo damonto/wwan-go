@@ -1,12 +1,18 @@
 package qcom
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
 
 	"github.com/damonto/wwan-go/qcom/tlv"
+)
+
+const (
+	uimAIDMaxLength  = 32
+	uimPathMaxLength = 10
 )
 
 const (
@@ -18,6 +24,34 @@ const (
 	catRawEnvelopeMaxLength      = 258
 	catTerminalResponseMaxLength = 255
 )
+
+type tlvUnmarshaler interface {
+	UnmarshalTLVs(tlv.TLVs) error
+}
+
+type tlvUnmarshalerPointer[T any] interface {
+	*T
+	tlvUnmarshaler
+}
+
+func unmarshalTLVStream[T any, P tlvUnmarshalerPointer[T]](ctx context.Context, input <-chan tlv.TLVs) <-chan T {
+	output := make(chan T, 8)
+	go func() {
+		defer close(output)
+		for values := range input {
+			var value T
+			if err := P(&value).UnmarshalTLVs(values); err != nil {
+				return
+			}
+			select {
+			case output <- value:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return output
+}
 
 func resultOK(resp Response) error {
 	return ResultError(resp.TLVs)
@@ -36,17 +70,21 @@ func decodeLengthPrefixedBytes(data []byte) ([]byte, error) {
 	}
 
 	length := int(binary.LittleEndian.Uint16(data[:2]))
-	if len(data) < 2+length {
-		return nil, errors.New("parsing QMI payload: value is truncated")
+	if len(data) != 2+length {
+		return nil, fmt.Errorf("parsing QMI payload: value length %d, want %d", len(data), 2+length)
 	}
 	return slices.Clone(data[2 : 2+length]), nil
 }
 
-func putSessionValue(session Session, aid []byte) []byte {
+func putSessionValue(session Session, aid []byte) ([]byte, error) {
+	if err := validateUIMAIDLength(aid); err != nil {
+		return nil, err
+	}
+
 	value := make([]byte, 0, 2+len(aid))
 	value = append(value, byte(session), byte(len(aid)))
 	value = append(value, aid...)
-	return value
+	return value, nil
 }
 
 func putFileValue(path []byte) ([]byte, error) {
@@ -54,11 +92,21 @@ func putFileValue(path []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(filePath) > uimPathMaxLength {
+		return nil, fmt.Errorf("encoding SIM path %X: QMI path length %d exceeds %d", path, len(filePath), uimPathMaxLength)
+	}
 
 	value := binary.LittleEndian.AppendUint16(nil, fileID)
 	value = append(value, byte(len(filePath)))
 	value = append(value, filePath...)
 	return value, nil
+}
+
+func validateUIMAIDLength(aid []byte) error {
+	if len(aid) > uimAIDMaxLength {
+		return fmt.Errorf("AID length %d exceeds %d", len(aid), uimAIDMaxLength)
+	}
+	return nil
 }
 
 func splitFilePath(path []byte) (uint16, []byte, error) {
@@ -92,8 +140,8 @@ func cardError(tlvs tlv.TLVs) error {
 	if !ok {
 		return nil
 	}
-	if len(value) < 2 {
-		return errors.New("parsing QMI card result: TLV is truncated")
+	if len(value) != 2 {
+		return fmt.Errorf("parsing QMI card result: TLV length %d, want 2", len(value))
 	}
 
 	statusWord := uint16(value[0])<<8 | uint16(value[1])
@@ -109,34 +157,42 @@ func (e cardStatusError) Error() string {
 	return fmt.Sprintf("unexpected status word 0x%04X", uint16(e))
 }
 
-type serviceVersion struct {
+// ServiceVersion identifies one QMI service version advertised by the device.
+type ServiceVersion struct {
 	Service ServiceType
 	Major   uint16
 	Minor   uint16
 }
 
-func decodeServiceVersions(resp Response) ([]serviceVersion, error) {
-	value, ok := tlv.Value(resp.TLVs, 0x01)
+type serviceVersion = ServiceVersion
+
+// ServiceVersionList contains the QMI services advertised by the device.
+type ServiceVersionList []ServiceVersion
+
+// UnmarshalTLVs parses a QMI control Get Version Info response.
+func (versions *ServiceVersionList) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	value, ok := tlv.Value(tlvs, 0x01)
 	if !ok {
-		return nil, errors.New("reading QMI service versions: service list TLV missing")
+		return errors.New("reading QMI service versions: service list TLV missing")
 	}
 	if len(value) == 0 {
-		return nil, errors.New("reading QMI service versions: service count is missing")
+		return errors.New("reading QMI service versions: service count is missing")
 	}
 	count := int(value[0])
 	value = value[1:]
 	if len(value) < count*5 {
-		return nil, errors.New("reading QMI service versions: service list is truncated")
+		return errors.New("reading QMI service versions: service list is truncated")
 	}
 
-	versions := make([]serviceVersion, 0, count)
+	decoded := make(ServiceVersionList, 0, count)
 	for i := range count {
 		offset := i * 5
-		versions = append(versions, serviceVersion{
+		decoded = append(decoded, serviceVersion{
 			Service: ServiceType(value[offset]),
 			Major:   binary.LittleEndian.Uint16(value[offset+1 : offset+3]),
 			Minor:   binary.LittleEndian.Uint16(value[offset+3 : offset+5]),
 		})
 	}
-	return versions, nil
+	*versions = decoded
+	return nil
 }

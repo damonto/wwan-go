@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 )
 
 func isFragmentMessage(messageType MessageType) bool {
@@ -156,7 +157,7 @@ func (f *fragment) UnmarshalBinary(frame []byte) error {
 		transactionID: binary.LittleEndian.Uint32(frame[8:12]),
 		total:         total,
 		current:       current,
-		payload:       frame[20:],
+		payload:       slices.Clone(frame[20:]),
 	}
 	return nil
 }

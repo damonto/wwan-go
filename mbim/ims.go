@@ -12,19 +12,21 @@ import (
 )
 
 const (
-	DefaultIMSPDNAPN       = "ims"
-	DefaultIMSPDNSessionID = 1
+	DefaultIMSPDNAPN                 = "ims"
+	DefaultIMSPDNSessionID SessionID = 1
 )
 
 type IMSPDNConfig struct {
 	APN            string
 	IPType         ContextIPType
-	SessionID      uint32
+	IPTypeSet      bool
+	SessionID      SessionID
+	SessionIDSet   bool
 	RequestTimeout time.Duration
 }
 
 type IMSPDNInfo struct {
-	SessionID        uint32
+	SessionID        SessionID
 	LocalIPv4        net.IP
 	LocalIPv6        net.IP
 	PCSCFIPs         []net.IP
@@ -41,7 +43,7 @@ type IMSPDNInfo struct {
 
 type IMSPDNSession struct {
 	client    *Client
-	sessionID uint32
+	sessionID SessionID
 	timeout   time.Duration
 	info      IMSPDNInfo
 
@@ -54,6 +56,15 @@ func (c *Client) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSessi
 		return nil, errors.New("opening MBIM IMS PDN: client is nil")
 	}
 	cfg = normalizeIMSPDNConfig(cfg)
+	accessStringSize := len(utf16Bytes(cfg.APN))
+	if accessStringSize > accessStringMaximumSize {
+		return nil, fmt.Errorf(
+			"opening MBIM IMS PDN: access string size %d exceeds %d bytes: %w",
+			accessStringSize,
+			accessStringMaximumSize,
+			StatusInvalidAccessString,
+		)
+	}
 	deviceCaps, err := c.DeviceCaps(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("opening MBIM IMS PDN: %w", err)
@@ -61,7 +72,7 @@ func (c *Client) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSessi
 	if deviceCaps.MaxSessions == 0 {
 		return nil, errors.New("opening MBIM IMS PDN: device reports zero IP sessions")
 	}
-	if cfg.SessionID >= deviceCaps.MaxSessions {
+	if uint32(cfg.SessionID) >= deviceCaps.MaxSessions {
 		return nil, fmt.Errorf("opening MBIM IMS PDN: session ID %d is out of range for %d supported sessions", cfg.SessionID, deviceCaps.MaxSessions)
 	}
 	if err := c.ensurePacketServiceAttached(ctx); err != nil {
@@ -178,10 +189,10 @@ func normalizeIMSPDNConfig(cfg IMSPDNConfig) IMSPDNConfig {
 	if cfg.APN == "" {
 		cfg.APN = DefaultIMSPDNAPN
 	}
-	if cfg.IPType == 0 {
+	if cfg.IPType == ContextIPTypeDefault && !cfg.IPTypeSet {
 		cfg.IPType = ContextIPTypeIPv4v6
 	}
-	if cfg.SessionID == 0 {
+	if cfg.SessionID == 0 && !cfg.SessionIDSet {
 		cfg.SessionID = DefaultIMSPDNSessionID
 	}
 	if cfg.RequestTimeout <= 0 {

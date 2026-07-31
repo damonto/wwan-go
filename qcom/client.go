@@ -17,15 +17,38 @@ const (
 // Client owns a QMI transport and lazily allocated service client IDs.
 type Client struct {
 	mu         sync.Mutex
+	watchMu    sync.Mutex
+	pdcMu      sync.Mutex
+	locMu      sync.Mutex
+	pbmMu      sync.Mutex
+	wmsMu      sync.Mutex
 	transport  Transport
 	slot       uint8
 	catService ServiceType
 	clientIDs  map[ServiceType]uint8
 	txn        uint16
 	ctlTxn     uint8
+	pdcToken   uint32
+	wmsToken   uint32
 	closeOnce  sync.Once
 	closed     bool
 	closeErr   error
+
+	uimEventRefs              map[uint32]int
+	dmsEventRefs              int
+	pdsEventRefs              int
+	omaEventRefs              int
+	locEventMask              LOCEventRegistration
+	locEventRefs              map[LOCEventRegistration]int
+	voiceIndicationRefs       map[voiceIndicationRegistration]int
+	imsaIndicationRefs        map[imsaIndicationRegistration]int
+	imsSettingsIndicationRefs map[imsSettingsIndicationRegistration]int
+	wmsIndicationRefs         map[wmsIndicationRegistration]int
+	dsdIndicationRefs         map[dsdIndicationRegistration]int
+	nasIndicationRefs         map[nasIndicationRegistration]int
+	pdcIndicationRefs         map[pdcIndicationRegistration]int
+	wdsProfileEventRefs       map[WDSProfileID]int
+	pbmIndicationRefs         map[PBMEventRegistrationMask]int
 }
 
 // Option configures a Client.
@@ -37,6 +60,13 @@ type config struct {
 
 type serviceBoundTransport interface {
 	QMIService() ServiceType
+}
+
+// transportClientIDProvider is implemented by transports, such as QRTR,
+// where the transport endpoint itself identifies the QMI client. Calling
+// ClientID may also establish the service endpoint.
+type transportClientIDProvider interface {
+	ClientID(ctx context.Context, service ServiceType) (uint8, error)
 }
 
 // WithSlot selects the physical UICC slot used by UIM and CAT operations.
@@ -81,8 +111,7 @@ func (c *Client) Close() error {
 		}
 
 		var releaseErr error
-		_, serviceBound := boundQMIService(transport)
-		if !serviceBound {
+		if !transportManagesClientIDs(transport) {
 			services := make([]ServiceType, 0, len(c.clientIDs))
 			for service := range c.clientIDs {
 				services = append(services, service)
@@ -113,6 +142,14 @@ func boundQMIService(transport Transport) (ServiceType, bool) {
 		return 0, false
 	}
 	return bound.QMIService(), true
+}
+
+func transportManagesClientIDs(transport Transport) bool {
+	if _, ok := transport.(transportClientIDProvider); ok {
+		return true
+	}
+	_, ok := boundQMIService(transport)
+	return ok
 }
 
 func (c *Client) nextTransactionID(service ServiceType) uint16 {

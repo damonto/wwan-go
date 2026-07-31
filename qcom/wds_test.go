@@ -117,18 +117,40 @@ func TestWDSStartNetworkInterfaceRequestKeepsConnectionTLVsWithProfile(t *testin
 		want map[byte][]byte
 	}{
 		{
-			name: "profile and IPv6 IMS settings",
+			name: "all generic connection fields",
 			req: WDSStartNetworkInterfaceRequest{
-				APN:                  "ims",
-				IPPreference:         WDSIPPreferenceIPv6,
-				TechnologyPreference: WDSTechnologyPreference3GPP,
-				ProfileIndex3GPP:     2,
+				PrimaryDNSAddressPreference:    ptr(uint32(0x01020304)),
+				SecondaryDNSAddressPreference:  ptr(uint32(0x05060708)),
+				PrimaryNBNSAddressPreference:   ptr(uint32(0x11121314)),
+				SecondaryNBNSAddressPreference: ptr(uint32(0x15161718)),
+				APN:                            "ims",
+				IPv4AddressPreference:          ptr(uint32(0x0A010203)),
+				Authentication:                 WDSAuthenticationPAP | WDSAuthenticationCHAP,
+				Username:                       "subscriber",
+				Password:                       "secret",
+				IPPreference:                   WDSIPPreferenceIPv6,
+				TechnologyPreference:           WDSTechnologyPreference3GPP | WDSTechnologyPreference3GPP2,
+				ProfileIndex3GPP:               2,
+				ProfileIndex3GPP2:              3,
+				EnableAutoconnect:              ptr(true),
+				ExtendedTechnologyPreference:   ptr(WDSExtendedTechnologyEPC),
 			},
 			want: map[byte][]byte{
+				0x10: {4, 3, 2, 1},
+				0x11: {8, 7, 6, 5},
+				0x12: {0x14, 0x13, 0x12, 0x11},
+				0x13: {0x18, 0x17, 0x16, 0x15},
 				0x14: []byte("ims"),
+				0x15: {3, 2, 1, 10},
+				0x16: {byte(WDSAuthenticationPAP | WDSAuthenticationCHAP)},
+				0x17: []byte("subscriber"),
+				0x18: []byte("secret"),
 				0x19: {byte(WDSIPPreferenceIPv6)},
-				0x30: {byte(WDSTechnologyPreference3GPP)},
+				0x30: {byte(WDSTechnologyPreference3GPP | WDSTechnologyPreference3GPP2)},
 				0x31: {2},
+				0x32: {3},
+				0x33: {1},
+				0x34: binary.LittleEndian.AppendUint16(nil, uint16(WDSExtendedTechnologyEPC)),
 			},
 		},
 	}
@@ -278,6 +300,17 @@ func TestWDSBindMuxDataPortRequestEncoding(t *testing.T) {
 func TestWDSGetRuntimeSettingsResponseUnmarshalTLVs(t *testing.T) {
 	localIPv6 := net.ParseIP("2001:db8::1").To16()
 	pcscfIPv6 := net.ParseIP("2001:db8::2").To16()
+	operatorPCO := []byte{0xCC, 0x01, 0x01, 0x00, 0x01, 0x02, 0xAA, 0xBB, 0x34, 0x12}
+	umtsQoS := []byte{3}
+	for _, value := range []uint32{100, 200, 50, 75} {
+		umtsQoS = binary.LittleEndian.AppendUint32(umtsQoS, value)
+	}
+	umtsQoS = append(umtsQoS, 1)
+	umtsQoS = binary.LittleEndian.AppendUint32(umtsQoS, 1500)
+	umtsQoS = append(umtsQoS, 2, 3, 1)
+	umtsQoS = binary.LittleEndian.AppendUint32(umtsQoS, 40)
+	umtsQoS = binary.LittleEndian.AppendUint32(umtsQoS, 2)
+	gprsQoS := appendUint32sForTest(1, 2, 3, 4, 5)
 
 	tests := []struct {
 		name        string
@@ -292,20 +325,34 @@ func TestWDSGetRuntimeSettingsResponseUnmarshalTLVs(t *testing.T) {
 		wantMTU     uint32
 		wantFamily  WDSIPFamily
 		wantIMCN    bool
+		checkExtra  func(*testing.T, WDSRuntimeSettings)
 	}{
 		{
 			name: "runtime addresses and pcscf",
 			tlvs: tlv.TLVs{
+				tlv.Bytes(0x10, []byte("carrier-profile")),
+				tlv.Uint(0x11, uint8(WDSPDPTypeIPv4v6)),
+				tlv.Bytes(0x14, []byte("internet")),
 				tlv.Bytes(0x1E, []byte{3, 2, 1, 10}),
+				tlv.Bytes(0x1B, []byte("subscriber")),
+				tlv.Uint(0x1D, uint8(WDSAuthenticationCHAP)),
+				tlv.Bytes(0x1F, []byte{byte(WDSProfileType3GPP), 7}),
+				tlv.Bytes(0x17, umtsQoS),
+				tlv.Bytes(0x19, gprsQoS),
 				tlv.Bytes(0x25, append(slices.Clone(localIPv6), 64)),
 				tlv.Bytes(0x15, []byte{8, 8, 8, 8}),
 				tlv.Bytes(0x20, []byte{1, 2, 1, 10}),
 				tlv.Bytes(0x21, []byte{0, 255, 255, 255}),
 				tlv.Uint(0x29, uint32(1428)),
 				tlv.Bytes(0x23, ipv4ListForTest(net.IPv4(198, 51, 100, 10))),
+				tlv.Uint(0x22, uint8(1)),
+				tlv.Bytes(0x24, wdsDomainListForTest("pcscf.example")),
 				tlv.Bytes(0x2E, ipv6ListForTest(pcscfIPv6)),
+				tlv.Bytes(0x2A, wdsDomainListForTest("example", "carrier.example")),
 				tlv.Bytes(0x2B, []byte{byte(WDSIPFamilyIPv6)}),
 				tlv.Bytes(0x2C, []byte{1}),
+				tlv.Uint(0x2D, uint16(WDSExtendedTechnologyEPC)),
+				tlv.Bytes(0x2F, operatorPCO),
 			},
 			wantIPv4:    net.IPv4(10, 1, 2, 3),
 			wantIPv6:    localIPv6,
@@ -316,6 +363,33 @@ func TestWDSGetRuntimeSettingsResponseUnmarshalTLVs(t *testing.T) {
 			wantMTU:     1428,
 			wantFamily:  WDSIPFamilyIPv6,
 			wantIMCN:    true,
+			checkExtra: func(t *testing.T, settings WDSRuntimeSettings) {
+				if !settings.ProfileIDKnown || settings.ProfileID != (WDSProfileID{Type: WDSProfileType3GPP, Index: 7}) ||
+					!settings.ProfileNameKnown || settings.ProfileName != "carrier-profile" ||
+					!settings.PDPTypeKnown || settings.PDPType != WDSPDPTypeIPv4v6 ||
+					!settings.APNKnown || settings.APN != "internet" ||
+					!settings.UsernameKnown || settings.Username != "subscriber" ||
+					!settings.AuthenticationKnown || settings.Authentication != WDSAuthenticationCHAP {
+					t.Fatalf("profile settings = %+v", settings)
+				}
+				if !settings.UMTSGrantedQoSKnown || settings.UMTSGrantedQoS.MaximumDownlinkBitrate != 200 ||
+					settings.UMTSGrantedQoS.MaximumSDUSize != 1500 || settings.UMTSGrantedQoS.TrafficHandlingPriority != 2 ||
+					!settings.GPRSGrantedQoSKnown || settings.GPRSGrantedQoS.MeanThroughputClass != 5 {
+					t.Fatalf("granted QoS = %+v / %+v", settings.UMTSGrantedQoS, settings.GPRSGrantedQoS)
+				}
+				if !settings.PCSCFUsingPCOKnown || !settings.PCSCFUsingPCO ||
+					!slices.Equal(settings.PCSCFDomains, []string{"pcscf.example"}) ||
+					!slices.Equal(settings.DomainNames, []string{"example", "carrier.example"}) {
+					t.Fatalf("domain settings = %+v", settings)
+				}
+				if !settings.ExtendedTechnologyKnown || settings.ExtendedTechnology != WDSExtendedTechnologyEPC ||
+					!settings.OperatorReservedPCOKnown || settings.OperatorReservedPCO.MCC != 460 ||
+					settings.OperatorReservedPCO.MNC != 1 || !settings.OperatorReservedPCO.MNCIncludesPCSDigit ||
+					!slices.Equal(settings.OperatorReservedPCO.AppSpecificInfo, []byte{0xAA, 0xBB}) ||
+					settings.OperatorReservedPCO.ContainerID != 0x1234 {
+					t.Fatalf("extended settings = %+v", settings)
+				}
+			},
 		},
 		{
 			name:    "short local ipv4 fails",
@@ -325,6 +399,56 @@ func TestWDSGetRuntimeSettingsResponseUnmarshalTLVs(t *testing.T) {
 		{
 			name:    "truncated pcscf ipv4 list fails",
 			tlvs:    tlv.TLVs{tlv.Bytes(0x23, []byte{1, 198})},
+			wantErr: true,
+		},
+		{
+			name:    "trailing pcscf ipv4 list fails",
+			tlvs:    tlv.TLVs{tlv.Bytes(0x23, append(ipv4ListForTest(net.IPv4(198, 51, 100, 10)), 0))},
+			wantErr: true,
+		},
+		{
+			name:    "trailing pcscf ipv6 list fails",
+			tlvs:    tlv.TLVs{tlv.Bytes(0x2E, append(ipv6ListForTest(pcscfIPv6), 0))},
+			wantErr: true,
+		},
+		{
+			name:    "trailing scalar fails",
+			tlvs:    tlv.TLVs{tlv.Bytes(0x29, make([]byte, 5))},
+			wantErr: true,
+		},
+		{
+			name:    "empty IMCN fails",
+			tlvs:    tlv.TLVs{tlv.Bytes(0x2C, nil)},
+			wantErr: true,
+		},
+		{
+			name:    "domain list trailing data fails",
+			tlvs:    tlv.TLVs{tlv.Bytes(0x2A, append(wdsDomainListForTest("example"), 0))},
+			wantErr: true,
+		},
+		{
+			name:    "pcscf domain value truncated fails",
+			tlvs:    tlv.TLVs{tlv.Bytes(0x24, []byte{1, 3, 0, 'i'})},
+			wantErr: true,
+		},
+		{
+			name:    "operator PCO trailing data fails",
+			tlvs:    tlv.TLVs{tlv.Bytes(0x2F, append(slices.Clone(operatorPCO), 0))},
+			wantErr: true,
+		},
+		{
+			name:    "extended technology trailing data fails",
+			tlvs:    tlv.TLVs{tlv.Bytes(0x2D, make([]byte, 3))},
+			wantErr: true,
+		},
+		{
+			name:    "UMTS granted QoS trailing data fails",
+			tlvs:    tlv.TLVs{tlv.Bytes(0x17, make([]byte, 34))},
+			wantErr: true,
+		},
+		{
+			name:    "GPRS granted QoS truncated fails",
+			tlvs:    tlv.TLVs{tlv.Bytes(0x19, make([]byte, 19))},
 			wantErr: true,
 		},
 		{
@@ -384,8 +508,20 @@ func TestWDSGetRuntimeSettingsResponseUnmarshalTLVs(t *testing.T) {
 			if got.Settings.MTU != tt.wantMTU {
 				t.Fatalf("MTU = %d, want %d", got.Settings.MTU, tt.wantMTU)
 			}
+			if tt.checkExtra != nil {
+				tt.checkExtra(t, got.Settings)
+			}
 		})
 	}
+}
+
+func wdsDomainListForTest(domains ...string) []byte {
+	value := []byte{byte(len(domains))}
+	for _, domain := range domains {
+		value = binary.LittleEndian.AppendUint16(value, uint16(len(domain)))
+		value = append(value, domain...)
+	}
+	return value
 }
 
 func ptr[T any](value T) *T { return &value }
@@ -418,8 +554,11 @@ func TestWDSStartNetworkInterfaceResponseUnmarshalTLVs(t *testing.T) {
 			wantHasVerbose: true,
 		},
 		{name: "short handle fails", tlvs: tlv.TLVs{tlv.Bytes(0x01, []byte{1, 2})}, wantErr: true},
+		{name: "handle trailing data fails", tlvs: tlv.TLVs{tlv.Bytes(0x01, make([]byte, 5))}, wantErr: true},
 		{name: "short call end reason fails", tlvs: tlv.TLVs{tlv.Bytes(0x10, []byte{1})}, wantErr: true},
+		{name: "call end reason trailing data fails", tlvs: tlv.TLVs{tlv.Bytes(0x10, make([]byte, 3))}, wantErr: true},
 		{name: "short verbose call end reason fails", tlvs: tlv.TLVs{tlv.Bytes(0x11, []byte{2, 0, 1})}, wantErr: true},
+		{name: "verbose call end reason trailing data fails", tlvs: tlv.TLVs{tlv.Bytes(0x11, make([]byte, 5))}, wantErr: true},
 	}
 
 	for _, tt := range tests {

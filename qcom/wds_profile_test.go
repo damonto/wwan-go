@@ -2,6 +2,7 @@ package qcom
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/damonto/wwan-go/qcom/tlv"
@@ -9,21 +10,40 @@ import (
 
 func TestWDSProfileRequests(t *testing.T) {
 	tests := []struct {
-		name string
-		req  Request
-		want MessageID
+		name  string
+		build func() (Request, error)
+		want  MessageID
 	}{
-		{name: "list", req: WDSGetProfileListRequest{ClientID: 3, ProfileType: WDSProfileType3GPP}.Request(), want: MessageWDSGetProfileList},
-		{name: "settings", req: WDSGetProfileSettingsRequest{ClientID: 4, Profile: WDSProfileID{Type: WDSProfileType3GPP, Index: 2}}.Request(), want: MessageWDSGetProfileSettings},
-		{name: "modify", req: WDSModifyProfileRequest{ClientID: 5, Profile: WDSProfileID{Type: WDSProfileType3GPP, Index: 2}, PCSCFUsingPCO: true}.Request(), want: MessageWDSModifyProfile},
-		{name: "set default", req: WDSSetDefaultProfileRequest{ClientID: 6, Profile: WDSProfileID{Type: WDSProfileType3GPP, Index: 2}, Family: WDSProfileFamilyTethered}.Request(), want: MessageWDSSetDefaultProfile},
-		{name: "create", req: WDSCreateProfileRequest{ClientID: 5, APN: "ims", PDPType: WDSPDPTypeIPv4v6}.Request(), want: MessageWDSCreateProfile},
-		{name: "delete", req: WDSDeleteProfileRequest{ClientID: 6, Profile: WDSProfileID{Type: WDSProfileType3GPP, Index: 3}}.Request(), want: MessageWDSDeleteProfile},
+		{name: "list", build: func() (Request, error) {
+			return WDSGetProfileListRequest{ClientID: 3, ProfileType: WDSProfileType3GPP}.Request(), nil
+		}, want: MessageWDSGetProfileList},
+		{name: "settings", build: func() (Request, error) {
+			return WDSGetProfileSettingsRequest{ClientID: 4, Profile: WDSProfileID{Type: WDSProfileType3GPP, Index: 2}}.Request(), nil
+		}, want: MessageWDSGetProfileSettings},
+		{name: "modify", build: func() (Request, error) {
+			return WDSModifyProfileRequest{ClientID: 5, Profile: WDSProfileID{Type: WDSProfileType3GPP, Index: 2}, PCSCFUsingPCO: true}.Request(), nil
+		}, want: MessageWDSModifyProfile},
+		{name: "update", build: func() (Request, error) {
+			return (WDSUpdateProfileRequest{ClientID: 5, Profile: WDSProfileID{Type: WDSProfileType3GPP, Index: 2}, Update: WDSProfileUpdate{APN: ptr("internet")}}).Request()
+		}, want: MessageWDSModifyProfile},
+		{name: "set default", build: func() (Request, error) {
+			return WDSSetDefaultProfileRequest{ClientID: 6, Profile: WDSProfileID{Type: WDSProfileType3GPP, Index: 2}, Family: WDSProfileFamilyTethered}.Request(), nil
+		}, want: MessageWDSSetDefaultProfile},
+		{name: "create", build: func() (Request, error) {
+			return (WDSCreateProfileRequest{ClientID: 5, Config: WDSProfileConfig{APN: "ims", PDPType: WDSPDPTypeIPv4v6}}).Request()
+		}, want: MessageWDSCreateProfile},
+		{name: "delete", build: func() (Request, error) {
+			return WDSDeleteProfileRequest{ClientID: 6, Profile: WDSProfileID{Type: WDSProfileType3GPP, Index: 3}}.Request(), nil
+		}, want: MessageWDSDeleteProfile},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.req.Service != ServiceWDS || tt.req.MessageID != tt.want {
-				t.Fatalf("request = service 0x%02X message 0x%04X", tt.req.Service, tt.req.MessageID)
+			req, err := tt.build()
+			if err != nil {
+				t.Fatalf("Request() error = %v", err)
+			}
+			if req.Service != ServiceWDS || req.MessageID != tt.want {
+				t.Fatalf("request = service 0x%02X message 0x%04X", req.Service, req.MessageID)
 			}
 		})
 	}
@@ -31,16 +51,18 @@ func TestWDSProfileRequests(t *testing.T) {
 
 func TestWDSProfileMutationRequests(t *testing.T) {
 	tests := []struct {
-		name string
-		req  Request
-		want map[byte][]byte
+		name  string
+		build func() (Request, error)
+		want  map[byte][]byte
 	}{
 		{
 			name: "enable P-CSCF via PCO",
-			req: WDSModifyProfileRequest{
-				Profile:       WDSProfileID{Type: WDSProfileType3GPP, Index: 7},
-				PCSCFUsingPCO: true,
-			}.Request(),
+			build: func() (Request, error) {
+				return WDSModifyProfileRequest{
+					Profile:       WDSProfileID{Type: WDSProfileType3GPP, Index: 7},
+					PCSCFUsingPCO: true,
+				}.Request(), nil
+			},
 			want: map[byte][]byte{
 				wdsTLVProfileID:     {byte(WDSProfileType3GPP), 7},
 				wdsTLVPCSCFUsingPCO: {1},
@@ -48,20 +70,55 @@ func TestWDSProfileMutationRequests(t *testing.T) {
 		},
 		{
 			name: "set tethered default profile",
-			req: WDSSetDefaultProfileRequest{
-				Profile: WDSProfileID{Type: WDSProfileType3GPP, Index: 7},
-				Family:  WDSProfileFamilyTethered,
-			}.Request(),
+			build: func() (Request, error) {
+				return WDSSetDefaultProfileRequest{
+					Profile: WDSProfileID{Type: WDSProfileType3GPP, Index: 7},
+					Family:  WDSProfileFamilyTethered,
+				}.Request(), nil
+			},
 			want: map[byte][]byte{
 				wdsTLVProfileID: {byte(WDSProfileType3GPP), byte(WDSProfileFamilyTethered), 7},
+			},
+		},
+		{
+			name: "update authentication and IMS fields",
+			build: func() (Request, error) {
+				return (WDSUpdateProfileRequest{
+					Profile: WDSProfileID{Type: WDSProfileType3GPP, Index: 7},
+					Update: WDSProfileUpdate{
+						APN:            ptr("ims"),
+						PDPType:        ptr(WDSPDPTypeIPv4v6),
+						Username:       ptr("subscriber"),
+						Password:       ptr("secret"),
+						Authentication: ptr(WDSAuthenticationPAP | WDSAuthenticationCHAP),
+						PCSCFUsingPCO:  ptr(true),
+						PCSCFUsingDHCP: ptr(false),
+						IMCN:           ptr(true),
+					},
+				}).Request()
+			},
+			want: map[byte][]byte{
+				wdsTLVProfileID:       {byte(WDSProfileType3GPP), 7},
+				wdsTLVProfilePDPType:  {byte(WDSPDPTypeIPv4v6)},
+				wdsTLVProfileAPN:      []byte("ims"),
+				wdsTLVProfileUsername: []byte("subscriber"),
+				wdsTLVProfilePassword: []byte("secret"),
+				wdsTLVProfileAuth:     {byte(WDSAuthenticationPAP | WDSAuthenticationCHAP)},
+				wdsTLVPCSCFUsingPCO:   {1},
+				wdsTLVPCSCFUsingDHCP:  {0},
+				wdsTLVIMCNFlag:        {1},
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			req, err := tt.build()
+			if err != nil {
+				t.Fatalf("Request() error = %v", err)
+			}
 			for kind, want := range tt.want {
-				assertTLV(t, tt.req.TLVs, kind, want)
+				assertTLV(t, req.TLVs, kind, want)
 			}
 		})
 	}
@@ -81,6 +138,17 @@ func TestClientWDSProfileMutations(t *testing.T) {
 			message: MessageWDSModifyProfile,
 			apply:   func(ctx context.Context, client *Client) error { return client.WDSModifyProfile(ctx, profile, true) },
 			resp:    successResponse(MessageWDSModifyProfile),
+		},
+		{
+			name:    "update profile",
+			message: MessageWDSModifyProfile,
+			apply: func(ctx context.Context, client *Client) error {
+				return client.WDSUpdateProfile(ctx, profile, WDSProfileUpdate{
+					Authentication: ptr(WDSAuthenticationCHAP),
+					Username:       ptr("subscriber"),
+				})
+			},
+			resp: successResponse(MessageWDSModifyProfile),
 		},
 		{
 			name:    "default profile error",
@@ -182,6 +250,138 @@ func TestClientWDSProfileLifecycleReusesClient(t *testing.T) {
 	}
 }
 
+func TestClientWDSCreateProfileWithConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  WDSProfileConfig
+	}{
+		{
+			name: "authenticated IMS profile",
+			cfg: WDSProfileConfig{
+				Name:           "carrier-ims",
+				APN:            " ims ",
+				PDPType:        WDSPDPTypeIPv4v6,
+				Username:       "subscriber",
+				Password:       "secret",
+				Authentication: WDSAuthenticationPAP | WDSAuthenticationCHAP,
+				PCSCFUsingPCO:  ptr(true),
+				PCSCFUsingDHCP: ptr(false),
+				IMCN:           ptr(true),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeTransport{t: t, calls: []transportCall{
+				{resp: allocatedClientResponse(ServiceWDS, 5)},
+				{
+					check: func(req Request) {
+						assertTLV(t, req.TLVs, wdsTLVProfileName, []byte("carrier-ims"))
+						assertTLV(t, req.TLVs, wdsTLVProfileAPN, []byte("ims"))
+						assertTLV(t, req.TLVs, wdsTLVProfileUsername, []byte("subscriber"))
+						assertTLV(t, req.TLVs, wdsTLVProfilePassword, []byte("secret"))
+						assertTLV(t, req.TLVs, wdsTLVProfileAuth, []byte{byte(WDSAuthenticationPAP | WDSAuthenticationCHAP)})
+						assertTLV(t, req.TLVs, wdsTLVPCSCFUsingPCO, []byte{1})
+						assertTLV(t, req.TLVs, wdsTLVPCSCFUsingDHCP, []byte{0})
+						assertTLV(t, req.TLVs, wdsTLVIMCNFlag, []byte{1})
+					},
+					resp: successResponse(MessageWDSCreateProfile, tlv.Bytes(wdsTLVProfileID, []byte{byte(WDSProfileType3GPP), 7})),
+				},
+				{resp: successResponse(MessageReleaseClientID)},
+			}}
+			client := &Client{transport: transport, slot: 1}
+
+			id, err := client.WDSCreateProfileWithConfig(context.Background(), tt.cfg)
+			if err != nil {
+				t.Fatalf("WDSCreateProfileWithConfig() error = %v", err)
+			}
+			if id != (WDSProfileID{Type: WDSProfileType3GPP, Index: 7}) {
+				t.Fatalf("profile ID = %+v", id)
+			}
+			if err := client.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestClientWDSProfileConfigValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  WDSProfileConfig
+		want string
+	}{
+		{name: "missing APN", cfg: WDSProfileConfig{}, want: "APN is required"},
+		{name: "profile name too long", cfg: WDSProfileConfig{APN: "internet", Name: strings.Repeat("n", wdsProfileNameMaxLength+1)}, want: "validating WDS profile name: value length"},
+		{name: "APN too long", cfg: WDSProfileConfig{APN: strings.Repeat("a", wdsAPNMaxLength+1)}, want: "validating WDS APN: value length"},
+		{name: "username too long", cfg: WDSProfileConfig{APN: "internet", Username: strings.Repeat("u", wdsUsernameMaxLength+1)}, want: "validating WDS username: value length"},
+		{name: "password too long", cfg: WDSProfileConfig{APN: "internet", Password: strings.Repeat("p", wdsPasswordMaxLength+1)}, want: "validating WDS password: value length"},
+		{name: "unsupported PDP type", cfg: WDSProfileConfig{APN: "internet", PDPType: 9}, want: "unsupported WDS PDP type"},
+		{name: "unsupported authentication", cfg: WDSProfileConfig{APN: "internet", Authentication: 0x80}, want: "unsupported WDS authentication mask"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := (&Client{}).WDSCreateProfileWithConfig(context.Background(), tt.cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("WDSCreateProfileWithConfig() error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestWDSProfileValidationAcceptsNonIP(t *testing.T) {
+	tests := []struct {
+		name     string
+		validate func() error
+	}{
+		{
+			name: "create",
+			validate: func() error {
+				return validateWDSProfileConfig(WDSProfileConfig{APN: "nonip", PDPType: WDSPDPTypeNonIP})
+			},
+		},
+		{
+			name: "update",
+			validate: func() error {
+				return validateWDSProfileUpdate(WDSProfileUpdate{PDPType: ptr(WDSPDPTypeNonIP)})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.validate(); err != nil {
+				t.Fatalf("validation error = %v", err)
+			}
+		})
+	}
+}
+
+func TestClientWDSProfileUpdateValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile WDSProfileID
+		update  WDSProfileUpdate
+		want    string
+	}{
+		{name: "no changes", profile: WDSProfileID{Type: WDSProfileType3GPP}, want: "no fields selected"},
+		{name: "unsupported profile type", profile: WDSProfileID{Type: 3}, update: WDSProfileUpdate{APN: ptr("internet")}, want: "profile type"},
+		{name: "APN too long", profile: WDSProfileID{Type: WDSProfileType3GPP}, update: WDSProfileUpdate{APN: ptr(strings.Repeat("a", wdsAPNMaxLength+1))}, want: "validating WDS APN: value length"},
+		{name: "unsupported authentication", profile: WDSProfileID{Type: WDSProfileType3GPP}, update: WDSProfileUpdate{Authentication: ptr(WDSAuthenticationMask(0x80))}, want: "unsupported WDS authentication mask"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := (&Client{}).WDSUpdateProfile(context.Background(), tt.profile, tt.update)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("WDSUpdateProfile() error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestClientWDSProfileIndex(t *testing.T) {
 	tests := []struct {
 		name string
@@ -228,6 +428,7 @@ func TestWDSGetProfileListResponseUnmarshalTLVs(t *testing.T) {
 	}{
 		{name: "missing", wantErr: true},
 		{name: "truncated", tlvs: tlv.TLVs{tlv.Bytes(wdsTLVProfileList, []byte{1, 0})}, wantErr: true},
+		{name: "trailing data", tlvs: tlv.TLVs{tlv.Bytes(wdsTLVProfileList, []byte{0, 1})}, wantErr: true},
 		{name: "profiles", tlvs: tlv.TLVs{tlv.Bytes(wdsTLVProfileList, []byte{2, 0, 1, 3, 'n', 'e', 't', 0, 2, 3, 'i', 'm', 's'})}},
 	}
 	for _, tt := range tests {
@@ -257,9 +458,13 @@ func TestWDSGetProfileSettingsResponseUnmarshalTLVs(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "empty"},
-		{name: "IMS", tlvs: tlv.TLVs{tlv.Bytes(wdsTLVProfileAPN, []byte("ims")), tlv.Uint(wdsTLVProfilePDPType, uint8(WDSPDPTypeIPv6)), tlv.Bytes(wdsTLVPCSCFUsingPCO, []byte{1}), tlv.Bytes(wdsTLVIMCNFlag, []byte{1})}},
+		{name: "IMS", tlvs: tlv.TLVs{tlv.Bytes(wdsTLVProfileAPN, []byte("ims")), tlv.Uint(wdsTLVProfilePDPType, uint8(WDSPDPTypeIPv6)), tlv.Bytes(wdsTLVProfileUsername, []byte("subscriber")), tlv.Bytes(wdsTLVProfilePassword, []byte("secret")), tlv.Uint(wdsTLVProfileAuth, uint8(WDSAuthenticationCHAP)), tlv.Bytes(wdsTLVPCSCFUsingPCO, []byte{1}), tlv.Bytes(wdsTLVIMCNFlag, []byte{1})}},
 		{name: "truncated PDP type", tlvs: tlv.TLVs{tlv.Bytes(wdsTLVProfilePDPType, nil)}, wantErr: true},
+		{name: "PDP type trailing data", tlvs: tlv.TLVs{tlv.Bytes(wdsTLVProfilePDPType, make([]byte, 2))}, wantErr: true},
+		{name: "truncated authentication", tlvs: tlv.TLVs{tlv.Bytes(wdsTLVProfileAuth, nil)}, wantErr: true},
+		{name: "authentication trailing data", tlvs: tlv.TLVs{tlv.Bytes(wdsTLVProfileAuth, make([]byte, 2))}, wantErr: true},
 		{name: "truncated bool", tlvs: tlv.TLVs{tlv.Bytes(wdsTLVPCSCFUsingPCO, nil)}, wantErr: true},
+		{name: "bool trailing data", tlvs: tlv.TLVs{tlv.Bytes(wdsTLVPCSCFUsingPCO, make([]byte, 2))}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -274,7 +479,12 @@ func TestWDSGetProfileSettingsResponseUnmarshalTLVs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("UnmarshalTLVs() error = %v", err)
 			}
-			if tt.name == "IMS" && (!got.Settings.APNKnown || got.Settings.APN != "ims" || !got.Settings.PDPKnown || got.Settings.PDPType != WDSPDPTypeIPv6 || !got.Settings.PCSCFUsingPCO || !got.Settings.IMCN) {
+			if tt.name == "IMS" && (!got.Settings.APNKnown || got.Settings.APN != "ims" ||
+				!got.Settings.PDPKnown || got.Settings.PDPType != WDSPDPTypeIPv6 ||
+				!got.Settings.UsernameKnown || got.Settings.Username != "subscriber" ||
+				!got.Settings.PasswordKnown || got.Settings.Password != "secret" ||
+				!got.Settings.AuthenticationKnown || got.Settings.Authentication != WDSAuthenticationCHAP ||
+				!got.Settings.PCSCFUsingPCO || !got.Settings.IMCN) {
 				t.Fatalf("Settings = %+v", got.Settings)
 			}
 		})

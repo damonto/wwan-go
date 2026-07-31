@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/damonto/wwan-go/qcom"
@@ -17,7 +18,7 @@ type QMUXHeader struct {
 	IfType       uint8
 	Length       uint16
 	ControlFlags uint8
-	ServiceType  qcom.ServiceType
+	ServiceType  uint8
 	ClientID     uint8
 }
 
@@ -36,34 +37,128 @@ func (r Request) MarshalBinary() ([]byte, error) {
 	return marshalRequest(r.Request)
 }
 
-type Transport struct {
-	conn Conn
-
-	writeMu  sync.Mutex
-	readOnce sync.Once
-	mu       sync.Mutex
-	pending  map[messageKey]chan responseResult
-	subs     map[uint64]subscription
-	nextSub  uint64
-	readErr  error
-	closed   bool
+func (r Request) WriteTo(w io.Writer) (int64, error) {
+	data, err := r.MarshalBinary()
+	if err != nil {
+		return 0, err
+	}
+	var written int64
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		written += int64(n)
+		data = data[n:]
+		if err != nil {
+			return written, err
+		}
+		if n == 0 {
+			return written, io.ErrShortWrite
+		}
+	}
+	return written, nil
 }
 
+type Transport struct {
+	*transportCore
+
+	proxy     bool
+	shared    bool
+	lease     *transportLease
+	closeOnce sync.Once
+	closeErr  error
+	release   func() error
+}
+
+type transportLease struct {
+	closed atomic.Bool
+}
+
+type transportCore struct {
+	conn Conn
+
+	writeMu       sync.Mutex
+	readOnce      sync.Once
+	mu            sync.Mutex
+	pending       map[messageKey]chan responseResult
+	pendingOwners map[messageKey]*transportLease
+	subs          map[uint64]*subscription
+	nextSub       uint64
+	readErr       error
+	closed        bool
+	txn           atomic.Uint32
+	ctlTxn        atomic.Uint32
+}
+
+// UsesProxy reports whether the transport was opened through qmi-proxy.
+func (t *Transport) UsesProxy() bool { return t.proxy }
+
 func New(conn Conn) *Transport {
-	return &Transport{
-		conn:    conn,
-		pending: make(map[messageKey]chan responseResult),
-		subs:    make(map[uint64]subscription),
+	core := &transportCore{
+		conn:          conn,
+		pending:       make(map[messageKey]chan responseResult),
+		pendingOwners: make(map[messageKey]*transportLease),
+		subs:          make(map[uint64]*subscription),
 	}
+	transport := &Transport{transportCore: core}
+	transport.release = transport.closeCore
+	return transport
 }
 
 func (t *Transport) Close() error {
+	t.closeOnce.Do(func() {
+		if t.lease != nil {
+			t.closeLease()
+		}
+		if t.release != nil {
+			t.closeErr = t.release()
+		}
+	})
+	return t.closeErr
+}
+
+func (t *Transport) closeLease() {
+	if !t.lease.closed.CompareAndSwap(false, true) {
+		return
+	}
+
+	t.mu.Lock()
+	var pending []chan responseResult
+	for key, owner := range t.pendingOwners {
+		if owner != t.lease {
+			continue
+		}
+		pending = append(pending, t.pending[key])
+		delete(t.pending, key)
+		delete(t.pendingOwners, key)
+	}
+	var subs []*subscription
+	for id, sub := range t.subs {
+		if sub.owner != t.lease {
+			continue
+		}
+		subs = append(subs, sub)
+		delete(t.subs, id)
+	}
+	t.mu.Unlock()
+
+	err := errors.New("QMI transport lease is closed")
+	for _, ch := range pending {
+		ch <- responseResult{err: err}
+	}
+	for _, sub := range subs {
+		sub.stop()
+	}
+}
+
+func (t *Transport) closeCore() error {
 	err := t.conn.Close()
 	t.fail(errors.New("QMI transport is closed"))
 	return err
 }
 
 func (t *Transport) Do(ctx context.Context, req qcom.Request) (qcom.Response, error) {
+	if t.shared {
+		req.TransactionID = t.nextTransactionID(req.Service)
+	}
 	packet, err := (Request{Request: req}).MarshalBinary()
 	if err != nil {
 		return qcom.Response{}, err
@@ -115,19 +210,41 @@ func (t *Transport) Do(ctx context.Context, req qcom.Request) (qcom.Response, er
 	}
 }
 
+func (t *Transport) nextTransactionID(service qcom.ServiceType) uint16 {
+	if service == qcom.ServiceControl {
+		for {
+			txn := uint8(t.ctlTxn.Add(1))
+			if txn != 0 {
+				return uint16(txn)
+			}
+		}
+	}
+	for {
+		txn := uint16(t.txn.Add(1))
+		if txn != 0 {
+			return txn
+		}
+	}
+}
+
 func (t *Transport) Indications(ctx context.Context, service qcom.ServiceType, clientID uint8, id qcom.MessageID) (<-chan qcom.Indication, error) {
-	ch := make(chan qcom.Indication, 16)
-	sub := subscription{service: service, client: clientID, message: id, ch: ch}
+	sub := newSubscription(ctx, service, clientID, id)
+	sub.owner = t.lease
 
 	t.mu.Lock()
+	if t.lease != nil && t.lease.closed.Load() {
+		t.mu.Unlock()
+		sub.stop()
+		return nil, errors.New("QMI transport lease is closed")
+	}
 	if t.readErr != nil {
 		t.mu.Unlock()
-		close(ch)
+		sub.stop()
 		return nil, t.readErr
 	}
 	if t.closed {
 		t.mu.Unlock()
-		close(ch)
+		sub.stop()
 		return nil, errors.New("QMI transport is closed")
 	}
 	t.nextSub++
@@ -136,11 +253,8 @@ func (t *Transport) Indications(ctx context.Context, service qcom.ServiceType, c
 	t.mu.Unlock()
 
 	t.startReader()
-	go func() {
-		<-ctx.Done()
-		t.removeSubscription(idn)
-	}()
-	return ch, nil
+	go t.removeFinishedSubscription(idn, sub)
+	return sub.ch, nil
 }
 
 type messageKey struct {
@@ -160,6 +274,121 @@ type subscription struct {
 	client  uint8
 	message qcom.MessageID
 	ch      chan qcom.Indication
+	notify  chan struct{}
+	done    chan struct{}
+	cancel  context.CancelFunc
+	owner   *transportLease
+
+	stopOnce sync.Once
+	mu       sync.Mutex
+	queue    []qcom.Indication
+	stopped  bool
+}
+
+func newSubscription(
+	ctx context.Context,
+	service qcom.ServiceType,
+	clientID uint8,
+	message qcom.MessageID,
+) *subscription {
+	subCtx, cancel := context.WithCancel(ctx)
+	sub := &subscription{
+		service: service,
+		client:  clientID,
+		message: message,
+		ch:      make(chan qcom.Indication, 16),
+		notify:  make(chan struct{}, 1),
+		done:    make(chan struct{}),
+		cancel:  cancel,
+	}
+	go sub.run(subCtx)
+	return sub
+}
+
+func (s *subscription) run(ctx context.Context) {
+	defer close(s.done)
+	defer close(s.ch)
+
+	for {
+		if ind, ok := s.next(); ok {
+			select {
+			case s.ch <- ind:
+			case <-ctx.Done():
+				s.flushBuffered(ind)
+				return
+			}
+			continue
+		}
+
+		select {
+		case <-s.notify:
+		case <-ctx.Done():
+			s.flushBuffered()
+			return
+		}
+	}
+}
+
+func (s *subscription) flushBuffered(first ...qcom.Indication) {
+	for _, ind := range first {
+		select {
+		case s.ch <- ind:
+		default:
+			return
+		}
+	}
+	for {
+		ind, ok := s.next()
+		if !ok {
+			return
+		}
+		select {
+		case s.ch <- ind:
+		default:
+			return
+		}
+	}
+}
+
+func (s *subscription) next() (qcom.Indication, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.queue) == 0 {
+		return qcom.Indication{}, false
+	}
+
+	ind := s.queue[0]
+	s.queue[0] = qcom.Indication{}
+	s.queue = s.queue[1:]
+	if len(s.queue) == 0 {
+		s.queue = nil
+	}
+	return ind, true
+}
+
+func (s *subscription) enqueue(ind qcom.Indication) {
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return
+	}
+	s.queue = append(s.queue, ind)
+	s.mu.Unlock()
+
+	select {
+	case s.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (s *subscription) stop() {
+	s.stopOnce.Do(func() {
+		s.mu.Lock()
+		s.stopped = true
+		s.mu.Unlock()
+		s.cancel()
+	})
+	<-s.done
 }
 
 func requestContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -173,6 +402,9 @@ func requestContext(ctx context.Context, timeout time.Duration) (context.Context
 func (t *Transport) addPending(key messageKey, ch chan responseResult) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.lease != nil && t.lease.closed.Load() {
+		return errors.New("QMI transport lease is closed")
+	}
 	if t.readErr != nil {
 		return t.readErr
 	}
@@ -183,24 +415,33 @@ func (t *Transport) addPending(key messageKey, ch chan responseResult) error {
 		return errors.New("QMI request is already pending")
 	}
 	t.pending[key] = ch
+	t.pendingOwners[key] = t.lease
 	return nil
 }
 
 func (t *Transport) removePending(key messageKey) {
 	t.mu.Lock()
 	delete(t.pending, key)
+	delete(t.pendingOwners, key)
+	t.mu.Unlock()
+}
+
+func (t *Transport) removeFinishedSubscription(id uint64, sub *subscription) {
+	<-sub.done
+	t.mu.Lock()
+	if t.subs[id] == sub {
+		delete(t.subs, id)
+	}
 	t.mu.Unlock()
 }
 
 func (t *Transport) removeSubscription(id uint64) {
 	t.mu.Lock()
-	sub, ok := t.subs[id]
-	if ok {
-		delete(t.subs, id)
-	}
+	sub := t.subs[id]
+	delete(t.subs, id)
 	t.mu.Unlock()
-	if ok {
-		close(sub.ch)
+	if sub != nil {
+		sub.stop()
 	}
 }
 
@@ -212,24 +453,18 @@ func (t *Transport) startReader() {
 
 func (t *Transport) readLoop() {
 	for {
-		frame, err := ReadFrame(t.conn)
-		if err != nil {
-			t.fail(fmt.Errorf("reading QMI message: %w", err))
-			return
-		}
-
 		var wire Response
-		if err := wire.UnmarshalBinary(frame); err != nil {
+		if _, err := wire.ReadFrom(t.conn); err != nil {
 			if errors.Is(err, errUnexpectedServiceMessageType) {
 				continue
 			}
-			t.fail(fmt.Errorf("parsing QMI frame: %w", err))
+			t.fail(fmt.Errorf("reading QMI message: %w", err))
 			return
 		}
-		switch wire.MessageType {
-		case qcom.MessageTypeResponse, 0x01:
+		switch {
+		case wire.isResponse():
 			t.deliverResponse(wire.qcomResponse())
-		case qcom.MessageTypeIndication:
+		case wire.isIndication():
 			t.deliverIndication(wire.qcomIndication())
 		}
 	}
@@ -250,6 +485,7 @@ func (t *Transport) deliverResponse(resp qcom.Response) {
 	ch, ok := t.pending[key]
 	if ok {
 		delete(t.pending, key)
+		delete(t.pendingOwners, key)
 	}
 	t.mu.Unlock()
 	if ok {
@@ -259,19 +495,16 @@ func (t *Transport) deliverResponse(resp qcom.Response) {
 
 func (t *Transport) deliverIndication(ind qcom.Indication) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
+	subs := make([]*subscription, 0, len(t.subs))
 	for _, sub := range t.subs {
 		if sub.service == ind.Service && sub.client == ind.ClientID && sub.message == ind.MessageID {
-			trySendIndication(sub.ch, ind)
+			subs = append(subs, sub)
 		}
 	}
-}
+	t.mu.Unlock()
 
-func trySendIndication(ch chan qcom.Indication, ind qcom.Indication) {
-	select {
-	case ch <- ind:
-	default:
+	for _, sub := range subs {
+		sub.enqueue(ind)
 	}
 }
 
@@ -285,15 +518,16 @@ func (t *Transport) fail(err error) {
 	t.readErr = err
 	pending := t.pending
 	t.pending = make(map[messageKey]chan responseResult)
+	t.pendingOwners = make(map[messageKey]*transportLease)
 	subs := t.subs
-	t.subs = make(map[uint64]subscription)
+	t.subs = make(map[uint64]*subscription)
 	t.mu.Unlock()
 
 	for _, ch := range pending {
 		ch <- responseResult{err: err}
 	}
 	for _, sub := range subs {
-		close(sub.ch)
+		sub.stop()
 	}
 }
 
@@ -347,7 +581,7 @@ func marshalRequest(req qcom.Request) ([]byte, error) {
 		IfType:       qcom.QMUXIfType,
 		Length:       uint16(sdu.Len() + 5),
 		ControlFlags: qcom.QMUXControlFlagRequest,
-		ServiceType:  req.Service,
+		ServiceType:  uint8(req.Service),
 		ClientID:     req.ClientID,
 	}); err != nil {
 		return nil, fmt.Errorf("write QMUX header: %w", err)
@@ -359,6 +593,9 @@ func marshalRequest(req qcom.Request) ([]byte, error) {
 }
 
 func validateRequest(req qcom.Request) error {
+	if req.Service > 0xFF {
+		return fmt.Errorf("QMUX service ID 0x%X exceeds 8-bit wire limit", req.Service)
+	}
 	if req.Service == qcom.ServiceControl && req.ClientID != 0 {
 		return fmt.Errorf("QMI control client ID %d is not zero", req.ClientID)
 	}

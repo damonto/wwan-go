@@ -99,6 +99,29 @@ func TestClientSlotPrimitives(t *testing.T) {
 	}
 }
 
+func TestUIMStatusEnumValues(t *testing.T) {
+	tests := []struct {
+		name string
+		got  uint8
+		want uint8
+	}{
+		{name: "card null bytes", got: uint8(CardErrorNullBytes), want: 8},
+		{name: "card SAP connected", got: uint8(CardErrorSAPConnected), want: 9},
+		{name: "card command timeout", got: uint8(CardErrorCommandTimeout), want: 10},
+		{name: "personalization unknown", got: uint8(PersonalizationFeatureUnknown), want: 11},
+		{name: "personalization service provider name", got: uint8(PersonalizationFeatureGWServiceProviderName), want: 12},
+		{name: "personalization carrier", got: uint8(PersonalizationFeatureGWCarrier), want: 17},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("enum value = %d, want %d", tt.got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDecodeSlotStatusPhysicalSlotInformation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -176,15 +199,16 @@ func TestDecodeSlotStatusPhysicalSlotInformation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := decodeSlotStatus(Response{TLVs: tt.tlvs})
+			var got SlotStatus
+			err := got.UnmarshalTLVs(tt.tlvs)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatal("decodeSlotStatus() error = nil, want error")
+					t.Fatal("UnmarshalTLVs() error = nil, want error")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("decodeSlotStatus() error = %v", err)
+				t.Fatalf("UnmarshalTLVs() error = %v", err)
 			}
 			tt.check(t, got)
 		})

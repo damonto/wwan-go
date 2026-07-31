@@ -51,7 +51,11 @@ func (c *CAT) ServiceState(ctx context.Context) (CATServiceState, error) {
 	if err := resultOK(resp); err != nil {
 		return CATServiceState{}, fmt.Errorf("reading QMI CAT service state: %w", err)
 	}
-	return decodeCATServiceState(resp.TLVs), nil
+	var state CATServiceState
+	if err := state.UnmarshalTLVs(resp.TLVs); err != nil {
+		return CATServiceState{}, fmt.Errorf("reading QMI CAT service state: %w", err)
+	}
+	return state, nil
 }
 
 func (c *CAT) ForceClaimEvents(ctx context.Context, config CATEventClaimConfig) (CATEventClaim, error) {
@@ -74,7 +78,7 @@ func (c *CAT) ForceClaimEvents(ctx context.Context, config CATEventClaimConfig) 
 	}
 	if !rawConflict {
 		_ = c.client.releaseCATClient(ctx, service, clientID)
-		return CATEventClaim{}, fmt.Errorf("claiming QMI CAT events: registration rejected without raw event conflict")
+		return CATEventClaim{}, errors.New("claiming QMI CAT events: registration rejected without raw event conflict")
 	}
 
 	state, err := c.ServiceState(ctx)
@@ -143,7 +147,11 @@ func (c *CAT) serviceStateForClient(ctx context.Context, service ServiceType, cl
 	if err := resultOK(resp); err != nil {
 		return CATServiceState{}, err
 	}
-	return decodeCATServiceState(resp.TLVs), nil
+	var state CATServiceState
+	if err := state.UnmarshalTLVs(resp.TLVs); err != nil {
+		return CATServiceState{}, err
+	}
+	return state, nil
 }
 
 func (c *CAT) releaseServiceClientID(ctx context.Context, service ServiceType, clientID uint8) error {
@@ -181,20 +189,21 @@ func (c *CAT) trySetEventReport(ctx context.Context, service ServiceType, client
 	return true, false, nil
 }
 
-func decodeCATServiceState(tlvs tlv.TLVs) CATServiceState {
-	var state CATServiceState
+// UnmarshalTLVs parses a CAT Get Service State response.
+func (s *CATServiceState) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	*s = CATServiceState{}
 	if value, ok := tlv.Value(tlvs, 0x01); ok && len(value) >= 8 {
-		state.RawGlobalMask = binary.LittleEndian.Uint32(value[0:4])
-		state.RawClientMask = binary.LittleEndian.Uint32(value[4:8])
+		s.RawGlobalMask = binary.LittleEndian.Uint32(value[0:4])
+		s.RawClientMask = binary.LittleEndian.Uint32(value[4:8])
 	}
 	if value, ok := tlv.Value(tlvs, 0x10); ok && len(value) >= 8 {
-		state.DecodedGlobalMask = binary.LittleEndian.Uint32(value[0:4])
-		state.DecodedClientMask = binary.LittleEndian.Uint32(value[4:8])
+		s.DecodedGlobalMask = binary.LittleEndian.Uint32(value[0:4])
+		s.DecodedClientMask = binary.LittleEndian.Uint32(value[4:8])
 	}
 	if value, ok := tlv.Value(tlvs, 0x11); ok && len(value) >= 4 {
-		state.FullFunctionMask = binary.LittleEndian.Uint32(value[0:4])
+		s.FullFunctionMask = binary.LittleEndian.Uint32(value[0:4])
 	}
-	return state
+	return nil
 }
 
 func rawEventConflict(tlvs tlv.TLVs, rawMask uint32) (bool, error) {

@@ -38,6 +38,11 @@ func TestClientATR(t *testing.T) {
 			wantErr: "ATR length 3 exceeds remaining 1",
 		},
 		{
+			name:    "ATR trailing data",
+			resp:    successResponse(MessageGetATR, tlv.Bytes(0x10, []byte{0x01, 0x3B, 0x00})),
+			wantErr: "ATR has 1 trailing bytes",
+		},
+		{
 			name:    "QMI failure",
 			resp:    errorResponse(MessageGetATR, QMIErrorNotSupported),
 			wantErr: QMIErrorNotSupported.Error(),
@@ -115,6 +120,11 @@ func TestDecodeATR(t *testing.T) {
 			name:    "truncated value",
 			data:    []byte{0x02, 0x3B},
 			wantErr: "ATR length 2 exceeds remaining 1",
+		},
+		{
+			name:    "trailing data",
+			data:    []byte{0x01, 0x3B, 0x00},
+			wantErr: "ATR has 1 trailing bytes",
 		},
 	}
 

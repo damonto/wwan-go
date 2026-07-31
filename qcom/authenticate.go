@@ -46,7 +46,7 @@ func (r *AuthenticateRequest) UnmarshalBinary(data []byte) error {
 
 	body := data[3:]
 	if len(body) < 1 {
-		return fmt.Errorf("unmarshaling QMI UIM authenticate request: rand length is missing")
+		return errors.New("unmarshaling QMI UIM authenticate request: rand length is missing")
 	}
 	randLen := int(body[0])
 	body = body[1:]
@@ -85,9 +85,13 @@ func (c *Client) authenticateResponse(
 	if err != nil {
 		return Response{}, err
 	}
+	sessionValue, err := putSessionValue(req.Session, req.AID)
+	if err != nil {
+		return Response{}, fmt.Errorf("authenticating QMI UIM: %w", err)
+	}
 
 	resp, err := c.request(ctx, MessageAuthenticate, tlv.TLVs{
-		tlv.Bytes(0x01, putSessionValue(req.Session, req.AID)),
+		tlv.Bytes(0x01, sessionValue),
 		tlv.Bytes(0x02, value),
 	})
 	if err != nil {

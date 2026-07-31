@@ -14,6 +14,7 @@ func TestWDARequestEncoding(t *testing.T) {
 	qmap := WDAAggregationQMAP
 	disabled := WDAAggregationDisabled
 	flowControl := true
+	inBandFlowControl := false
 	padding := uint32(4)
 
 	tests := []struct {
@@ -78,6 +79,46 @@ func TestWDARequestEncoding(t *testing.T) {
 				wdaTLVSetFlowControl:      {1},
 			},
 		},
+		{
+			name: "get QMAP settings for endpoint",
+			req: WDAGetQMAPSettingsRequest{
+				ClientID:      7,
+				TransactionID: 12,
+				Endpoint: &DataEndpoint{
+					Type:        DataEndpointPCIe,
+					InterfaceID: 2,
+				},
+			}.Request(),
+			wantMessage: MessageWDAGetQMAPSettings,
+			wantTLVs: map[byte][]byte{
+				wdaTLVQMAPGetEndpoint: {0x03, 0, 0, 0, 2, 0, 0, 0},
+			},
+		},
+		{
+			name: "set QMAP flow control",
+			req: WDASetQMAPSettingsRequest{
+				ClientID:      7,
+				TransactionID: 13,
+				Config: WDAQMAPSettingsConfig{
+					InBandFlowControl: &inBandFlowControl,
+					DataFlowControl:   &flowControl,
+				},
+			}.Request(),
+			wantMessage: MessageWDASetQMAPSettings,
+			wantTLVs: map[byte][]byte{
+				wdaTLVQMAPInBandFlowControl: {0},
+				wdaTLVQMAPDataFlowControl:   {1},
+			},
+		},
+		{
+			name: "get Ethernet config",
+			req: WDAGetEthernetConfigRequest{
+				ClientID:      7,
+				TransactionID: 14,
+				Timeout:       3 * time.Second,
+			}.Request(),
+			wantMessage: MessageWDAGetEthernetConfig,
+		},
 	}
 
 	for _, tt := range tests {
@@ -104,6 +145,87 @@ func TestWDARequestEncoding(t *testing.T) {
 	}
 }
 
+func TestWDAEthernetConfigResponseUnmarshalTLVs(t *testing.T) {
+	tests := []struct {
+		name    string
+		tlvs    tlv.TLVs
+		want    WDAEthernetConfigResponse
+		wantErr bool
+	}{
+		{
+			name: "VLAN IP",
+			tlvs: tlv.TLVs{tlv.Uint(0x10, uint32(WDAEthernetHardwareVLANIP))},
+			want: WDAEthernetConfigResponse{Config: WDAEthernetHardwareVLANIP, ConfigKnown: true},
+		},
+		{name: "optional field absent"},
+		{name: "hardware config truncated", tlvs: tlv.TLVs{tlv.Bytes(0x10, []byte{1, 0, 0})}, wantErr: true},
+		{name: "hardware config trailing data", tlvs: tlv.TLVs{tlv.Bytes(0x10, []byte{1, 0, 0, 0, 0})}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got WDAEthernetConfigResponse
+			err := got.UnmarshalTLVs(tt.tlvs)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalTLVs() error = nil, want non-nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalTLVs() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("response = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWDAEthernetHardwareConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		resp    Response
+		want    WDAEthernetHardwareConfig
+		wantErr bool
+	}{
+		{
+			name: "non-VLAN IP",
+			resp: successResponse(MessageWDAGetEthernetConfig, tlv.Uint(0x10, uint32(WDAEthernetHardwareNonVLANIP))),
+			want: WDAEthernetHardwareNonVLANIP,
+		},
+		{name: "hardware config missing", resp: successResponse(MessageWDAGetEthernetConfig), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeTransport{t: t, calls: []transportCall{{
+				check: func(req Request) {
+					if req.Service != ServiceWDA || req.ClientID != 5 || req.MessageID != MessageWDAGetEthernetConfig {
+						t.Fatalf("request = service 0x%X client %d message 0x%04X", req.Service, req.ClientID, req.MessageID)
+					}
+				},
+				resp: tt.resp,
+			}}}
+			client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceWDA: 5}}
+
+			got, err := client.WDAEthernetHardwareConfig(context.Background())
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("WDAEthernetHardwareConfig() error = nil, want non-nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("WDAEthernetHardwareConfig() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("WDAEthernetHardwareConfig() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWDADataFormatResponseUnmarshalTLVs(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -116,8 +238,8 @@ func TestWDADataFormatResponseUnmarshalTLVs(t *testing.T) {
 			tlvs: tlv.TLVs{
 				tlv.Uint(wdaTLVQoSFormat, uint8(0)),
 				tlv.Uint(wdaTLVLinkProtocol, uint32(WDALinkLayerRawIP)),
-				tlv.Uint(wdaTLVUplinkAggregation, uint32(WDAAggregationQMAP)),
-				tlv.Uint(wdaTLVDownlinkAggregation, uint32(WDAAggregationQMAP)),
+				tlv.Uint(wdaTLVUplinkAggregation, uint32(WDAAggregationQMAPv5)),
+				tlv.Uint(wdaTLVDownlinkAggregation, uint32(WDAAggregationQMAPv5)),
 				tlv.Uint(wdaTLVDownlinkMaxDatagrams, uint32(32)),
 				tlv.Uint(wdaTLVDownlinkMaxSize, uint32(32768)),
 				tlv.Uint(wdaTLVUplinkMaxDatagrams, uint32(16)),
@@ -130,7 +252,7 @@ func TestWDADataFormatResponseUnmarshalTLVs(t *testing.T) {
 				if !got.LinkLayerProtocolKnown || got.LinkLayerProtocol != WDALinkLayerRawIP {
 					t.Fatalf("LinkLayerProtocol = %d, known %v", got.LinkLayerProtocol, got.LinkLayerProtocolKnown)
 				}
-				if !got.UplinkAggregationKnown || got.UplinkAggregation != WDAAggregationQMAP {
+				if !got.UplinkAggregationKnown || got.UplinkAggregation != WDAAggregationQMAPv5 {
 					t.Fatalf("UplinkAggregation = %d, known %v", got.UplinkAggregation, got.UplinkAggregationKnown)
 				}
 				if !got.DownlinkMaxSizeKnown || got.DownlinkMaxSize != 32768 {
@@ -162,6 +284,21 @@ func TestWDADataFormatResponseUnmarshalTLVs(t *testing.T) {
 			tlvs:    tlv.TLVs{tlv.Bytes(wdaTLVResponseFlowControl, nil)},
 			wantErr: true,
 		},
+		{
+			name:    "QoS format trailing byte",
+			tlvs:    tlv.TLVs{tlv.Bytes(wdaTLVQoSFormat, []byte{1, 0})},
+			wantErr: true,
+		},
+		{
+			name:    "uint32 trailing byte",
+			tlvs:    tlv.TLVs{tlv.Bytes(wdaTLVLinkProtocol, make([]byte, 5))},
+			wantErr: true,
+		},
+		{
+			name:    "flow control trailing byte",
+			tlvs:    tlv.TLVs{tlv.Bytes(wdaTLVResponseFlowControl, []byte{1, 0})},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -178,6 +315,50 @@ func TestWDADataFormatResponseUnmarshalTLVs(t *testing.T) {
 				t.Fatalf("UnmarshalTLVs() error = %v", err)
 			}
 			tt.check(t, response.Format)
+		})
+	}
+}
+
+func TestWDAQMAPSettingsResponseUnmarshalTLVs(t *testing.T) {
+	tests := []struct {
+		name    string
+		tlvs    tlv.TLVs
+		want    WDAQMAPSettings
+		wantErr bool
+	}{
+		{
+			name: "both settings",
+			tlvs: tlv.TLVs{
+				tlv.Uint(wdaTLVQMAPInBandFlowControl, uint8(0)),
+				tlv.Uint(wdaTLVQMAPResponseDataFlow, uint8(1)),
+			},
+			want: WDAQMAPSettings{
+				InBandFlowControlKnown: true,
+				DataFlowControl:        true,
+				DataFlowControlKnown:   true,
+			},
+		},
+		{name: "optional fields absent"},
+		{name: "truncated in-band", tlvs: tlv.TLVs{tlv.Bytes(wdaTLVQMAPInBandFlowControl, nil)}, wantErr: true},
+		{name: "truncated data flow", tlvs: tlv.TLVs{tlv.Bytes(wdaTLVQMAPResponseDataFlow, nil)}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var response WDAQMAPSettingsResponse
+			err := response.UnmarshalTLVs(tt.tlvs)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalTLVs() error = nil, want non-nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalTLVs() error = %v", err)
+			}
+			if response.Settings != tt.want {
+				t.Fatalf("Settings = %+v, want %+v", response.Settings, tt.want)
+			}
 		})
 	}
 }

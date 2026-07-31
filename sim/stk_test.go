@@ -345,6 +345,38 @@ func TestSTKRunCancelsTransportContextOnHandleError(t *testing.T) {
 	}
 }
 
+func TestSTKRunReturnsTransportStreamError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "MBIM watch failure", err: errors.New("modem disconnected")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &cancelAwareSTKTransport{
+				command:  STKSession{Err: tt.err},
+				canceled: make(chan struct{}),
+			}
+			stk, err := newSTK(transport)
+			if err != nil {
+				t.Fatalf("newSTK() error = %v", err)
+			}
+
+			err = stk.Run(context.Background(), STKCallbacks{})
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("Run() error = %v, want %v", err, tt.err)
+			}
+			select {
+			case <-transport.canceled:
+			case <-time.After(time.Second):
+				t.Fatal("transport command context was not canceled")
+			}
+		})
+	}
+}
+
 func TestQCOMEventConfirmation(t *testing.T) {
 	yes := true
 	no := false

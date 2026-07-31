@@ -57,8 +57,8 @@ func (c *Client) PowerOnSIM(ctx context.Context, req PowerOnSIMRequest) error {
 }
 
 func (c *Client) ChangeProvisioningSession(ctx context.Context, req ChangeProvisioningSessionRequest) error {
-	if len(req.AID) > 0xff {
-		return fmt.Errorf("changing QMI UIM provisioning session: AID length %d exceeds 255", len(req.AID))
+	if err := validateUIMAIDLength(req.AID); err != nil {
+		return fmt.Errorf("changing QMI UIM provisioning session: %w", err)
 	}
 
 	activate := uint8(0)

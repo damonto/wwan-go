@@ -275,6 +275,54 @@ func TestCATSetConfiguration(t *testing.T) {
 	}
 }
 
+func TestCATSetConfigurationProfileLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		length  int
+		wantErr bool
+	}{
+		{
+			name:   "maximum profile",
+			length: catTerminalProfileMaxLength,
+		},
+		{
+			name:    "profile too long",
+			length:  catTerminalProfileMaxLength + 1,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeTransport{t: t}
+			if !tt.wantErr {
+				transport.calls = []transportCall{{resp: successResponse(MessageCATSetConfiguration)}}
+			}
+			client := &Client{
+				transport:  transport,
+				slot:       1,
+				catService: ServiceCAT2,
+				clientIDs:  map[ServiceType]uint8{ServiceCAT2: 7},
+			}
+
+			err := NewCAT(client).SetConfiguration(context.Background(), CATConfiguration{
+				Mode:          CATConfigCustomRaw,
+				CustomProfile: bytes.Repeat([]byte{0xFF}, tt.length),
+			})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("SetConfiguration() error = %v, wantErr %t", err, tt.wantErr)
+			}
+			wantCalls := 1
+			if tt.wantErr {
+				wantCalls = 0
+			}
+			if got := transport.callCount(); got != wantCalls {
+				t.Fatalf("Do() calls = %d, want %d", got, wantCalls)
+			}
+		})
+	}
+}
+
 func TestCATEnvelope(t *testing.T) {
 	envelope := []byte{0xD3, 0x07, 0x82, 0x02, 0x01, 0x81, 0x90, 0x01, 0x02}
 	reader := &Client{
@@ -333,6 +381,51 @@ func TestCATTerminalProfile(t *testing.T) {
 	}
 	if !bytes.Equal(got, []byte{0xAA, 0x55}) {
 		t.Fatalf("TerminalProfile() = % X, want AA 55", got)
+	}
+}
+
+func TestCATTerminalProfileRejectsMalformedTLV(t *testing.T) {
+	tests := []struct {
+		name  string
+		value []byte
+	}{
+		{name: "truncated data", value: []byte{2, 0xAA}},
+		{name: "trailing data", value: []byte{1, 0xAA, 0x00}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &Client{
+				transport: &fakeTransport{t: t, calls: []transportCall{{
+					resp: successResponse(MessageCATGetTerminalProfile, tlv.Bytes(0x10, tt.value)),
+				}}},
+				slot:       1,
+				catService: ServiceCAT2,
+				clientIDs:  map[ServiceType]uint8{ServiceCAT2: 7},
+			}
+			if _, err := NewCAT(reader).TerminalProfile(context.Background()); err == nil {
+				t.Fatal("TerminalProfile() error = nil, want non-nil")
+			}
+		})
+	}
+}
+
+func TestEventReportErrorMaskRejectsMalformedTLV(t *testing.T) {
+	tests := []struct {
+		name  string
+		value []byte
+	}{
+		{name: "truncated", value: make([]byte, 3)},
+		{name: "trailing byte", value: make([]byte, 5)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := eventReportErrorMask(tlv.TLVs{tlv.Bytes(0x10, tt.value)}, 0x10)
+			if err == nil {
+				t.Fatal("eventReportErrorMask() error = nil, want non-nil")
+			}
+		})
 	}
 }
 
@@ -467,10 +560,11 @@ func TestCATCommandsRejectsRegistrationErrorMask(t *testing.T) {
 }
 
 func TestDecodeCATCommandIgnoresGobiSetupEventListIndication(t *testing.T) {
-	_, err := decodeCATCommand(tlv.TLVs{
+	var command CATCommand
+	err := command.UnmarshalTLVs(tlv.TLVs{
 		tlv.Uint(0x16, uint32(0x0F)),
 	})
 	if err == nil {
-		t.Fatal("decodeCATCommand() error = nil, want non-nil")
+		t.Fatal("CATCommand.UnmarshalTLVs() error = nil, want non-nil")
 	}
 }

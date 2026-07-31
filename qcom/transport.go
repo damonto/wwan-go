@@ -64,6 +64,10 @@ func (c *Client) serviceClientID(ctx context.Context, service ServiceType) (uint
 }
 
 func (c *Client) serviceClientIDLocked(ctx context.Context, service ServiceType) (uint8, error) {
+	if transport, ok := c.transport.(transportClientIDProvider); ok {
+		return transport.ClientID(ctx, service)
+	}
+
 	boundService, serviceBound := boundQMIService(c.transport)
 	if serviceBound {
 		if boundService != service {
@@ -90,7 +94,7 @@ func (c *Client) serviceClientIDLocked(ctx context.Context, service ServiceType)
 func (c *Client) forgetServiceClientID(service ServiceType, clientID uint8) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, serviceBound := boundQMIService(c.transport); serviceBound {
+	if transportManagesClientIDs(c.transport) {
 		return false
 	}
 	if c.clientIDs[service] == clientID {
@@ -112,9 +116,29 @@ func (c *Client) allocateServiceClientID(ctx context.Context, service ServiceTyp
 	return c.allocateServiceClientIDLocked(ctx, service)
 }
 
+// sessionServiceClientID returns a service endpoint suitable for a stateful
+// session. QMUX sessions receive a dedicated CID that the session must
+// release; QRTR sessions are identified by their service socket instead.
+func (c *Client) sessionServiceClientID(ctx context.Context, service ServiceType) (uint8, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.transport == nil {
+		return 0, false, errClientClosed
+	}
+	if transportManagesClientIDs(c.transport) {
+		clientID, err := c.serviceClientIDLocked(ctx, service)
+		return clientID, false, err
+	}
+	clientID, err := c.allocateServiceClientIDLocked(ctx, service)
+	return clientID, err == nil, err
+}
+
 func (c *Client) allocateServiceClientIDLocked(ctx context.Context, service ServiceType) (uint8, error) {
+	if service > 0xff {
+		return 0, fmt.Errorf("allocating QMI client ID: service 0x%X exceeds QMUX 8-bit limit", service)
+	}
 	resp, err := c.sendRequest(ctx, ServiceControl, 0, MessageAllocateClientID, tlv.TLVs{
-		tlv.Uint(0x01, service),
+		tlv.Uint(0x01, uint8(service)),
 	}, DefaultRequestTimeout)
 	if err != nil {
 		return 0, err
@@ -124,8 +148,11 @@ func (c *Client) allocateServiceClientIDLocked(ctx context.Context, service Serv
 	}
 
 	value, ok := tlv.Value(resp.TLVs, 0x01)
-	if !ok || len(value) < 2 {
+	if !ok {
 		return 0, errors.New("allocating QMI client ID: allocated client TLV missing")
+	}
+	if len(value) != 2 {
+		return 0, fmt.Errorf("allocating QMI client ID: allocated client TLV length %d, want 2", len(value))
 	}
 	return value[1], nil
 }
@@ -140,6 +167,9 @@ func (c *Client) releaseServiceClientID(ctx context.Context, service ServiceType
 }
 
 func (c *Client) releaseServiceClientIDLocked(ctx context.Context, service ServiceType, clientID uint8) error {
+	if service > 0xff {
+		return fmt.Errorf("releasing QMI client ID: service 0x%X exceeds QMUX 8-bit limit", service)
+	}
 	resp, err := c.sendRequest(ctx, ServiceControl, 0, MessageReleaseClientID, tlv.TLVs{
 		tlv.Bytes(0x01, []byte{byte(service), clientID}),
 	}, DefaultRequestTimeout)

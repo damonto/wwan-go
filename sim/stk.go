@@ -3,6 +3,7 @@ package sim
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/damonto/wwan-go/sim/stk"
@@ -11,6 +12,7 @@ import (
 type STKSession struct {
 	Ref     uint32
 	Command stk.Command
+	Err     error
 }
 
 type STKCallback[T stk.Command] func(context.Context, T) (stk.TerminalResponse, error)
@@ -99,6 +101,9 @@ func (s *STK) Run(ctx context.Context, callbacks STKCallbacks) error {
 		case session, ok := <-commands:
 			if !ok {
 				return nil
+			}
+			if session.Err != nil {
+				return fmt.Errorf("watching STK commands: %w", session.Err)
 			}
 			if err := s.Handle(runCtx, session, callbacks); err != nil {
 				return err

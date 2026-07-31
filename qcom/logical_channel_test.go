@@ -93,6 +93,148 @@ func TestClientLogicalChannelPrimitives(t *testing.T) {
 	}
 }
 
+func TestOpenLogicalChannelOmitsEmptyAID(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "open master file"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeTransport{t: t, calls: []transportCall{{
+				check: func(req Request) {
+					if _, ok := tlv.Value(req.TLVs, 0x10); ok {
+						t.Fatal("OpenLogicalChannelWithConfig() includes an empty AID TLV")
+					}
+					assertTLV(t, req.TLVs, 0x01, []byte{1})
+				},
+				resp: successResponse(MessageOpenLogicalChannel, tlv.Bytes(0x10, []byte{1})),
+			}}}
+			client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceUIM: 7}}
+
+			response, err := client.OpenLogicalChannelWithConfig(context.Background(), UIMOpenLogicalChannelConfig{})
+			if err != nil {
+				t.Fatalf("OpenLogicalChannelWithConfig() error = %v", err)
+			}
+			if response.Channel != 1 {
+				t.Fatalf("OpenLogicalChannelWithConfig().Channel = %d, want 1", response.Channel)
+			}
+		})
+	}
+}
+
+func TestUIMLogicalChannelOptions(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "select response and procedure bytes"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fci := UIMFileControlFCI
+			procedureBytes := UIMAPDUSkipProcedureBytes
+			transport := &fakeTransport{t: t, calls: []transportCall{
+				{
+					check: func(req Request) {
+						assertTLV(t, req.TLVs, 0x11, []byte{byte(UIMFileControlFCI)})
+					},
+					resp: successResponse(
+						MessageOpenLogicalChannel,
+						tlv.Bytes(0x10, []byte{3}),
+						tlv.Bytes(0x11, []byte{0x90, 0x00}),
+						tlv.Bytes(0x12, []byte{2, 0x62, 0x00}),
+					),
+				},
+				{
+					check: func(req Request) {
+						assertTLV(t, req.TLVs, 0x11, []byte{byte(UIMAPDUSkipProcedureBytes)})
+					},
+					resp: successResponse(MessageSendAPDU, tlv.Bytes(0x10, encodeLengthPrefixed([]byte{0x90, 0x00}))),
+				},
+			}}
+			client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceUIM: 7}}
+
+			opened, err := client.OpenLogicalChannelWithConfig(context.Background(), UIMOpenLogicalChannelConfig{
+				AID:                    []byte{0xA0, 0x00},
+				FileControlInformation: &fci,
+			})
+			if err != nil {
+				t.Fatalf("OpenLogicalChannelWithConfig() error = %v", err)
+			}
+			if opened.Channel != 3 || !bytes.Equal(opened.SelectResponse, []byte{0x62, 0x00}) {
+				t.Fatalf("OpenLogicalChannelWithConfig() = %+v", opened)
+			}
+
+			response, err := client.SendAPDUWithOptions(context.Background(), UIMAPDURequest{
+				Channel:        opened.Channel,
+				Command:        []byte{0x00, 0xA4},
+				ProcedureBytes: &procedureBytes,
+			})
+			if err != nil {
+				t.Fatalf("SendAPDUWithOptions() error = %v", err)
+			}
+			if !bytes.Equal(response, []byte{0x90, 0x00}) {
+				t.Fatalf("SendAPDUWithOptions() = % X", response)
+			}
+		})
+	}
+}
+
+func TestOpenLogicalChannelSelectResponse(t *testing.T) {
+	longResponse := bytes.Repeat([]byte{0x62}, maxLogicalChannelSelectResponseLength)
+	tests := []struct {
+		name    string
+		tlvs    tlv.TLVs
+		want    []byte
+		wantErr string
+	}{
+		{
+			name: "long select response",
+			tlvs: tlv.TLVs{tlv.Bytes(0x13, encodeLengthPrefixed(longResponse))},
+			want: longResponse,
+		},
+		{
+			name: "short response takes precedence",
+			tlvs: tlv.TLVs{
+				tlv.Bytes(0x12, []byte{2, 0x90, 0x00}),
+				tlv.Bytes(0x13, encodeLengthPrefixed([]byte{0x62, 0x00})),
+			},
+			want: []byte{0x90, 0x00},
+		},
+		{
+			name:    "long select response too large",
+			tlvs:    tlv.TLVs{tlv.Bytes(0x13, encodeLengthPrefixed(bytes.Repeat([]byte{0x62}, maxLogicalChannelSelectResponseLength+1)))},
+			wantErr: "exceeds",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			responseTLVs := append(tlv.TLVs{tlv.Bytes(0x10, []byte{3})}, tt.tlvs...)
+			transport := &fakeTransport{t: t, calls: []transportCall{{
+				resp: successResponse(MessageOpenLogicalChannel, responseTLVs...),
+			}}}
+			client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceUIM: 7}}
+
+			got, err := client.OpenLogicalChannelWithConfig(context.Background(), UIMOpenLogicalChannelConfig{})
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("OpenLogicalChannelWithConfig() error = %v, want text %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("OpenLogicalChannelWithConfig() error = %v", err)
+			}
+			if !bytes.Equal(got.SelectResponse, tt.want) {
+				t.Fatalf("SelectResponse = % X, want % X", got.SelectResponse, tt.want)
+			}
+		})
+	}
+}
+
 func TestSendAPDURejectsLongResponse(t *testing.T) {
 	reader := &Client{
 		transport: &fakeTransport{
@@ -177,6 +319,11 @@ func TestOpenLogicalChannelRequestUnmarshalBinary(t *testing.T) {
 			data:    []byte{0x02, 0xA0},
 			wantErr: "does not match",
 		},
+		{
+			name:    "aid too long",
+			data:    append([]byte{maxLogicalChannelAIDLength + 1}, bytes.Repeat([]byte{0xA0}, maxLogicalChannelAIDLength+1)...),
+			wantErr: "exceeds",
+		},
 	}
 
 	for _, tt := range tests {
@@ -230,7 +377,15 @@ func TestLogicalChannelResponsesUnmarshalBinary(t *testing.T) {
 				var resp OpenLogicalChannelResponse
 				return resp.UnmarshalBinary(nil)
 			},
-			wantErr: "missing",
+			wantErr: "want 1",
+		},
+		{
+			name: "open channel trailing data",
+			run: func() error {
+				var resp OpenLogicalChannelResponse
+				return resp.UnmarshalBinary([]byte{3, 4})
+			},
+			wantErr: "want 1",
 		},
 		{
 			name: "close channel response",
@@ -266,7 +421,23 @@ func TestLogicalChannelResponsesUnmarshalBinary(t *testing.T) {
 				var resp SendAPDUResponse
 				return resp.UnmarshalBinary([]byte{0x02, 0x00, 0x90})
 			},
-			wantErr: "truncated",
+			wantErr: "value length",
+		},
+		{
+			name: "send APDU response trailing data",
+			run: func() error {
+				var resp SendAPDUResponse
+				return resp.UnmarshalBinary([]byte{1, 0, 0x90, 0x00})
+			},
+			wantErr: "value length",
+		},
+		{
+			name: "send APDU response too long",
+			run: func() error {
+				var resp SendAPDUResponse
+				return resp.UnmarshalBinary(encodeLengthPrefixed(bytes.Repeat([]byte{0x90}, maxAPDUDataLength+1)))
+			},
+			wantErr: "exceeds",
 		},
 	}
 
@@ -317,8 +488,13 @@ func TestSendAPDURequestBinary(t *testing.T) {
 			want: []byte{0x02, 0x00, 0x00, 0xA4},
 		},
 		{
+			name: "maximum command",
+			req:  SendAPDURequest{Command: bytes.Repeat([]byte{0x00}, maxAPDUDataLength)},
+			want: encodeLengthPrefixed(bytes.Repeat([]byte{0x00}, maxAPDUDataLength)),
+		},
+		{
 			name:    "command too long",
-			req:     SendAPDURequest{Command: bytes.Repeat([]byte{0x00}, maxSendAPDUCommandLength+1)},
+			req:     SendAPDURequest{Command: bytes.Repeat([]byte{0x00}, maxAPDUDataLength+1)},
 			wantErr: "exceeds",
 		},
 	}
@@ -345,6 +521,27 @@ func TestSendAPDURequestBinary(t *testing.T) {
 			}
 			if !bytes.Equal(req.Command, tt.req.Command) {
 				t.Fatalf("UnmarshalBinary() = % X, want % X", req.Command, tt.req.Command)
+			}
+		})
+	}
+}
+
+func TestSendAPDURequestUnmarshalRejectsLongCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{
+			name: "above normal APDU block limit",
+			data: encodeLengthPrefixed(bytes.Repeat([]byte{0x00}, maxAPDUDataLength+1)),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var req SendAPDURequest
+			if err := req.UnmarshalBinary(tt.data); err == nil || !strings.Contains(err.Error(), "exceeds") {
+				t.Fatalf("UnmarshalBinary() error = %v, want APDU length error", err)
 			}
 		})
 	}

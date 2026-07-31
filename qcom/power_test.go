@@ -140,10 +140,10 @@ func TestClientPowerPrimitives(t *testing.T) {
 					Session:  SessionPrimaryGWProvisioning,
 					Activate: true,
 					Slot:     2,
-					AID:      bytes.Repeat([]byte{0xA0}, 256),
+					AID:      bytes.Repeat([]byte{0xA0}, uimAIDMaxLength+1),
 				})
 			},
-			wantErr: "AID length 256 exceeds 255",
+			wantErr: "AID length 33 exceeds 32",
 		},
 	}
 

@@ -43,7 +43,11 @@ func (c *Client) SlotStatus(ctx context.Context) (SlotStatus, error) {
 	if err := resultOK(resp); err != nil {
 		return SlotStatus{}, err
 	}
-	return decodeSlotStatus(resp)
+	var status SlotStatus
+	if err := status.UnmarshalTLVs(resp.TLVs); err != nil {
+		return SlotStatus{}, err
+	}
+	return status, nil
 }
 
 func (c *Client) SwitchSlot(ctx context.Context, logicalSlot uint8, physicalSlot uint32) error {
@@ -94,7 +98,11 @@ func (c *Client) CardStatus(ctx context.Context) (CardStatus, error) {
 	if err := resultOK(resp); err != nil {
 		return CardStatus{}, err
 	}
-	return decodeCardStatus(resp)
+	var status CardStatus
+	if err := status.UnmarshalTLVs(resp.TLVs); err != nil {
+		return CardStatus{}, err
+	}
+	return status, nil
 }
 
 func (c *Client) Slot() uint8 {

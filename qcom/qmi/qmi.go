@@ -27,8 +27,22 @@ type Dialer interface {
 type Option func(*config)
 
 type config struct {
-	dialer Dialer
+	dialer       Dialer
+	autoDetect   bool
+	sharedDirect bool
+	device       string
 }
+
+// OpenError reports whether an open attempt had selected qmi-proxy before it
+// failed. Err remains available through errors.Is and errors.As.
+type OpenError struct {
+	Proxy bool
+	Err   error
+}
+
+func (e *OpenError) Error() string { return e.Err.Error() }
+
+func (e *OpenError) Unwrap() error { return e.Err }
 
 type ProxyDialer struct {
 	Address string
@@ -45,20 +59,40 @@ type deviceDialer interface {
 
 func WithDialer(d Dialer) Option {
 	return func(c *config) {
-		c.dialer = d
+		c.setDialer(d)
 	}
 }
 
 func WithProxy(device string) Option {
 	return func(c *config) {
-		c.dialer = ProxyDialer{Device: device}
+		c.setDialer(ProxyDialer{Device: device})
 	}
 }
 
 func WithDirect(device string) Option {
 	return func(c *config) {
-		c.dialer = DirectDialer{Device: device}
+		c.setDialer(DirectDialer{Device: device})
+		c.sharedDirect = true
 	}
+}
+
+// WithAutoDetect uses qmi-proxy when its socket is reachable and otherwise
+// opens device directly. A proxy connection that rejects device is not retried
+// using direct access.
+func WithAutoDetect(device string) Option {
+	return func(c *config) {
+		c.dialer = nil
+		c.autoDetect = true
+		c.sharedDirect = false
+		c.device = device
+	}
+}
+
+func (c *config) setDialer(d Dialer) {
+	c.dialer = d
+	c.autoDetect = false
+	c.sharedDirect = false
+	c.device = ""
 }
 
 func Open(ctx context.Context, opts ...Option) (*Transport, error) {
@@ -66,32 +100,105 @@ func Open(ctx context.Context, opts ...Option) (*Transport, error) {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	if cfg.dialer == nil {
-		return nil, errors.New("opening QMI transport: dialer is nil")
+	if cfg.autoDetect {
+		return openAuto(ctx, cfg.device)
 	}
-	proxy := dialerUsesProxy(cfg.dialer)
-	device := ""
-	if proxy {
-		device = proxyDevice(cfg)
-		if device == "" {
-			return nil, errors.New("opening QMI proxy: device is empty")
+	if direct, ok := cfg.dialer.(DirectDialer); cfg.sharedDirect && ok {
+		transport, err := directTransports.acquire(ctx, direct.Device, direct)
+		if err != nil {
+			return nil, &OpenError{Err: err}
 		}
+		return transport, nil
 	}
-
-	conn, err := cfg.dialer.Dial(ctx)
+	conn, proxy, device, err := dialConfigured(ctx, cfg)
 	if err != nil {
-		return nil, err
+		return nil, &OpenError{Proxy: proxy, Err: err}
 	}
 	transport := New(conn)
+	transport.proxy = proxy
 	if !proxy {
 		return transport, nil
 	}
 
 	if err := transport.openProxy(ctx, device); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("opening QMI proxy for %s: %w", device, err)
+		return nil, &OpenError{Proxy: true, Err: fmt.Errorf("opening QMI proxy for %s: %w", device, err)}
 	}
 	return transport, nil
+}
+
+func openAuto(ctx context.Context, device string) (*Transport, error) {
+	device = strings.TrimSpace(device)
+	if device == "" {
+		return nil, &OpenError{Err: errors.New("opening QMI transport: auto-detect device is empty")}
+	}
+
+	conn, err := (ProxyDialer{Device: device}).Dial(ctx)
+	if err == nil {
+		transport := New(conn)
+		transport.proxy = true
+		if err := transport.openProxy(ctx, device); err != nil {
+			_ = transport.Close()
+			return nil, &OpenError{Proxy: true, Err: fmt.Errorf("opening QMI proxy for %s: %w", device, err)}
+		}
+		return transport, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, &OpenError{Proxy: true, Err: ctxErr}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, &OpenError{Proxy: true, Err: err}
+	}
+
+	transport, err := directTransports.acquire(ctx, device, DirectDialer{Device: device})
+	if err != nil {
+		return nil, &OpenError{Err: err}
+	}
+	return transport, nil
+}
+
+func dialConfigured(ctx context.Context, cfg config) (Conn, bool, string, error) {
+	if cfg.autoDetect {
+		device := strings.TrimSpace(cfg.device)
+		if device == "" {
+			return nil, false, "", errors.New("opening QMI transport: auto-detect device is empty")
+		}
+		conn, proxy, err := dialAuto(
+			ctx,
+			ProxyDialer{Device: device},
+			DirectDialer{Device: device},
+		)
+		return conn, proxy, device, err
+	}
+	if cfg.dialer == nil {
+		return nil, false, "", errors.New("opening QMI transport: dialer is nil")
+	}
+
+	proxy := dialerUsesProxy(cfg.dialer)
+	device := ""
+	if proxy {
+		device = proxyDevice(cfg)
+		if device == "" {
+			return nil, true, "", errors.New("opening QMI proxy: device is empty")
+		}
+	}
+	conn, err := cfg.dialer.Dial(ctx)
+	return conn, proxy, device, err
+}
+
+func dialAuto(ctx context.Context, proxy, direct Dialer) (Conn, bool, error) {
+	conn, err := proxy.Dial(ctx)
+	if err == nil {
+		return conn, true, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, true, ctxErr
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, true, err
+	}
+	conn, err = direct.Dial(ctx)
+	return conn, false, err
 }
 
 func dialerUsesProxy(d Dialer) bool {

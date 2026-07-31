@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"slices"
 	"testing"
 	"time"
 
@@ -17,6 +18,16 @@ func TestMonitorTLVEncoding(t *testing.T) {
 		check   func(*testing.T, tlv.TLVs)
 		wantErr bool
 	}{
+		{
+			name: "card status register",
+			build: func() (tlv.TLVs, error) {
+				return registerEventsTLVs(eventRegistrationCardStatus), nil
+			},
+			check: func(t *testing.T, tlvs tlv.TLVs) {
+				t.Helper()
+				assertTLV(t, tlvs, 0x01, binary.LittleEndian.AppendUint32(nil, eventRegistrationCardStatus))
+			},
+		},
 		{
 			name: "slot register",
 			build: func() (tlv.TLVs, error) {
@@ -82,13 +93,40 @@ func TestMonitorTLVEncoding(t *testing.T) {
 		{
 			name: "refresh complete",
 			build: func() (tlv.TLVs, error) {
-				return refreshCompleteTLVs(SessionCardSlot1, []byte{0xA0, 0x00}, true), nil
+				return refreshCompleteTLVs(SessionCardSlot1, []byte{0xA0, 0x00}, true)
 			},
 			check: func(t *testing.T, tlvs tlv.TLVs) {
 				t.Helper()
 				assertTLV(t, tlvs, 0x01, []byte{byte(SessionCardSlot1), 0x02, 0xA0, 0x00})
 				assertTLV(t, tlvs, 0x02, []byte{0x01})
 			},
+		},
+		{
+			name: "maximum refresh files",
+			build: func() (tlv.TLVs, error) {
+				return refreshRegisterTLVs(RefreshRegisterRequest{
+					Files: slices.Repeat([]RefreshFile{{Path: []byte{0x3F, 0x00, 0x2F, 0xE2}}}, uimRefreshFilesMax),
+				}, true)
+			},
+			check: func(t *testing.T, tlvs tlv.TLVs) {
+				t.Helper()
+				value, ok := tlv.Value(tlvs, 0x02)
+				if !ok || len(value) < 4 {
+					t.Fatalf("refresh register TLV = % X, present %t", value, ok)
+				}
+				if got := binary.LittleEndian.Uint16(value[2:4]); got != uimRefreshFilesMax {
+					t.Fatalf("refresh file count = %d, want %d", got, uimRefreshFilesMax)
+				}
+			},
+		},
+		{
+			name: "too many refresh files",
+			build: func() (tlv.TLVs, error) {
+				return refreshRegisterTLVs(RefreshRegisterRequest{
+					Files: slices.Repeat([]RefreshFile{{Path: []byte{0x3F, 0x00, 0x2F, 0xE2}}}, uimRefreshFilesMax+1),
+				}, true)
+			},
+			wantErr: true,
 		},
 		{
 			name: "reject odd path",
@@ -118,6 +156,67 @@ func TestMonitorTLVEncoding(t *testing.T) {
 	}
 }
 
+func TestWatchCardStatus(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "forwards ready card status"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			transport := &fakeIndicationTransport{
+				fakeTransport: fakeTransport{
+					t: t,
+					calls: []transportCall{
+						{
+							check: func(req Request) {
+								if req.MessageID != MessageRegisterEvents {
+									t.Fatalf("MessageID = 0x%04X, want register events", req.MessageID)
+								}
+								assertTLV(t, req.TLVs, 0x01, binary.LittleEndian.AppendUint32(nil, eventRegistrationCardStatus))
+							},
+							resp: successResponse(MessageRegisterEvents),
+						},
+						{
+							check: func(req Request) {
+								assertTLV(t, req.TLVs, 0x01, []byte{0, 0, 0, 0})
+							},
+							resp: successResponse(MessageRegisterEvents),
+						},
+					},
+				},
+			}
+			client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceUIM: 7}}
+
+			statuses, err := client.WatchCardStatus(ctx)
+			if err != nil {
+				t.Fatalf("WatchCardStatus() error = %v", err)
+			}
+			transport.emit(Indication{
+				Service:   ServiceUIM,
+				ClientID:  7,
+				MessageID: MessageCardStatus,
+				TLVs:      tlv.TLVs{tlv.Bytes(0x10, encodeCardStatus(true))},
+			})
+
+			select {
+			case status := <-statuses:
+				if !status.Ready() {
+					t.Fatalf("card status = %+v, want ready USIM", status)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for card status")
+			}
+
+			cancel()
+			transport.waitCalls(t, 2)
+		})
+	}
+}
+
 func TestDecodeRefreshEvent(t *testing.T) {
 	eventValue := []byte{
 		byte(RefreshStageStart),
@@ -129,8 +228,8 @@ func TestDecodeRefreshEvent(t *testing.T) {
 		0x04, 0x00, 0x3F, 0xFF, 0x7F,
 	}
 
-	got, err := decodeRefreshEvent(tlv.TLVs{tlv.Bytes(0x10, eventValue)})
-	if err != nil {
+	var got RefreshEvent
+	if err := got.UnmarshalTLVs(tlv.TLVs{tlv.Bytes(0x10, eventValue)}); err != nil {
 		t.Fatalf("decodeRefreshEvent() error = %v", err)
 	}
 	if got.Stage != RefreshStageStart || got.Mode != RefreshModeFCN || got.Session != SessionCardSlot1 {
@@ -203,6 +302,55 @@ func TestWatchSlotStatus(t *testing.T) {
 
 	cancel()
 	transport.waitCalls(t, 2)
+}
+
+func TestUIMEventRegistrationReferences(t *testing.T) {
+	tests := []struct {
+		name string
+		mask uint32
+	}{
+		{name: "card status", mask: eventRegistrationCardStatus},
+		{name: "physical slot status", mask: eventRegistrationPhysicalSlotStatus},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeTransport{t: t, calls: []transportCall{
+				{
+					check: func(req Request) {
+						assertTLV(t, req.TLVs, 0x01, binary.LittleEndian.AppendUint32(nil, tt.mask))
+					},
+					resp: successResponse(MessageRegisterEvents),
+				},
+				{
+					check: func(req Request) {
+						assertTLV(t, req.TLVs, 0x01, []byte{0, 0, 0, 0})
+					},
+					resp: successResponse(MessageRegisterEvents),
+				},
+			}}
+			client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceUIM: 7}}
+
+			if err := client.acquireUIMEvents(context.Background(), tt.mask); err != nil {
+				t.Fatalf("first acquireUIMEvents() error = %v", err)
+			}
+			if err := client.acquireUIMEvents(context.Background(), tt.mask); err != nil {
+				t.Fatalf("second acquireUIMEvents() error = %v", err)
+			}
+			if got := transport.callCount(); got != 1 {
+				t.Fatalf("Do() calls after two acquires = %d, want 1", got)
+			}
+
+			client.releaseUIMEvents(tt.mask)
+			if got := transport.callCount(); got != 1 {
+				t.Fatalf("Do() calls after first release = %d, want 1", got)
+			}
+			client.releaseUIMEvents(tt.mask)
+			if got := transport.callCount(); got != 2 {
+				t.Fatalf("Do() calls after final release = %d, want 2", got)
+			}
+		})
+	}
 }
 
 func TestWatchRefreshFilesCompletesStartEvent(t *testing.T) {

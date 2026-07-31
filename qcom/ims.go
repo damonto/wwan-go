@@ -17,8 +17,12 @@ const DefaultIMSPDNAPN = "ims"
 // PDNConfig describes a general QMI WDS packet-data call.
 type PDNConfig struct {
 	APN               string
+	Authentication    WDSAuthenticationMask
+	Username          string
+	Password          string
 	IPPreference      WDSIPPreference
 	ProfileIndex      uint8
+	Subscription      *WDSSubscription
 	RequestTimeout    time.Duration
 	MuxDataPort       *WDSMuxDataPort
 	LegacyMuxDataPort WDSSIOPort
@@ -64,17 +68,26 @@ type pdnOpenConfig struct {
 	requestedSettings WDSRuntimeSettingsMask
 }
 
-// PDNSession owns a WDS packet-data handle and its QMI client ID.
+// PDNSession owns a WDS packet-data handle and, on QMUX, its QMI client ID.
 type PDNSession struct {
+	mu      sync.RWMutex
 	client  *Client
 	info    PDNInfo
 	runtime WDSRuntimeSettings
 
-	timeout          time.Duration
-	closeOnce        sync.Once
-	closeErr         error
-	wdsClientID      uint8
-	packetDataHandle uint32
+	timeout           time.Duration
+	closeOnce         sync.Once
+	closeErr          error
+	wdsClientID       uint8
+	wdsClientReady    bool
+	releaseWDSClient  bool
+	packetDataHandle  uint32
+	requestedSettings WDSRuntimeSettingsMask
+	connectionStatus  WDSConnectionStatus
+
+	watchMu        sync.Mutex
+	statusWatchers int
+	done           chan struct{}
 }
 
 // IMSPDNSession owns an IMS PDN and the NAS client used for VoPS state.
@@ -82,9 +95,10 @@ type IMSPDNSession struct {
 	pdn  *PDNSession
 	info IMSPDNInfo
 
-	closeOnce   sync.Once
-	closeErr    error
-	nasClientID uint8
+	closeOnce        sync.Once
+	closeErr         error
+	nasClientID      uint8
+	releaseNASClient bool
 }
 
 // OpenPDN starts a general QMI WDS packet-data call. It does not allocate a NAS
@@ -147,20 +161,25 @@ func (c *Client) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSessi
 	}
 
 	session := &IMSPDNSession{pdn: pdn}
-	nasClientID, err := c.allocateServiceClientID(ctx, ServiceNAS)
+	nasClientID, releaseNASClient, err := c.sessionServiceClientID(ctx, ServiceNAS)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("opening IMS PDN: allocate NAS client: %w", err), pdn.Close())
+		return nil, errors.Join(fmt.Errorf("opening IMS PDN: open NAS client: %w", err), pdn.Close())
 	}
 	session.nasClientID = nasClientID
+	session.releaseNASClient = releaseNASClient
 
 	sys, err := session.nasSysInfo(ctx)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("opening IMS PDN: read NAS system info: %w", err), session.Close())
 	}
+	pdn.mu.RLock()
+	pcscfIPs := cloneIPs(pdn.runtime.PCSCFIPs)
+	imcn := pdn.runtime.IMCN
+	pdn.mu.RUnlock()
 	session.info = IMSPDNInfo{
 		PDNInfo:       pdn.Info(),
-		PCSCFIPs:      cloneIPs(pdn.runtime.PCSCFIPs),
-		IMCN:          pdn.runtime.IMCN,
+		PCSCFIPs:      pcscfIPs,
+		IMCN:          imcn,
 		VoPSKnown:     sys.VoPSKnown,
 		VoPSSupported: sys.VoPSSupported,
 	}
@@ -188,18 +207,43 @@ func (c *Client) openPDN(ctx context.Context, cfg pdnOpenConfig) (*PDNSession, e
 	if err := validateWDSIPPreference(cfg.IPPreference); err != nil {
 		return nil, err
 	}
+	if cfg.Subscription != nil {
+		if err := validateWDSSubscription(*cfg.Subscription); err != nil {
+			return nil, err
+		}
+	}
 	cfg.APN = strings.TrimSpace(cfg.APN)
+	if err := validateWDSString(cfg.APN, wdsAPNMaxLength); err != nil {
+		return nil, fmt.Errorf("validating WDS APN: %w", err)
+	}
+	if err := validateWDSString(cfg.Username, wdsUsernameMaxLength); err != nil {
+		return nil, fmt.Errorf("validating WDS username: %w", err)
+	}
+	if err := validateWDSString(cfg.Password, wdsPasswordMaxLength); err != nil {
+		return nil, fmt.Errorf("validating WDS password: %w", err)
+	}
+	if err := validateWDSAuthentication(cfg.Authentication); err != nil {
+		return nil, err
+	}
 	timeout := cfg.RequestTimeout
 	if timeout <= 0 {
 		timeout = DefaultRequestTimeout
 	}
-	session := &PDNSession{client: c, timeout: timeout}
+	session := &PDNSession{client: c, timeout: timeout, done: make(chan struct{})}
 
-	wdsClientID, err := c.allocateServiceClientID(ctx, ServiceWDS)
+	wdsClientID, releaseWDSClient, err := c.sessionServiceClientID(ctx, ServiceWDS)
 	if err != nil {
-		return nil, fmt.Errorf("allocate WDS client: %w", err)
+		return nil, fmt.Errorf("open WDS client: %w", err)
 	}
 	session.wdsClientID = wdsClientID
+	session.wdsClientReady = true
+	session.releaseWDSClient = releaseWDSClient
+	session.requestedSettings = cfg.requestedSettings
+	if cfg.Subscription != nil {
+		if err := session.bindSubscription(ctx, *cfg.Subscription); err != nil {
+			return nil, errors.Join(err, session.Close())
+		}
+	}
 	// Legacy BAM-DMUX firmware selects the family from the stored IMS profile.
 	// Do not override that profile through either WDS family mechanism.
 	if cfg.LegacyMuxDataPort == 0 && (cfg.IPPreference == WDSIPPreferenceIPv4 || cfg.IPPreference == WDSIPPreferenceIPv6) {
@@ -229,6 +273,7 @@ func (c *Client) openPDN(ctx context.Context, cfg pdnOpenConfig) (*PDNSession, e
 	}
 	session.runtime = runtime
 	session.info = pdnInfo(runtime, session.packetDataHandle != 0)
+	session.connectionStatus = WDSConnectionStatusConnected
 	return session, nil
 }
 
@@ -264,6 +309,8 @@ func (s *PDNSession) Info() PDNInfo {
 	if s == nil {
 		return PDNInfo{}
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return clonePDNInfo(s.info)
 }
 
@@ -296,15 +343,30 @@ func (s *PDNSession) Close() error {
 	s.closeOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
 		defer cancel()
+		if s.done != nil {
+			close(s.done)
+		}
+
+		s.mu.RLock()
+		packetDataHandle := s.packetDataHandle
+		wdsClientReady := s.wdsClientReady
+		releaseWDSClient := s.releaseWDSClient
+		wdsClientID := s.wdsClientID
+		s.mu.RUnlock()
 
 		var err error
-		if s.packetDataHandle != 0 && s.wdsClientID != 0 {
+		if packetDataHandle != 0 && wdsClientReady {
 			err = errors.Join(err, s.stop(ctx))
 		}
-		if s.wdsClientID != 0 {
-			err = errors.Join(err, s.client.releaseServiceClientID(ctx, ServiceWDS, s.wdsClientID))
-			s.wdsClientID = 0
+		if releaseWDSClient {
+			err = errors.Join(err, s.client.releaseServiceClientID(ctx, ServiceWDS, wdsClientID))
 		}
+		s.mu.Lock()
+		s.wdsClientID = 0
+		s.wdsClientReady = false
+		s.releaseWDSClient = false
+		s.packetDataHandle = 0
+		s.mu.Unlock()
 		s.closeErr = err
 	})
 	return s.closeErr
@@ -323,10 +385,11 @@ func (s *IMSPDNSession) Close() error {
 		if s.pdn != nil {
 			err = errors.Join(err, s.pdn.Close())
 		}
-		if s.nasClientID != 0 && s.pdn != nil {
+		if s.releaseNASClient && s.pdn != nil {
 			err = errors.Join(err, s.pdn.client.releaseServiceClientID(ctx, ServiceNAS, s.nasClientID))
-			s.nasClientID = 0
 		}
+		s.nasClientID = 0
+		s.releaseNASClient = false
 		s.closeErr = err
 	})
 	return s.closeErr
@@ -339,6 +402,25 @@ func (s *PDNSession) setClientIPFamily(ctx context.Context, family WDSIPFamily) 
 	}
 	if err := resultOK(resp); err != nil {
 		return fmt.Errorf("set WDS client IP family: %w", err)
+	}
+	return nil
+}
+
+func (s *PDNSession) bindSubscription(ctx context.Context, subscription WDSSubscription) error {
+	req, err := (WDSBindSubscriptionRequest{
+		ClientID:     s.wdsClientID,
+		Timeout:      s.timeout,
+		Subscription: subscription,
+	}).Request()
+	if err != nil {
+		return err
+	}
+	resp, err := s.client.requestServiceWithTimeout(ctx, req.Service, req.ClientID, req.MessageID, req.TLVs, req.Timeout)
+	if err != nil {
+		return fmt.Errorf("bind WDS subscription: %w", err)
+	}
+	if err := resultOK(resp); err != nil {
+		return fmt.Errorf("bind WDS subscription: %w", err)
 	}
 	return nil
 }
@@ -372,6 +454,9 @@ func (s *PDNSession) start(ctx context.Context, cfg pdnOpenConfig) error {
 		ClientID:             s.wdsClientID,
 		Timeout:              s.timeout,
 		APN:                  cfg.APN,
+		Authentication:       cfg.Authentication,
+		Username:             cfg.Username,
+		Password:             cfg.Password,
 		IPPreference:         cfg.IPPreference,
 		TechnologyPreference: cfg.technology,
 		ProfileIndex3GPP:     cfg.ProfileIndex,
@@ -402,7 +487,12 @@ func (s *PDNSession) start(ctx context.Context, cfg pdnOpenConfig) error {
 }
 
 func (s *PDNSession) stop(ctx context.Context) error {
-	req := WDSStopNetworkInterfaceRequest{ClientID: s.wdsClientID, Timeout: s.timeout, PacketDataHandle: s.packetDataHandle}.Request()
+	s.mu.RLock()
+	clientID := s.wdsClientID
+	timeout := s.timeout
+	packetDataHandle := s.packetDataHandle
+	s.mu.RUnlock()
+	req := WDSStopNetworkInterfaceRequest{ClientID: clientID, Timeout: timeout, PacketDataHandle: packetDataHandle}.Request()
 	resp, err := s.client.requestServiceWithTimeout(ctx, req.Service, req.ClientID, req.MessageID, req.TLVs, req.Timeout)
 	if err != nil {
 		return fmt.Errorf("stop WDS network: %w", err)
@@ -410,12 +500,18 @@ func (s *PDNSession) stop(ctx context.Context) error {
 	if err := resultOK(resp); err != nil {
 		return fmt.Errorf("stop WDS network: %w", err)
 	}
+	s.mu.Lock()
 	s.packetDataHandle = 0
+	s.mu.Unlock()
 	return nil
 }
 
 func (s *PDNSession) runtimeSettings(ctx context.Context, requested WDSRuntimeSettingsMask) (WDSRuntimeSettings, error) {
-	req := WDSGetRuntimeSettingsRequest{ClientID: s.wdsClientID, Timeout: s.timeout, RequestedSettings: requested}.Request()
+	s.mu.RLock()
+	clientID := s.wdsClientID
+	timeout := s.timeout
+	s.mu.RUnlock()
+	req := WDSGetRuntimeSettingsRequest{ClientID: clientID, Timeout: timeout, RequestedSettings: requested}.Request()
 	resp, err := s.client.requestServiceWithTimeout(ctx, req.Service, req.ClientID, req.MessageID, req.TLVs, req.Timeout)
 	if err != nil {
 		return WDSRuntimeSettings{}, err

@@ -10,19 +10,61 @@ import (
 	"github.com/damonto/wwan-go/qcom/tlv"
 )
 
-const maxRecordContentLength = 255
+const (
+	maxRecordContentLength      = 255
+	maxTransparentContentLength = 4096
+)
+
+// UIMSecurityAttributeLogic describes how a file's access conditions combine.
+type UIMSecurityAttributeLogic uint8
+
+const (
+	UIMSecurityAlways UIMSecurityAttributeLogic = iota
+	UIMSecurityNever
+	UIMSecurityAnd
+	UIMSecurityOr
+	UIMSecuritySingle
+)
+
+// UIMSecurityAttribute is a mask of credentials required for file access.
+type UIMSecurityAttribute uint16
+
+const (
+	UIMSecurityPIN1 UIMSecurityAttribute = 1 << iota
+	UIMSecurityPIN2
+	UIMSecurityUPIN
+	UIMSecurityADM
+)
+
+// UIMFileSecurity contains one file-operation access rule.
+type UIMFileSecurity struct {
+	Logic      UIMSecurityAttributeLogic
+	Attributes UIMSecurityAttribute
+}
+
+// UIMTransparentReadResult contains transparent file bytes and encryption state.
+type UIMTransparentReadResult struct {
+	Data           []byte
+	Encrypted      bool
+	EncryptedKnown bool
+}
 
 type RawFileAttributes struct {
-	FileSize    uint16
-	FileID      uint16
-	FileType    QMIFileType
-	RecordSize  uint16
-	RecordCount uint16
-	Raw         []byte
+	FileSize           uint16
+	FileID             uint16
+	FileType           QMIFileType
+	RecordSize         uint16
+	RecordCount        uint16
+	ReadSecurity       UIMFileSecurity
+	WriteSecurity      UIMFileSecurity
+	IncreaseSecurity   UIMFileSecurity
+	DeactivateSecurity UIMFileSecurity
+	ActivateSecurity   UIMFileSecurity
+	Raw                []byte
 }
 
 func (r *RawFileAttributes) UnmarshalBinary(data []byte) error {
-	if len(data) < 9 {
+	if len(data) < 26 {
 		return errors.New("reading file attributes: attributes payload is truncated")
 	}
 
@@ -31,18 +73,26 @@ func (r *RawFileAttributes) UnmarshalBinary(data []byte) error {
 	r.FileType = QMIFileType(data[4])
 	r.RecordSize = binary.LittleEndian.Uint16(data[5:7])
 	r.RecordCount = binary.LittleEndian.Uint16(data[7:9])
-
-	if len(data) < 26 {
-		return nil
-	}
+	r.ReadSecurity = decodeUIMFileSecurity(data[9:12])
+	r.WriteSecurity = decodeUIMFileSecurity(data[12:15])
+	r.IncreaseSecurity = decodeUIMFileSecurity(data[15:18])
+	r.DeactivateSecurity = decodeUIMFileSecurity(data[18:21])
+	r.ActivateSecurity = decodeUIMFileSecurity(data[21:24])
 
 	rawLength := int(binary.LittleEndian.Uint16(data[24:26]))
-	if len(data) < 26+rawLength {
-		return errors.New("reading file attributes: raw data is truncated")
+	if len(data) != 26+rawLength {
+		return fmt.Errorf("reading file attributes: payload length %d, want %d", len(data), 26+rawLength)
 	}
 
 	r.Raw = slices.Clone(data[26 : 26+rawLength])
 	return nil
+}
+
+func decodeUIMFileSecurity(data []byte) UIMFileSecurity {
+	return UIMFileSecurity{
+		Logic:      UIMSecurityAttributeLogic(data[0]),
+		Attributes: UIMSecurityAttribute(binary.LittleEndian.Uint16(data[1:])),
+	}
 }
 
 func (c *Client) FileAttributes(ctx context.Context, file File) (FileAttributes, error) {
@@ -54,40 +104,78 @@ func (c *Client) GetFileAttributes(ctx context.Context, file File) (FileAttribut
 	if err != nil {
 		return FileAttributes{}, err
 	}
-	return decodeFileAttributes(response)
+	var attributes FileAttributes
+	if err := attributes.UnmarshalTLVs(response.TLVs); err != nil {
+		return FileAttributes{}, err
+	}
+	return attributes, nil
 }
 
 func (c *Client) ReadTransparent(ctx context.Context, req TransparentRead) ([]byte, error) {
+	result, err := c.ReadTransparentResult(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return result.Data, nil
+}
+
+// ReadTransparentResult reads a transparent file and reports whether the modem encrypted it.
+func (c *Client) ReadTransparentResult(ctx context.Context, req TransparentRead) (UIMTransparentReadResult, error) {
 	length := req.Length
 	if length == 0 {
 		attrs, err := c.FileAttributes(ctx, req.File)
 		if err != nil {
-			return nil, err
+			return UIMTransparentReadResult{}, err
 		}
 		if attrs.FileStructure != FileStructureTransparent {
-			return nil, errors.New("reading transparent file: unexpected file structure")
+			return UIMTransparentReadResult{}, errors.New("reading transparent file: unexpected file structure")
 		}
 		if req.Offset > attrs.FileSize {
-			return nil, errors.New("reading transparent file: offset exceeds file size")
+			return UIMTransparentReadResult{}, errors.New("reading transparent file: offset exceeds file size")
 		}
 		length = attrs.FileSize - req.Offset
 	}
 
-	response, err := c.transparentResponse(ctx, req.File, req.Offset, length)
+	response, err := c.transparentResponse(ctx, req.File, req.Offset, length, req.EncryptData)
 	if err != nil {
-		return nil, err
+		return UIMTransparentReadResult{}, err
 	}
 
 	value, ok := tlv.Value(response.TLVs, 0x11)
 	if !ok {
-		return nil, errors.New("reading transparent file: read result TLV missing")
+		return UIMTransparentReadResult{}, errors.New("reading transparent file: read result TLV missing")
 	}
-	return decodeLengthPrefixedBytes(value)
+	data, err := decodeLengthPrefixedBytes(value)
+	if err != nil {
+		return UIMTransparentReadResult{}, err
+	}
+	result := UIMTransparentReadResult{Data: data}
+	if value, ok := tlv.Value(response.TLVs, 0x13); ok {
+		if len(value) != 1 {
+			return UIMTransparentReadResult{}, fmt.Errorf("reading transparent file: encrypted-data TLV length %d, want 1", len(value))
+		}
+		result.Encrypted = value[0] != 0
+		result.EncryptedKnown = true
+	}
+	return result, nil
 }
 
 func (c *Client) ReadRecord(ctx context.Context, req RecordRead) ([]byte, error) {
+	req.LastRecord = 0
+	records, err := c.ReadRecords(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return records[0], nil
+}
+
+// ReadRecords reads a contiguous range from a linear-fixed or cyclic file.
+func (c *Client) ReadRecords(ctx context.Context, req RecordRead) ([][]byte, error) {
 	if req.Record == 0 {
 		return nil, errors.New("reading record file: record number is zero")
+	}
+	if req.LastRecord != 0 && req.LastRecord < req.Record {
+		return nil, errors.New("reading record file: last record precedes first record")
 	}
 
 	length := req.Length
@@ -102,7 +190,7 @@ func (c *Client) ReadRecord(ctx context.Context, req RecordRead) ([]byte, error)
 		length = attrs.RecordSize
 	}
 
-	response, err := c.recordResponse(ctx, req.File, req.Record, length)
+	response, err := c.recordResponse(ctx, req.File, req.Record, length, req.LastRecord)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +199,33 @@ func (c *Client) ReadRecord(ctx context.Context, req RecordRead) ([]byte, error)
 	if !ok {
 		return nil, errors.New("reading record file: read result TLV missing")
 	}
-	return decodeLengthPrefixedBytes(value)
+	first, err := decodeLengthPrefixedBytes(value)
+	if err != nil {
+		return nil, err
+	}
+	records := [][]byte{first}
+	additionalValue, ok := tlv.Value(response.TLVs, 0x12)
+	if !ok {
+		if req.LastRecord != 0 && req.LastRecord != req.Record {
+			return nil, errors.New("reading record file: additional read result TLV missing")
+		}
+		return records, nil
+	}
+	additional, err := decodeLengthPrefixedBytes(additionalValue)
+	if err != nil {
+		return nil, fmt.Errorf("reading record file: additional records: %w", err)
+	}
+	if len(first) == 0 || len(additional)%len(first) != 0 {
+		return nil, errors.New("reading record file: additional data does not contain whole records")
+	}
+	for len(additional) > 0 {
+		records = append(records, slices.Clone(additional[:len(first)]))
+		additional = additional[len(first):]
+	}
+	if req.LastRecord != 0 && len(records) != int(req.LastRecord-req.Record)+1 {
+		return nil, fmt.Errorf("reading record file: record count %d, want %d", len(records), int(req.LastRecord-req.Record)+1)
+	}
+	return records, nil
 }
 
 func (c *Client) WriteRecord(ctx context.Context, req RecordWrite) error {
@@ -126,13 +240,17 @@ func (c *Client) WriteRecord(ctx context.Context, req RecordWrite) error {
 	if err != nil {
 		return fmt.Errorf("writing record file: %w", err)
 	}
+	sessionValue, err := putSessionValue(req.File.Session, req.File.AID)
+	if err != nil {
+		return fmt.Errorf("writing record file: %w", err)
+	}
 
 	recordValue := binary.LittleEndian.AppendUint16(nil, req.Record)
 	recordValue = binary.LittleEndian.AppendUint16(recordValue, uint16(len(req.Data)))
 	recordValue = append(recordValue, req.Data...)
 
 	resp, err := c.request(ctx, MessageWriteRecord, tlv.TLVs{
-		tlv.Bytes(0x01, putSessionValue(req.File.Session, req.File.AID)),
+		tlv.Bytes(0x01, sessionValue),
 		tlv.Bytes(0x02, fileValue),
 		tlv.Bytes(0x03, recordValue),
 	})
@@ -151,13 +269,58 @@ func (c *Client) WriteRecord(ctx context.Context, req RecordWrite) error {
 	return nil
 }
 
+// WriteTransparent writes bytes at an offset in a transparent elementary file.
+func (c *Client) WriteTransparent(ctx context.Context, req TransparentWrite) error {
+	if len(req.Data) == 0 {
+		return errors.New("writing transparent file: content is empty")
+	}
+	if len(req.Data) > maxTransparentContentLength {
+		return fmt.Errorf("writing transparent file: content length %d exceeds QMI UIM limit %d", len(req.Data), maxTransparentContentLength)
+	}
+	fileValue, err := putFileValue(req.File.Path)
+	if err != nil {
+		return fmt.Errorf("writing transparent file: %w", err)
+	}
+	sessionValue, err := putSessionValue(req.File.Session, req.File.AID)
+	if err != nil {
+		return fmt.Errorf("writing transparent file: %w", err)
+	}
+
+	writeValue := binary.LittleEndian.AppendUint16(nil, req.Offset)
+	writeValue = binary.LittleEndian.AppendUint16(writeValue, uint16(len(req.Data)))
+	writeValue = append(writeValue, req.Data...)
+	resp, err := c.request(ctx, MessageWriteTransparent, tlv.TLVs{
+		tlv.Bytes(0x01, sessionValue),
+		tlv.Bytes(0x02, fileValue),
+		tlv.Bytes(0x03, writeValue),
+	})
+	if err != nil {
+		return fmt.Errorf("writing transparent file: %w", err)
+	}
+	if err := resultOK(resp); err != nil {
+		return fmt.Errorf("writing transparent file: %w", err)
+	}
+	if _, ok := tlv.Value(resp.TLVs, 0x11); ok {
+		return errors.New("writing transparent file: response indication is not supported")
+	}
+	if err := cardError(resp.TLVs); err != nil {
+		return fmt.Errorf("writing transparent file: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) transparentResponse(
 	ctx context.Context,
 	file File,
 	offset uint16,
 	length uint16,
+	encryptData bool,
 ) (Response, error) {
 	fileValue, err := putFileValue(file.Path)
+	if err != nil {
+		return Response{}, err
+	}
+	sessionValue, err := putSessionValue(file.Session, file.AID)
 	if err != nil {
 		return Response{}, err
 	}
@@ -166,11 +329,15 @@ func (c *Client) transparentResponse(
 		binary.LittleEndian.AppendUint16(nil, offset),
 		binary.LittleEndian.AppendUint16(nil, length),
 	)
-	resp, err := c.request(ctx, MessageReadTransparent, tlv.TLVs{
-		tlv.Bytes(0x01, putSessionValue(file.Session, file.AID)),
+	tlvs := tlv.TLVs{
+		tlv.Bytes(0x01, sessionValue),
 		tlv.Bytes(0x02, fileValue),
 		tlv.Bytes(0x03, info),
-	})
+	}
+	if encryptData {
+		tlvs = append(tlvs, tlv.Uint(0x11, uint8(1)))
+	}
+	resp, err := c.request(ctx, MessageReadTransparent, tlvs)
 	if err != nil {
 		return Response{}, err
 	}
@@ -196,8 +363,13 @@ func (c *Client) recordResponse(
 	file File,
 	record uint16,
 	length uint16,
+	lastRecord uint16,
 ) (Response, error) {
 	fileValue, err := putFileValue(file.Path)
+	if err != nil {
+		return Response{}, err
+	}
+	sessionValue, err := putSessionValue(file.Session, file.AID)
 	if err != nil {
 		return Response{}, err
 	}
@@ -206,11 +378,15 @@ func (c *Client) recordResponse(
 		binary.LittleEndian.AppendUint16(nil, record),
 		binary.LittleEndian.AppendUint16(nil, length),
 	)
-	resp, err := c.request(ctx, MessageReadRecord, tlv.TLVs{
-		tlv.Bytes(0x01, putSessionValue(file.Session, file.AID)),
+	tlvs := tlv.TLVs{
+		tlv.Bytes(0x01, sessionValue),
 		tlv.Bytes(0x02, fileValue),
 		tlv.Bytes(0x03, recordValue),
-	})
+	}
+	if lastRecord != 0 {
+		tlvs = append(tlvs, tlv.Uint(0x10, lastRecord))
+	}
+	resp, err := c.request(ctx, MessageReadRecord, tlvs)
 	if err != nil {
 		return Response{}, err
 	}
@@ -234,9 +410,13 @@ func (c *Client) fileAttributesResponse(
 	if err != nil {
 		return Response{}, err
 	}
+	sessionValue, err := putSessionValue(file.Session, file.AID)
+	if err != nil {
+		return Response{}, err
+	}
 
 	resp, err := c.request(ctx, MessageGetFileAttributes, tlv.TLVs{
-		tlv.Bytes(0x01, putSessionValue(file.Session, file.AID)),
+		tlv.Bytes(0x01, sessionValue),
 		tlv.Bytes(0x02, fileValue),
 	})
 	if err != nil {
@@ -245,27 +425,39 @@ func (c *Client) fileAttributesResponse(
 	if err := cardResultOK(resp); err != nil {
 		return Response{}, err
 	}
+	if _, ok := tlv.Value(resp.TLVs, 0x12); ok {
+		return Response{}, errors.New("reading file attributes: response indication is not supported")
+	}
 	return resp, nil
 }
 
-func decodeFileAttributes(resp Response) (FileAttributes, error) {
-	value, ok := tlv.Value(resp.TLVs, 0x11)
+// UnmarshalTLVs parses a QMI UIM file-attributes response.
+func (a *FileAttributes) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	value, ok := tlv.Value(tlvs, 0x11)
 	if !ok {
-		return FileAttributes{}, errors.New("reading file attributes: attributes TLV missing")
+		return errors.New("reading file attributes: attributes TLV missing")
 	}
 
 	var attrs RawFileAttributes
 	if err := attrs.UnmarshalBinary(value); err != nil {
-		return FileAttributes{}, err
+		return err
 	}
 
-	return FileAttributes{
-		FileSize:      attrs.FileSize,
-		RecordSize:    attrs.RecordSize,
-		RecordCount:   attrs.RecordCount,
-		FileType:      fileTypeToSIMFileType(attrs.FileType),
-		FileStructure: fileTypeToSIMFileStructure(attrs.FileType),
-	}, nil
+	*a = FileAttributes{
+		FileSize:           attrs.FileSize,
+		FileID:             attrs.FileID,
+		RecordSize:         attrs.RecordSize,
+		RecordCount:        attrs.RecordCount,
+		FileType:           fileTypeToSIMFileType(attrs.FileType),
+		FileStructure:      fileTypeToSIMFileStructure(attrs.FileType),
+		ReadSecurity:       attrs.ReadSecurity,
+		WriteSecurity:      attrs.WriteSecurity,
+		IncreaseSecurity:   attrs.IncreaseSecurity,
+		DeactivateSecurity: attrs.DeactivateSecurity,
+		ActivateSecurity:   attrs.ActivateSecurity,
+		Raw:                slices.Clone(attrs.Raw),
+	}
+	return nil
 }
 
 func fileTypeToSIMFileStructure(fileType QMIFileType) FileStructure {

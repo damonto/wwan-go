@@ -13,7 +13,8 @@ import (
 )
 
 const (
-	catCleanupTimeout = 5 * time.Second
+	catCleanupTimeout           = 5 * time.Second
+	catTerminalProfileMaxLength = 80
 )
 
 const (
@@ -186,12 +187,12 @@ func (c *CAT) Commands(ctx context.Context, eventMask, fullFunctionMask uint32) 
 		defer close(out)
 
 		for ind := range indications {
-			session, err := decodeCATCommand(ind.TLVs)
-			if err != nil {
-				continue
+			var command CATCommand
+			if err := command.UnmarshalTLVs(ind.TLVs); err != nil {
+				return
 			}
 			select {
-			case out <- session:
+			case out <- command:
 			case <-ctx.Done():
 				return
 			}
@@ -279,8 +280,8 @@ func (c *CAT) TerminalProfile(ctx context.Context) ([]byte, error) {
 		return nil, errors.New("reading QMI CAT terminal profile: profile TLV is truncated")
 	}
 	length := int(value[0])
-	if len(value) < 1+length {
-		return nil, errors.New("reading QMI CAT terminal profile: profile data is truncated")
+	if len(value) != 1+length {
+		return nil, fmt.Errorf("reading QMI CAT terminal profile: profile TLV length %d, want %d", len(value), 1+length)
 	}
 	return slices.Clone(value[1 : 1+length]), nil
 }
@@ -308,8 +309,8 @@ func (c *CAT) setEventReport(ctx context.Context, service ServiceType, clientID 
 }
 
 func (c *CAT) setConfiguration(ctx context.Context, service ServiceType, clientID uint8, config CATConfiguration) error {
-	if len(config.CustomProfile) > 0xff {
-		return fmt.Errorf("terminal profile length %d exceeds 255", len(config.CustomProfile))
+	if len(config.CustomProfile) > catTerminalProfileMaxLength {
+		return fmt.Errorf("terminal profile length %d exceeds %d", len(config.CustomProfile), catTerminalProfileMaxLength)
 	}
 
 	tlvs := tlv.TLVs{tlv.Uint(0x01, uint8(config.Mode))}
@@ -331,18 +332,20 @@ func (c *CAT) releaseCATClient(service ServiceType, clientID uint8) {
 	_ = c.client.releaseCATClient(ctx, service, clientID)
 }
 
-func decodeCATCommand(tlvs tlv.TLVs) (CATCommand, error) {
+// UnmarshalTLVs decodes a raw command from a QMI CAT indication.
+func (c *CATCommand) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	for _, item := range tlvs {
 		if !isRawCATCommandTLV(item.Type) {
 			continue
 		}
 		var command CATCommand
 		if err := command.UnmarshalBinary(item.Value); err != nil {
-			return CATCommand{}, fmt.Errorf("parsing QMI CAT indication: %w", err)
+			return fmt.Errorf("parsing QMI CAT indication: %w", err)
 		}
-		return command, nil
+		*c = command
+		return nil
 	}
-	return CATCommand{}, errors.New("parsing QMI CAT indication: raw command TLV missing")
+	return errors.New("parsing QMI CAT indication: raw command TLV missing")
 }
 
 func isRawCATCommandTLV(tag byte) bool {
@@ -358,12 +361,11 @@ func isRawCATCommandTLV(tag byte) bool {
 
 func checkEventReportRegistration(tlvs tlv.TLVs, raw, full uint32) error {
 	checks := []struct {
-		name      string
 		tag       byte
 		requested uint32
 	}{
-		{name: "raw", tag: catSetEventReportRawErrorTLV, requested: raw},
-		{name: "full-function", tag: catSetEventReportFullFunctionErrorTLV, requested: full},
+		{tag: catSetEventReportRawErrorTLV, requested: raw},
+		{tag: catSetEventReportFullFunctionErrorTLV, requested: full},
 	}
 
 	for _, check := range checks {
@@ -376,13 +378,12 @@ func checkEventReportRegistration(tlvs tlv.TLVs, raw, full uint32) error {
 		}
 		rejected := failed & check.requested
 		if rejected != 0 {
-			switch check.name {
-			case "raw":
+			switch check.tag {
+			case catSetEventReportRawErrorTLV:
 				return fmt.Errorf("raw mask 0x%08X already registered by another control point", rejected)
-			case "full-function":
+			case catSetEventReportFullFunctionErrorTLV:
 				return fmt.Errorf("full-function mask 0x%08X was not enabled", rejected)
 			}
-			return fmt.Errorf("%s mask 0x%08X was not enabled", check.name, rejected)
 		}
 	}
 	return nil
@@ -393,8 +394,8 @@ func eventReportErrorMask(tlvs tlv.TLVs, tag byte) (uint32, bool, error) {
 	if !ok {
 		return 0, false, nil
 	}
-	if len(value) < 4 {
-		return 0, false, fmt.Errorf("parsing QMI CAT event registration status: TLV 0x%02X length %d, want at least 4", tag, len(value))
+	if len(value) != 4 {
+		return 0, false, fmt.Errorf("parsing QMI CAT event registration status: TLV 0x%02X length %d, want 4", tag, len(value))
 	}
 	return binary.LittleEndian.Uint32(value), true, nil
 }

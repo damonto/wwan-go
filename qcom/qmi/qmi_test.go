@@ -21,6 +21,17 @@ func (d fakeDialer) Dial(context.Context) (Conn, error) {
 	return d.conn, d.err
 }
 
+type trackingDialer struct {
+	conn   Conn
+	err    error
+	called bool
+}
+
+func (d *trackingDialer) Dial(context.Context) (Conn, error) {
+	d.called = true
+	return d.conn, d.err
+}
+
 type fakeConn struct{}
 
 func (fakeConn) Read([]byte) (int, error)         { return 0, io.EOF }
@@ -89,6 +100,7 @@ func TestOpenUsesDialer(t *testing.T) {
 		{"missing mode", nil, true},
 		{"nil dialer", []Option{WithDialer(nil)}, true},
 		{"dial error", []Option{WithDialer(fakeDialer{err: errors.New("boom")})}, true},
+		{"empty auto-detect device", []Option{WithAutoDetect(" ")}, true},
 	}
 
 	for _, tt := range tests {
@@ -106,8 +118,124 @@ func TestOpenUsesDialer(t *testing.T) {
 			if got == nil {
 				t.Fatal("Open() = nil, want transport")
 			}
+			if got.UsesProxy() {
+				t.Fatal("UsesProxy() = true, want false")
+			}
 		})
 	}
+}
+
+func TestOpenOptionsSetAccess(t *testing.T) {
+	tests := []struct {
+		name       string
+		opts       []Option
+		wantDialer Dialer
+		wantAuto   bool
+		wantShared bool
+		wantDevice string
+	}{
+		{name: "proxy", opts: []Option{WithProxy("/dev/cdc-wdm0")}, wantDialer: ProxyDialer{Device: "/dev/cdc-wdm0"}},
+		{name: "direct", opts: []Option{WithDirect("/dev/cdc-wdm0")}, wantDialer: DirectDialer{Device: "/dev/cdc-wdm0"}, wantShared: true},
+		{name: "custom direct remains exclusive", opts: []Option{WithDialer(DirectDialer{Device: "/dev/cdc-wdm0"})}, wantDialer: DirectDialer{Device: "/dev/cdc-wdm0"}},
+		{name: "auto", opts: []Option{WithAutoDetect("/dev/cdc-wdm0")}, wantAuto: true, wantDevice: "/dev/cdc-wdm0"},
+		{name: "direct last option wins", opts: []Option{WithAutoDetect("auto"), WithDirect("direct")}, wantDialer: DirectDialer{Device: "direct"}, wantShared: true},
+		{name: "auto last option wins", opts: []Option{WithDirect("direct"), WithAutoDetect("auto")}, wantAuto: true, wantDevice: "auto"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config{}
+			for _, opt := range tt.opts {
+				opt(&cfg)
+			}
+			if cfg.dialer != tt.wantDialer || cfg.autoDetect != tt.wantAuto || cfg.sharedDirect != tt.wantShared || cfg.device != tt.wantDevice {
+				t.Fatalf("config = %#v, want dialer=%#v auto=%t shared=%t device=%q", cfg, tt.wantDialer, tt.wantAuto, tt.wantShared, tt.wantDevice)
+			}
+		})
+	}
+}
+
+func TestOpenErrorReportsSelectedAccess(t *testing.T) {
+	probeErr := errors.New("probe rejected")
+	tests := []struct {
+		name      string
+		dialer    Dialer
+		wantProxy bool
+	}{
+		{name: "direct", dialer: fakeDialer{err: probeErr}},
+		{
+			name:      "proxy",
+			dialer:    &fakeProxyDialer{err: probeErr, devicePath: "/dev/cdc-wdm0"},
+			wantProxy: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Open(context.Background(), WithDialer(tt.dialer))
+			var openErr *OpenError
+			if !errors.As(err, &openErr) {
+				t.Fatalf("Open() error = %v, want *OpenError", err)
+			}
+			if !errors.Is(err, probeErr) {
+				t.Errorf("errors.Is(Open(), probeErr) = false")
+			}
+			if openErr.Proxy != tt.wantProxy {
+				t.Errorf("OpenError.Proxy = %t, want %t", openErr.Proxy, tt.wantProxy)
+			}
+		})
+	}
+}
+
+func TestDialAuto(t *testing.T) {
+	errUnavailable := errors.New("proxy unavailable")
+	tests := []struct {
+		name       string
+		ctx        func() context.Context
+		proxyErr   error
+		directErr  error
+		wantProxy  bool
+		wantDirect bool
+		wantErr    error
+	}{
+		{name: "proxy", ctx: context.Background, wantProxy: true},
+		{name: "direct fallback", ctx: context.Background, proxyErr: errUnavailable, wantDirect: true},
+		{name: "canceled", ctx: canceledContext, proxyErr: errUnavailable, wantProxy: true, wantErr: context.Canceled},
+		{name: "proxy timeout", ctx: context.Background, proxyErr: context.DeadlineExceeded, wantProxy: true, wantErr: context.DeadlineExceeded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proxyConn := &fakeConn{}
+			directConn := &fakeConn{}
+			proxy := &trackingDialer{conn: proxyConn, err: tt.proxyErr}
+			direct := &trackingDialer{conn: directConn, err: tt.directErr}
+			got, usesProxy, err := dialAuto(tt.ctx(), proxy, direct)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("dialAuto() error = %v, want %v", err, tt.wantErr)
+			}
+			if usesProxy != tt.wantProxy {
+				t.Errorf("dialAuto() proxy = %t, want %t", usesProxy, tt.wantProxy)
+			}
+			if direct.called != tt.wantDirect {
+				t.Errorf("direct dialed = %t, want %t", direct.called, tt.wantDirect)
+			}
+			if err == nil {
+				want := Conn(directConn)
+				if tt.wantProxy {
+					want = proxyConn
+				}
+				if got != want {
+					t.Errorf("dialAuto() conn = %p, want %p", got, want)
+				}
+			}
+		})
+	}
+}
+
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
 }
 
 func TestOpenConfiguresProxy(t *testing.T) {
@@ -157,6 +285,9 @@ func TestOpenConfiguresProxy(t *testing.T) {
 			}
 			if got == nil {
 				t.Fatal("Open() = nil, want transport")
+			}
+			if !got.UsesProxy() {
+				t.Fatal("UsesProxy() = false, want true")
 			}
 
 			var req Response

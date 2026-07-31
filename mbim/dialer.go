@@ -26,12 +26,12 @@ type ProxyDialer struct {
 	Device  string
 }
 
-type proxyDialer interface {
-	usesProxy() bool
-}
-
 type deviceDialer interface {
 	device() string
+}
+
+type proxyDialer interface {
+	usesProxy() bool
 }
 
 func dialerUsesProxy(d Dialer) bool {
@@ -39,6 +39,6 @@ func dialerUsesProxy(d Dialer) bool {
 	return ok && p.usesProxy()
 }
 
-func (d ProxyDialer) usesProxy() bool { return true }
-
 func (d ProxyDialer) device() string { return strings.TrimSpace(d.Device) }
+
+func (d ProxyDialer) usesProxy() bool { return true }

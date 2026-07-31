@@ -41,5 +41,8 @@ func decodeATR(data []byte) ([]byte, error) {
 	if len(data) < 1+length {
 		return nil, fmt.Errorf("ATR length %d exceeds remaining %d", length, len(data)-1)
 	}
+	if len(data) != 1+length {
+		return nil, fmt.Errorf("ATR has %d trailing bytes", len(data)-1-length)
+	}
 	return slices.Clone(data[1 : 1+length]), nil
 }

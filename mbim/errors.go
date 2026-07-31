@@ -86,12 +86,29 @@ const (
 )
 
 const (
+	StatusSMSUnknownSMSCAddress Status = 100 + iota
+	StatusSMSNetworkTimeout
+	StatusSMSLanguageNotSupported
+	StatusSMSEncodingNotSupported
+	StatusSMSFormatNotSupported
+)
+
+const (
+	StatusMatchingPDUSessionFound  Status = 200
+	StatusDissociationNeededForApp Status = 201
+	StatusErrorInvalidSlot         Status = 202
+	StatusNoMatchingURSPRule       Status = 203
+	StatusNoDefaultURSPRule        Status = 204
+)
+
+const (
 	StatusMSNoLogicalChannels     Status = 0x87430001
 	StatusMSSelectFailed          Status = 0x87430002
 	StatusMSInvalidLogicalChannel Status = 0x87430003
 )
 
-const StatusInvalidSlot Status = 202
+// StatusInvalidSlot is kept as a compatibility alias for the MBIMEx status.
+const StatusInvalidSlot = StatusErrorInvalidSlot
 
 func (e Status) Error() string {
 	switch e {
@@ -173,8 +190,26 @@ func (e Status) Error() string {
 		return "MBIM auth AMF not set"
 	case StatusContextNotSupported:
 		return "MBIM context not supported"
-	case StatusInvalidSlot:
+	case StatusSMSUnknownSMSCAddress:
+		return "MBIM SMS unknown SMSC address"
+	case StatusSMSNetworkTimeout:
+		return "MBIM SMS network timeout"
+	case StatusSMSLanguageNotSupported:
+		return "MBIM SMS language not supported"
+	case StatusSMSEncodingNotSupported:
+		return "MBIM SMS encoding not supported"
+	case StatusSMSFormatNotSupported:
+		return "MBIM SMS format not supported"
+	case StatusMatchingPDUSessionFound:
+		return "MBIM matching PDU session found"
+	case StatusDissociationNeededForApp:
+		return "MBIM dissociation needed for application"
+	case StatusErrorInvalidSlot:
 		return "MBIM invalid slot"
+	case StatusNoMatchingURSPRule:
+		return "MBIM no matching URSP rule"
+	case StatusNoDefaultURSPRule:
+		return "MBIM no default URSP rule"
 	case StatusMSNoLogicalChannels:
 		return "MBIM no logical channels"
 	case StatusMSSelectFailed:

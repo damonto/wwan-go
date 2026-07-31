@@ -90,8 +90,8 @@ func (r *IMSSTestModeResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	if !ok {
 		return errors.New("parsing QMI IMSS test mode: test mode TLV missing")
 	}
-	if len(value) < 1 {
-		return errors.New("parsing QMI IMSS test mode: test mode TLV is truncated")
+	if len(value) != 1 {
+		return fmt.Errorf("parsing QMI IMSS test mode: test mode TLV length %d, want 1", len(value))
 	}
 	r.Enabled = value[0] != 0
 	return nil

@@ -38,6 +38,7 @@ func TestIMSSTestModeResponseUnmarshalTLVs(t *testing.T) {
 		{name: "disabled", tlvs: tlv.TLVs{tlv.Bytes(imssTLVGetTestMode, []byte{0})}},
 		{name: "missing", wantErr: true},
 		{name: "truncated", tlvs: tlv.TLVs{tlv.Bytes(imssTLVGetTestMode, nil)}, wantErr: true},
+		{name: "trailing byte", tlvs: tlv.TLVs{tlv.Bytes(imssTLVGetTestMode, []byte{1, 0})}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
