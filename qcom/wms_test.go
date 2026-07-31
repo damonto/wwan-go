@@ -587,48 +587,95 @@ func TestWMSDecodeIncomingVariants(t *testing.T) {
 }
 
 func TestWMSWatchIncomingReadsStoredMessages(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	transport := &wmsIndicationTransport{
-		fakeTransport: fakeTransport{
-			t: t,
-			calls: []transportCall{
-				{resp: successResponse(MessageWMSSetEventReport)},
-				{
-					check: func(req Request) {
-						if req.MessageID != MessageWMSRawRead {
-							t.Fatalf("read MessageID = 0x%04X, want raw read", req.MessageID)
-						}
-					},
-					resp: successResponse(MessageWMSRawRead, tlv.Bytes(0x01, []byte{byte(WMSTagMTNotRead), byte(WMSMessageFormatGWPointToPoint), 2, 0, 0x01, 0x02})),
-				},
-				{resp: successResponse(MessageWMSSetEventReport)},
-			},
+	tests := []struct {
+		name             string
+		messageModeKnown bool
+		messageMode      WMSMessageMode
+		smsOnIMSKnown    bool
+		smsOnIMS         bool
+		wantMode         WMSMessageMode
+		wantFormat       WMSMessageFormat
+	}{
+		{
+			name:       "default to GW message mode",
+			wantMode:   WMSMessageModeGW,
+			wantFormat: WMSMessageFormatGWPointToPoint,
+		},
+		{
+			name:             "preserve indication metadata",
+			messageModeKnown: true,
+			messageMode:      WMSMessageModeCDMA,
+			smsOnIMSKnown:    true,
+			smsOnIMS:         true,
+			wantMode:         WMSMessageModeCDMA,
+			wantFormat:       WMSMessageFormatCDMA,
 		},
 	}
-	client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceWMS: 7}}
-	out, err := client.WMSWatchIncoming(ctx)
-	if err != nil {
-		t.Fatalf("WMSWatchIncoming() error = %v", err)
-	}
-	transport.emit(Indication{
-		Service:   ServiceWMS,
-		ClientID:  7,
-		MessageID: MessageWMSEventReport,
-		TLVs:      tlv.TLVs{tlv.Bytes(0x10, []byte{byte(WMSStorageNV), 3, 0, 0, 0})},
-	})
 
-	select {
-	case got := <-out:
-		if !got.Stored || got.Reference.Index != 3 || got.Tag != WMSTagMTNotRead || !bytes.Equal(got.Data, []byte{1, 2}) {
-			t.Fatalf("incoming = %+v", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for WMS incoming message")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			transport := &wmsIndicationTransport{
+				fakeTransport: fakeTransport{
+					t: t,
+					calls: []transportCall{
+						{resp: successResponse(MessageWMSSetEventReport)},
+						{
+							check: func(req Request) {
+								if req.MessageID != MessageWMSRawRead {
+									t.Fatalf("read MessageID = 0x%04X, want raw read", req.MessageID)
+								}
+								assertTLV(t, req.TLVs, 0x01, []byte{byte(WMSStorageNV), 3, 0, 0, 0})
+								assertTLV(t, req.TLVs, 0x10, []byte{byte(tt.wantMode)})
+								ims, hasIMS := tlv.Value(req.TLVs, 0x11)
+								if !tt.smsOnIMSKnown {
+									if hasIMS {
+										t.Fatalf("SMS on IMS TLV = % X, want omitted", ims)
+									}
+								} else {
+									assertTLV(t, req.TLVs, 0x11, []byte{boolByte(tt.smsOnIMS)})
+								}
+							},
+							resp: successResponse(MessageWMSRawRead, tlv.Bytes(0x01, []byte{byte(WMSTagMTNotRead), byte(tt.wantFormat), 2, 0, 0x01, 0x02})),
+						},
+						{resp: successResponse(MessageWMSSetEventReport)},
+					},
+				},
+			}
+			client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceWMS: 7}}
+			out, err := client.WMSWatchIncoming(ctx)
+			if err != nil {
+				cancel()
+				t.Fatalf("WMSWatchIncoming() error = %v", err)
+			}
+
+			indicationTLVs := tlv.TLVs{tlv.Bytes(0x10, []byte{byte(WMSStorageNV), 3, 0, 0, 0})}
+			if tt.messageModeKnown {
+				indicationTLVs = append(indicationTLVs, tlv.Uint(0x12, uint8(tt.messageMode)))
+			}
+			if tt.smsOnIMSKnown {
+				indicationTLVs = append(indicationTLVs, tlv.Uint(0x16, boolByte(tt.smsOnIMS)))
+			}
+			transport.emit(Indication{
+				Service:   ServiceWMS,
+				ClientID:  7,
+				MessageID: MessageWMSEventReport,
+				TLVs:      indicationTLVs,
+			})
+
+			select {
+			case got := <-out:
+				if !got.Stored || got.Reference.Index != 3 || got.Tag != WMSTagMTNotRead || got.Format != tt.wantFormat || !bytes.Equal(got.Data, []byte{1, 2}) {
+					t.Fatalf("incoming = %+v", got)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for WMS incoming message")
+			}
+			cancel()
+			transport.waitCalls(t, 3)
+		})
 	}
-	cancel()
-	transport.waitCalls(t, 3)
 }
 
 func TestWMSIndicationRegistrationReferences(t *testing.T) {

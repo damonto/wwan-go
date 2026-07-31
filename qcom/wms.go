@@ -634,7 +634,20 @@ func (c *Client) WMSWatchIncoming(ctx context.Context) (<-chan WMSIncomingMessag
 				return
 			}
 			if message.Stored {
-				raw, readErr := c.WMSReadRaw(watchCtx, WMSReadRequest{Reference: message.Reference})
+				// Some firmware requires the message mode to disambiguate the
+				// storage index even though the QMI IDL marks this TLV optional.
+				mode := WMSMessageModeGW
+				if message.MessageModeKnown {
+					mode = message.MessageMode
+				}
+				readReq := WMSReadRequest{
+					Reference:   message.Reference,
+					MessageMode: &mode,
+				}
+				if message.SMSOnIMSKnown {
+					readReq.SMSOnIMS = &message.SMSOnIMS
+				}
+				raw, readErr := c.WMSReadRaw(watchCtx, readReq)
 				message.ReadError = readErr
 				if readErr == nil {
 					message.Tag = raw.Tag
