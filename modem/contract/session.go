@@ -18,12 +18,22 @@ type Session interface {
 // PollStream emits an initial value and then polls until the context is done
 // or a query returns an error.
 func PollStream[T any](ctx context.Context, interval time.Duration, query func(context.Context) (T, error)) <-chan Result[T] {
+	if interval <= 0 {
+		panic("contract.PollStream: non-positive interval")
+	}
 	out := make(chan Result[T], 1)
 	go func() {
 		defer close(out)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+		var timer *time.Timer
+		defer func() {
+			if timer != nil {
+				timer.Stop()
+			}
+		}()
 		for {
+			if ctx.Err() != nil {
+				return
+			}
 			value, err := query(ctx)
 			if ctx.Err() != nil {
 				return
@@ -31,8 +41,13 @@ func PollStream[T any](ctx context.Context, interval time.Duration, query func(c
 			if !SendStreamResult(ctx, out, Result[T]{Value: value, Err: err}) || err != nil {
 				return
 			}
+			if timer == nil {
+				timer = time.NewTimer(interval)
+			} else {
+				timer.Reset(interval)
+			}
 			select {
-			case <-ticker.C:
+			case <-timer.C:
 			case <-ctx.Done():
 				return
 			}

@@ -14,14 +14,16 @@ import (
 )
 
 type Backend struct {
-	client           *mbimproto.Client
-	device           string
-	mu               sync.Mutex
-	slots            map[uint32]struct{}
-	sessionsPrepared bool
-	metadataMu       sync.Mutex
-	metadataKey      string
-	metadata         SIMInfo
+	client              *mbimproto.Client
+	device              string
+	mu                  sync.Mutex
+	slots               map[uint32]struct{}
+	sessionsPrepared    bool
+	notificationMu      sync.Mutex
+	notificationEntries []mbimproto.DeviceServiceSubscribeEntry
+	metadataMu          sync.Mutex
+	metadataKey         string
+	metadata            SIMInfo
 }
 
 func New(client *mbimproto.Client, device string) *Backend {
@@ -209,21 +211,27 @@ func (b *Backend) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, fmt.Errorf("reading MBIM radio state: %w", err)
 	}
-	sim, err := b.SIMInfo(ctx)
+	ready, err := b.client.SubscriberReadyStatus(ctx)
 	if err != nil {
-		return Status{}, err
+		return Status{}, fmt.Errorf("reading MBIM subscriber status: %w", err)
 	}
-	network, err := b.NetworkStatus(ctx)
+	registration, err := b.client.RegistrationState(ctx)
 	if err != nil {
-		return Status{}, err
+		return Status{}, fmt.Errorf("reading MBIM registration state: %w", err)
 	}
-	signal, err := b.Signal(ctx)
+	packet, err := b.client.PacketService(ctx)
 	if err != nil {
-		return Status{}, err
+		return Status{}, fmt.Errorf("reading MBIM packet service: %w", err)
 	}
+	signalState, err := b.client.SignalState(ctx)
+	if err != nil {
+		return Status{}, fmt.Errorf("reading MBIM signal: %w", err)
+	}
+	network := networkStatusFromMBIM(registration, packet)
+	signal := signalFromMBIM(signalState)
 	return Status{
 		Power:         mbimPowerState(radio),
-		SIM:           sim.State,
+		SIM:           mbimSIMState(ready.ReadyState),
 		Registration:  network.Registration,
 		PacketService: network.PacketService,
 		Technology:    network.Technology,
@@ -233,25 +241,12 @@ func (b *Backend) Status(ctx context.Context) (Status, error) {
 	}, nil
 }
 
-func (b *Backend) WatchStatus(ctx context.Context) (<-chan Result[Status], error) {
-	return pollStream(ctx, b.Status), nil
-}
-
 func (b *Backend) SIMInfo(ctx context.Context) (SIMInfo, error) {
 	ready, err := b.client.SubscriberReadyStatus(ctx)
 	if err != nil {
 		return SIMInfo{}, fmt.Errorf("reading MBIM subscriber status: %w", err)
 	}
-	result := SIMInfo{
-		State:      mbimSIMState(ready.ReadyState),
-		Slot:       uint8(ready.SlotID + 1),
-		ICCID:      ready.SIMICCID,
-		IMSI:       ready.SubscriberID,
-		OwnNumbers: append([]string(nil), ready.TelephoneNumbers...),
-	}
-	if result.Slot == 0 {
-		result.Slot = 1
-	}
+	result := simInfoFromSubscriber(ready)
 	if pin, pinErr := b.client.PIN(ctx); pinErr == nil {
 		result.PINRetries = uint8(min(pin.RemainingAttempts, math.MaxUint8))
 		if pin.State == mbimproto.PinStateLocked {
@@ -265,6 +260,20 @@ func (b *Backend) SIMInfo(ctx context.Context) (SIMInfo, error) {
 	result.SPN = metadata.SPN
 	result.ATR = slices.Clone(metadata.ATR)
 	return result, nil
+}
+
+func simInfoFromSubscriber(ready mbimproto.SubscriberReadyStatusResponse) SIMInfo {
+	result := SIMInfo{
+		State:      mbimSIMState(ready.ReadyState),
+		Slot:       uint8(ready.SlotID + 1),
+		ICCID:      ready.SIMICCID,
+		IMSI:       ready.SubscriberID,
+		OwnNumbers: append([]string(nil), ready.TelephoneNumbers...),
+	}
+	if result.Slot == 0 {
+		result.Slot = 1
+	}
+	return result
 }
 
 type nonClosingSIMReader struct{ simcard.Reader }
@@ -399,10 +408,6 @@ func (b *Backend) SetPreferredNetworks(ctx context.Context, networks []Preferred
 	return nil
 }
 
-func (b *Backend) WatchSIM(ctx context.Context) (<-chan Result[SIMInfo], error) {
-	return pollStream(ctx, b.SIMInfo), nil
-}
-
 func (b *Backend) NetworkStatus(ctx context.Context) (NetworkStatus, error) {
 	registration, err := b.client.RegistrationState(ctx)
 	if err != nil {
@@ -412,23 +417,35 @@ func (b *Backend) NetworkStatus(ctx context.Context) (NetworkStatus, error) {
 	if err != nil {
 		return NetworkStatus{}, fmt.Errorf("reading MBIM packet service: %w", err)
 	}
-	result := NetworkStatus{
-		Registration:          mbimRegistrationState(registration.RegisterState),
-		PacketService:         PacketServiceState(packet.PacketServiceState),
-		Technology:            mbimDataClass(packet.CurrentDataClass),
-		Available:             mbimDataClass(mbimproto.DataClass(registration.AvailableDataClasses)),
-		OperatorID:            registration.ProviderID,
-		OperatorName:          registration.ProviderName,
-		RoamingText:           registration.RoamingText,
-		UplinkBitsPerSecond:   packet.UplinkSpeed,
-		DownlinkBitsPerSecond: packet.DownlinkSpeed,
-	}
+	result := networkStatusFromMBIM(registration, packet)
 	if location, locationErr := b.client.LocationInfoStatus(ctx); locationErr == nil {
 		result.LocationAreaCode = location.LocationAreaCode
 		result.TrackingAreaCode = location.TrackingAreaCode
 		result.CellID = uint64(location.CellID)
 	}
 	return result, nil
+}
+
+func networkStatusFromMBIM(registration mbimproto.RegistrationStateInfo, packet mbimproto.PacketServiceInfo) NetworkStatus {
+	result := NetworkStatus{}
+	applyMBIMRegistration(&result, registration)
+	applyMBIMPacketService(&result, packet)
+	return result
+}
+
+func applyMBIMRegistration(result *NetworkStatus, registration mbimproto.RegistrationStateInfo) {
+	result.Registration = mbimRegistrationState(registration.RegisterState)
+	result.Available = mbimDataClass(mbimproto.DataClass(registration.AvailableDataClasses))
+	result.OperatorID = registration.ProviderID
+	result.OperatorName = registration.ProviderName
+	result.RoamingText = registration.RoamingText
+}
+
+func applyMBIMPacketService(result *NetworkStatus, packet mbimproto.PacketServiceInfo) {
+	result.PacketService = PacketServiceState(packet.PacketServiceState)
+	result.Technology = mbimDataClass(packet.CurrentDataClass)
+	result.UplinkBitsPerSecond = packet.UplinkSpeed
+	result.DownlinkBitsPerSecond = packet.DownlinkSpeed
 }
 
 func (b *Backend) Register(ctx context.Context, cfg RegisterConfig) error {
@@ -644,6 +661,10 @@ func (b *Backend) Signal(ctx context.Context) (Signal, error) {
 	if err != nil {
 		return Signal{}, fmt.Errorf("reading MBIM signal: %w", err)
 	}
+	return signalFromMBIM(state), nil
+}
+
+func signalFromMBIM(state mbimproto.SignalStateInfo) Signal {
 	result := Signal{}
 	if state.RSSI <= 31 {
 		rssi := -113 + float64(state.RSSI)*2
@@ -660,7 +681,7 @@ func (b *Backend) Signal(ctx context.Context) (Signal, error) {
 		}
 		result.Radios = append(result.Radios, radio)
 	}
-	return result, nil
+	return result
 }
 
 func (b *Backend) SetSignalThresholds(ctx context.Context, thresholds SignalThresholds) error {
@@ -677,14 +698,6 @@ func (b *Backend) SetSignalThresholds(ctx context.Context, thresholds SignalThre
 		return fmt.Errorf("setting MBIM signal thresholds: %w", err)
 	}
 	return nil
-}
-
-func (b *Backend) WatchNetwork(ctx context.Context) (<-chan Result[NetworkStatus], error) {
-	return pollStream(ctx, b.NetworkStatus), nil
-}
-
-func (b *Backend) WatchSignal(ctx context.Context) (<-chan Result[Signal], error) {
-	return pollStream(ctx, b.Signal), nil
 }
 
 func (b *Backend) Profiles(ctx context.Context) ([]Profile, error) {

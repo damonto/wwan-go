@@ -18,6 +18,15 @@ type lifecycleBackend struct {
 	closeCount int
 }
 
+type statusWatchBackend struct {
+	unsupportedBackend
+	stream chan Result[Status]
+}
+
+func (b *statusWatchBackend) WatchStatus(context.Context) (<-chan Result[Status], error) {
+	return b.stream, nil
+}
+
 func (b *lifecycleBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -33,12 +42,13 @@ type lifecycleSession struct {
 
 type connectBackend struct {
 	unsupportedBackend
-	sim     SIMState
-	power   PowerState
-	network NetworkStatus
-	steps   []string
-	session *lifecycleSession
-	setCaps Technology
+	sim          SIMState
+	power        PowerState
+	network      NetworkStatus
+	steps        []string
+	session      *lifecycleSession
+	setCaps      Technology
+	statusStream chan Result[Status]
 }
 
 func (b *connectBackend) SIMInfo(context.Context) (SIMInfo, error) {
@@ -89,6 +99,13 @@ func (b *connectBackend) Connect(context.Context, ConnectConfig) (sessionBackend
 func (b *connectBackend) SetCapabilities(_ context.Context, technologies Technology) error {
 	b.setCaps = technologies
 	return nil
+}
+
+func (b *connectBackend) WatchStatus(ctx context.Context) (<-chan Result[Status], error) {
+	if b.statusStream == nil {
+		return b.unsupportedBackend.WatchStatus(ctx)
+	}
+	return b.statusStream, nil
 }
 
 func (s *lifecycleSession) Info() BearerInfo {
@@ -200,6 +217,95 @@ func TestBearerInfoReturnsNetworkCopy(t *testing.T) {
 				second.Network.Gateways[0].String() != "192.0.2.1" || second.Network.DNS[0].String() != "1.1.1.1" {
 				t.Errorf("second Info() = %+v", second)
 			}
+		})
+	}
+}
+
+func TestWatchStatusIncludesOwnedBearers(t *testing.T) {
+	tests := []struct {
+		name        string
+		bearerCount int
+	}{
+		{name: "no bearers"},
+		{name: "active bearers", bearerCount: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &statusWatchBackend{stream: make(chan Result[Status], 1)}
+			m := newModem("/dev/test", ProtocolQMI, AccessDirect, backend)
+			for id := range tt.bearerCount {
+				bearerID := uint64(id + 1)
+				m.bearers[bearerID] = &Bearer{id: bearerID}
+			}
+
+			stream, err := m.WatchStatus(t.Context())
+			if err != nil {
+				t.Fatalf("WatchStatus() error = %v", err)
+			}
+			backend.stream <- Result[Status]{Value: Status{Power: PowerStateOn}}
+
+			result := <-stream
+			if result.Err != nil {
+				t.Fatalf("status result error = %v", result.Err)
+			}
+			if result.Value.OwnBearers != tt.bearerCount {
+				t.Fatalf("OwnBearers = %d, want %d", result.Value.OwnBearers, tt.bearerCount)
+			}
+		})
+	}
+}
+
+func TestWatchStatusTracksBearerChanges(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "connect and disconnect emit status updates"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &connectBackend{
+				sim:          SIMStateReady,
+				power:        PowerStateOn,
+				network:      NetworkStatus{Registration: RegistrationHome, PacketService: PacketServiceAttached},
+				session:      &lifecycleSession{value: BearerInfo{Connected: true}},
+				statusStream: make(chan Result[Status], 1),
+			}
+			m := newModem("/dev/test", ProtocolQMI, AccessDirect, backend)
+			stream, err := m.WatchStatus(t.Context())
+			if err != nil {
+				t.Fatalf("WatchStatus() error = %v", err)
+			}
+
+			receiveCount := func(want int) {
+				t.Helper()
+				select {
+				case result := <-stream:
+					if result.Err != nil {
+						t.Fatalf("status result error = %v", result.Err)
+					}
+					if result.Value.OwnBearers != want {
+						t.Fatalf("OwnBearers = %d, want %d", result.Value.OwnBearers, want)
+					}
+				case <-time.After(time.Second):
+					t.Fatalf("timed out waiting for OwnBearers = %d", want)
+				}
+			}
+
+			backend.statusStream <- Result[Status]{Value: Status{Power: PowerStateOn}}
+			receiveCount(0)
+
+			bearer, err := m.Connect(t.Context(), ConnectConfig{Interface: "wwan0"})
+			if err != nil {
+				t.Fatalf("Connect() error = %v", err)
+			}
+			receiveCount(1)
+
+			if err := bearer.Disconnect(t.Context()); err != nil {
+				t.Fatalf("Disconnect() error = %v", err)
+			}
+			receiveCount(0)
 		})
 	}
 }

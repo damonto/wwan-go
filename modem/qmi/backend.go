@@ -235,9 +235,9 @@ func (b *Backend) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, fmt.Errorf("reading QMI operating mode: %w", err)
 	}
-	sim, err := b.SIMInfo(ctx)
+	card, err := b.client.CardStatus(ctx)
 	if err != nil {
-		return Status{}, err
+		return Status{}, fmt.Errorf("reading QMI card status: %w", err)
 	}
 	network, err := b.NetworkStatus(ctx)
 	if err != nil {
@@ -249,7 +249,7 @@ func (b *Backend) Status(ctx context.Context) (Status, error) {
 	}
 	return Status{
 		Power:         qmiPowerState(mode),
-		SIM:           sim.State,
+		SIM:           qmiSIMState(card),
 		Registration:  network.Registration,
 		PacketService: network.PacketService,
 		Technology:    network.Technology,
@@ -257,10 +257,6 @@ func (b *Backend) Status(ctx context.Context) (Status, error) {
 		OperatorName:  network.OperatorName,
 		SignalQuality: signal.Quality,
 	}, nil
-}
-
-func (b *Backend) WatchStatus(ctx context.Context) (<-chan Result[Status], error) {
-	return pollStream(ctx, b.Status), nil
 }
 
 func (b *Backend) SIMInfo(ctx context.Context) (SIMInfo, error) {
@@ -442,15 +438,15 @@ func (b *Backend) SetPreferredNetworks(ctx context.Context, networks []Preferred
 	return nil
 }
 
-func (b *Backend) WatchSIM(ctx context.Context) (<-chan Result[SIMInfo], error) {
-	return pollStream(ctx, b.SIMInfo), nil
-}
-
 func (b *Backend) NetworkStatus(ctx context.Context) (NetworkStatus, error) {
 	serving, err := b.client.NASServingSystem(ctx)
 	if err != nil {
 		return NetworkStatus{}, fmt.Errorf("reading QMI serving system: %w", err)
 	}
+	return networkStatusFromServing(serving), nil
+}
+
+func networkStatusFromServing(serving qcom.NASServingSystem) NetworkStatus {
 	result := NetworkStatus{
 		Registration:     qmiRegistrationState(serving),
 		PacketService:    qmiPacketService(serving.PSAttachState),
@@ -467,7 +463,7 @@ func (b *Backend) NetworkStatus(ctx context.Context) (NetworkStatus, error) {
 	if serving.RoamingIndicatorKnown && serving.RoamingIndicator == qcom.NASRoamingIndicatorRoaming {
 		result.RoamingText = "roaming"
 	}
-	return result, nil
+	return result
 }
 
 func (b *Backend) Register(ctx context.Context, cfg RegisterConfig) error {
@@ -702,6 +698,10 @@ func (b *Backend) Signal(ctx context.Context) (Signal, error) {
 	if err != nil {
 		return Signal{}, fmt.Errorf("reading QMI signal: %w", err)
 	}
+	return signalFromInfo(info), nil
+}
+
+func signalFromInfo(info qcom.NASSignalInfo) Signal {
 	result := Signal{}
 	if info.GSMKnown {
 		result.Radios = append(result.Radios, RadioSignal{Technology: TechnologyGSM, RSSI: knownSignal(float64(info.GSM))})
@@ -724,7 +724,7 @@ func (b *Backend) Signal(ctx context.Context) (Signal, error) {
 		result.Radios = append(result.Radios, radio)
 	}
 	result.Quality = signalQuality(result.Radios)
-	return result, nil
+	return result
 }
 
 func (b *Backend) SetSignalThresholds(ctx context.Context, thresholds SignalThresholds) error {
@@ -789,14 +789,6 @@ func qmiSignalV2Unsupported(err error) bool {
 		return false
 	}
 	return protocolErr == qcom.QMIErrorInvalidQmiCommand || protocolErr == qcom.QMIErrorNotSupported
-}
-
-func (b *Backend) WatchNetwork(ctx context.Context) (<-chan Result[NetworkStatus], error) {
-	return pollStream(ctx, b.NetworkStatus), nil
-}
-
-func (b *Backend) WatchSignal(ctx context.Context) (<-chan Result[Signal], error) {
-	return pollStream(ctx, b.Signal), nil
 }
 
 func (b *Backend) Profiles(ctx context.Context) ([]Profile, error) {

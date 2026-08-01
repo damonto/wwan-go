@@ -47,29 +47,43 @@ func (b *Backend) CancelUSSD(ctx context.Context) error {
 }
 
 func (b *Backend) WatchUSSD(ctx context.Context) (<-chan Result[USSDMessage], error) {
-	updates, err := b.client.WatchIndicationResults(ctx, mbimproto.ServiceUSSD, mbimproto.CIDUSSD)
+	watchCtx, cancel := context.WithCancel(ctx)
+	updates, err := b.client.WatchIndicationResults(watchCtx, mbimproto.ServiceUSSD, mbimproto.CIDUSSD)
 	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("watching MBIM USSD: %w", err)
+	}
+	if err := b.ensureWatchNotifications(ctx, mbimproto.DeviceServiceSubscribeEntry{
+		ServiceID: mbimproto.ServiceUSSD,
+		CIDs:      []uint32{mbimproto.CIDUSSD},
+	}); err != nil {
+		cancel()
 		return nil, fmt.Errorf("watching MBIM USSD: %w", err)
 	}
 	out := make(chan Result[USSDMessage], 8)
 	go func() {
 		defer close(out)
+		defer cancel()
+		sendError := func(err error) {
+			// The watcher terminates immediately after this best-effort error report.
+			_ = sendStreamResult(watchCtx, out, Result[USSDMessage]{Err: err})
+		}
 		for update := range updates {
 			if update.Err != nil {
-				sendStreamResult(ctx, out, Result[USSDMessage]{Err: update.Err})
+				sendError(update.Err)
 				return
 			}
 			var info mbimproto.USSDInfo
 			if err := info.UnmarshalBinary(update.Value.InformationBuffer); err != nil {
-				sendStreamResult(ctx, out, Result[USSDMessage]{Err: fmt.Errorf("decoding MBIM USSD event: %w", err)})
+				sendError(fmt.Errorf("decoding MBIM USSD event: %w", err))
 				return
 			}
 			message, err := mbimUSSDMessage(info)
 			if err != nil {
-				sendStreamResult(ctx, out, Result[USSDMessage]{Err: err})
+				sendError(err)
 				return
 			}
-			if !sendStreamResult(ctx, out, Result[USSDMessage]{Value: message}) {
+			if !sendStreamResult(watchCtx, out, Result[USSDMessage]{Value: message}) {
 				return
 			}
 		}

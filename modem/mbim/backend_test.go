@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
+	"slices"
 	"testing"
 
 	mbimproto "github.com/damonto/wwan-go/mbim"
@@ -37,6 +38,238 @@ func TestPopulateActiveMBIMSIMSlot(t *testing.T) {
 			populateActiveMBIMSIMSlot(tt.slots, tt.sim)
 			if !reflect.DeepEqual(tt.slots, tt.want) {
 				t.Errorf("SIM slots = %+v, want %+v", tt.slots, tt.want)
+			}
+		})
+	}
+}
+
+func TestMergeWatchNotifications(t *testing.T) {
+	tests := []struct {
+		name        string
+		current     []mbimproto.DeviceServiceSubscribeEntry
+		requested   []mbimproto.DeviceServiceSubscribeEntry
+		want        []mbimproto.DeviceServiceSubscribeEntry
+		wantChanged bool
+	}{
+		{
+			name: "merges services and CIDs",
+			current: []mbimproto.DeviceServiceSubscribeEntry{{
+				ServiceID: mbimproto.ServiceBasicConnect,
+				CIDs:      []uint32{mbimproto.CIDSignalState},
+			}},
+			requested: []mbimproto.DeviceServiceSubscribeEntry{
+				{ServiceID: mbimproto.ServiceBasicConnect, CIDs: []uint32{mbimproto.CIDRegisterState}},
+				{ServiceID: mbimproto.ServiceSMS, CIDs: []uint32{mbimproto.CIDSMSRead, mbimproto.CIDSMSMessageStoreStatus}},
+			},
+			want: []mbimproto.DeviceServiceSubscribeEntry{
+				{ServiceID: mbimproto.ServiceBasicConnect, CIDs: []uint32{mbimproto.CIDSignalState, mbimproto.CIDRegisterState}},
+				{ServiceID: mbimproto.ServiceSMS, CIDs: []uint32{mbimproto.CIDSMSRead, mbimproto.CIDSMSMessageStoreStatus}},
+			},
+			wantChanged: true,
+		},
+		{
+			name: "keeps existing subscriptions",
+			current: []mbimproto.DeviceServiceSubscribeEntry{{
+				ServiceID: mbimproto.ServiceUSSD,
+				CIDs:      []uint32{mbimproto.CIDUSSD},
+			}},
+			requested: []mbimproto.DeviceServiceSubscribeEntry{{
+				ServiceID: mbimproto.ServiceUSSD,
+				CIDs:      []uint32{mbimproto.CIDUSSD},
+			}},
+			want: []mbimproto.DeviceServiceSubscribeEntry{{
+				ServiceID: mbimproto.ServiceUSSD,
+				CIDs:      []uint32{mbimproto.CIDUSSD},
+			}},
+		},
+		{
+			name: "empty CID list subscribes to all notifications",
+			requested: []mbimproto.DeviceServiceSubscribeEntry{
+				{ServiceID: mbimproto.ServiceSMS},
+				{ServiceID: mbimproto.ServiceSMS, CIDs: []uint32{mbimproto.CIDSMSRead, mbimproto.CIDSMSRead}},
+			},
+			want: []mbimproto.DeviceServiceSubscribeEntry{{
+				ServiceID: mbimproto.ServiceSMS,
+			}},
+			wantChanged: true,
+		},
+		{
+			name: "deduplicates CIDs for a new service",
+			requested: []mbimproto.DeviceServiceSubscribeEntry{{
+				ServiceID: mbimproto.ServiceSMS,
+				CIDs:      []uint32{mbimproto.CIDSMSRead, mbimproto.CIDSMSRead},
+			}},
+			want: []mbimproto.DeviceServiceSubscribeEntry{{
+				ServiceID: mbimproto.ServiceSMS,
+				CIDs:      []uint32{mbimproto.CIDSMSRead},
+			}},
+			wantChanged: true,
+		},
+		{
+			name: "widens an existing service to all notifications",
+			current: []mbimproto.DeviceServiceSubscribeEntry{{
+				ServiceID: mbimproto.ServiceBasicConnect,
+				CIDs:      []uint32{mbimproto.CIDSignalState},
+			}},
+			requested: []mbimproto.DeviceServiceSubscribeEntry{{
+				ServiceID: mbimproto.ServiceBasicConnect,
+			}},
+			want: []mbimproto.DeviceServiceSubscribeEntry{{
+				ServiceID: mbimproto.ServiceBasicConnect,
+			}},
+			wantChanged: true,
+		},
+		{
+			name: "all notifications absorb narrower requests",
+			current: []mbimproto.DeviceServiceSubscribeEntry{{
+				ServiceID: mbimproto.ServiceUSSD,
+			}},
+			requested: []mbimproto.DeviceServiceSubscribeEntry{{
+				ServiceID: mbimproto.ServiceUSSD,
+				CIDs:      []uint32{mbimproto.CIDUSSD},
+			}},
+			want: []mbimproto.DeviceServiceSubscribeEntry{{
+				ServiceID: mbimproto.ServiceUSSD,
+			}},
+		},
+	}
+
+	cloneEntries := func(entries []mbimproto.DeviceServiceSubscribeEntry) []mbimproto.DeviceServiceSubscribeEntry {
+		cloned := slices.Clone(entries)
+		for i := range cloned {
+			cloned[i].CIDs = slices.Clone(cloned[i].CIDs)
+		}
+		return cloned
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			currentBefore := cloneEntries(tt.current)
+			requestedBefore := cloneEntries(tt.requested)
+			got, changed := mergeWatchNotifications(tt.current, tt.requested)
+			if changed != tt.wantChanged {
+				t.Fatalf("mergeWatchNotifications() changed = %t, want %t", changed, tt.wantChanged)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("mergeWatchNotifications() = %+v, want %+v", got, tt.want)
+			}
+			if !reflect.DeepEqual(tt.current, currentBefore) || !reflect.DeepEqual(tt.requested, requestedBefore) {
+				t.Fatal("mergeWatchNotifications() modified its input")
+			}
+			if len(got) > 0 && len(got[0].CIDs) > 0 {
+				got[0].CIDs[0] = 0
+				if !reflect.DeepEqual(tt.current, currentBefore) || !reflect.DeepEqual(tt.requested, requestedBefore) {
+					t.Fatal("mergeWatchNotifications() reused an input CID slice")
+				}
+			}
+		})
+	}
+}
+
+func TestSIMInfoFromSubscriber(t *testing.T) {
+	tests := []struct {
+		name  string
+		ready mbimproto.SubscriberReadyStatusResponse
+		want  SIMInfo
+	}{
+		{
+			name: "legacy active slot defaults to slot one",
+			ready: mbimproto.SubscriberReadyStatusResponse{
+				ReadyState:       mbimproto.SubscriberReadyStateInitialized,
+				SlotID:           math.MaxUint32,
+				SIMICCID:         "8986001234567890123",
+				SubscriberID:     "460001234567890",
+				TelephoneNumbers: []string{"+123"},
+			},
+			want: SIMInfo{
+				State:      SIMStateReady,
+				Slot:       1,
+				ICCID:      "8986001234567890123",
+				IMSI:       "460001234567890",
+				OwnNumbers: []string{"+123"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := simInfoFromSubscriber(tt.ready)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("simInfoFromSubscriber() = %+v, want %+v", got, tt.want)
+			}
+			got.OwnNumbers[0] = "changed"
+			if tt.ready.TelephoneNumbers[0] != "+123" {
+				t.Fatal("simInfoFromSubscriber() reused the response telephone number slice")
+			}
+		})
+	}
+}
+
+func TestNetworkStatusFromMBIM(t *testing.T) {
+	tests := []struct {
+		name         string
+		registration mbimproto.RegistrationStateInfo
+		packet       mbimproto.PacketServiceInfo
+		want         NetworkStatus
+	}{
+		{
+			name: "maps registration and packet service",
+			registration: mbimproto.RegistrationStateInfo{
+				RegisterState:        mbimproto.RegisterStateRoaming,
+				AvailableDataClasses: uint32(mbimproto.DataClassLTE),
+				ProviderID:           "46001",
+				ProviderName:         "carrier",
+				RoamingText:          "roaming",
+			},
+			packet: mbimproto.PacketServiceInfo{
+				PacketServiceState: mbimproto.PacketServiceStateAttached,
+				CurrentDataClass:   mbimproto.DataClassLTE,
+				UplinkSpeed:        1_000,
+				DownlinkSpeed:      2_000,
+			},
+			want: NetworkStatus{
+				Registration:          RegistrationRoaming,
+				PacketService:         PacketServiceAttached,
+				Technology:            TechnologyLTE,
+				Available:             TechnologyLTE,
+				OperatorID:            "46001",
+				OperatorName:          "carrier",
+				RoamingText:           "roaming",
+				UplinkBitsPerSecond:   1_000,
+				DownlinkBitsPerSecond: 2_000,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := networkStatusFromMBIM(tt.registration, tt.packet); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("networkStatusFromMBIM() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSignalFromMBIM(t *testing.T) {
+	tests := []struct {
+		name  string
+		state mbimproto.SignalStateInfo
+		want  Signal
+	}{
+		{
+			name:  "maps RSSI",
+			state: mbimproto.SignalStateInfo{RSSI: 20},
+			want: Signal{
+				Quality: 65,
+				Radios:  []RadioSignal{{RSSI: knownSignal(-73)}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := signalFromMBIM(tt.state); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("signalFromMBIM() = %+v, want %+v", got, tt.want)
 			}
 		})
 	}

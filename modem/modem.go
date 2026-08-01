@@ -16,27 +16,29 @@ const connectPollInterval = 250 * time.Millisecond
 
 // Modem is one opened QMI or MBIM control node.
 type Modem struct {
-	mu        sync.RWMutex
-	backend   backend
-	device    string
-	protocol  Protocol
-	access    Access
-	closed    bool
-	done      chan struct{}
-	bearers   map[uint64]*Bearer
-	nextID    uint64
-	closeOnce sync.Once
-	closeErr  error
+	mu             sync.RWMutex
+	backend        backend
+	device         string
+	protocol       Protocol
+	access         Access
+	closed         bool
+	done           chan struct{}
+	bearers        map[uint64]*Bearer
+	bearersChanged chan struct{}
+	nextID         uint64
+	closeOnce      sync.Once
+	closeErr       error
 }
 
 func newModem(device string, protocol Protocol, access Access, b backend) *Modem {
 	return &Modem{
-		backend:  b,
-		device:   device,
-		protocol: protocol,
-		access:   access,
-		done:     make(chan struct{}),
-		bearers:  make(map[uint64]*Bearer),
+		backend:        b,
+		device:         device,
+		protocol:       protocol,
+		access:         access,
+		done:           make(chan struct{}),
+		bearers:        make(map[uint64]*Bearer),
+		bearersChanged: make(chan struct{}),
 	}
 }
 
@@ -155,10 +157,26 @@ func (m *Modem) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	m.mu.RLock()
-	status.OwnBearers = len(m.bearers)
-	m.mu.RUnlock()
+	status.OwnBearers = m.ownBearerCount()
 	return status, nil
+}
+
+func (m *Modem) ownBearerCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.bearers)
+}
+
+func (m *Modem) bearerSnapshot() (int, <-chan struct{}) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.bearers), m.bearersChanged
+}
+
+func (m *Modem) notifyBearersChangedLocked() {
+	// Closing broadcasts to every watcher; replacing the channel arms the next change.
+	close(m.bearersChanged)
+	m.bearersChanged = make(chan struct{})
 }
 
 func (m *Modem) SetPowerState(ctx context.Context, state PowerState) error {
@@ -182,7 +200,58 @@ func (m *Modem) WatchStatus(ctx context.Context) (<-chan Result[Status], error) 
 	if err != nil {
 		return nil, err
 	}
-	return startModemStream(ctx, m.done, b.WatchStatus)
+	return startModemStream(ctx, m.done, func(watchCtx context.Context) (<-chan Result[Status], error) {
+		stream, err := b.WatchStatus(watchCtx)
+		if err != nil {
+			return nil, err
+		}
+		out := make(chan Result[Status], 16)
+		go func() {
+			defer close(out)
+			_, bearersChanged := m.bearerSnapshot()
+			var current Status
+			haveCurrent := false
+			send := func(result Result[Status]) bool {
+				select {
+				case out <- result:
+					return true
+				case <-watchCtx.Done():
+					return false
+				}
+			}
+			for {
+				select {
+				case <-watchCtx.Done():
+					return
+				case <-bearersChanged:
+					count, next := m.bearerSnapshot()
+					bearersChanged = next
+					if !haveCurrent || current.OwnBearers == count {
+						continue
+					}
+					current.OwnBearers = count
+					if !send(Result[Status]{Value: current}) {
+						return
+					}
+				case result, ok := <-stream:
+					if !ok {
+						return
+					}
+					count, next := m.bearerSnapshot()
+					bearersChanged = next
+					result.Value.OwnBearers = count
+					if result.Err == nil {
+						current = result.Value
+						haveCurrent = true
+					}
+					if !send(result) || result.Err != nil {
+						return
+					}
+				}
+			}
+		}()
+		return out, nil
+	})
 }
 
 func (m *Modem) SIMInfo(ctx context.Context) (SIMInfo, error) {
@@ -549,12 +618,13 @@ func (m *Modem) Connect(ctx context.Context, cfg ConnectConfig) (*Bearer, error)
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		_ = session.Close()
+		_ = session.Close() // ErrClosed remains the authoritative result for this race.
 		return nil, ErrClosed
 	}
 	m.nextID++
 	bearer := &Bearer{id: m.nextID, modem: m, session: session, done: make(chan struct{})}
 	m.bearers[bearer.id] = bearer
+	m.notifyBearersChangedLocked()
 	m.mu.Unlock()
 	return bearer, nil
 }
@@ -635,8 +705,9 @@ func (m *Modem) Bearer(id uint64) (*Bearer, bool) {
 
 func (m *Modem) removeBearer(id uint64) {
 	m.mu.Lock()
-	if m.bearers != nil {
+	if _, exists := m.bearers[id]; exists {
 		delete(m.bearers, id)
+		m.notifyBearersChangedLocked()
 	}
 	m.mu.Unlock()
 }

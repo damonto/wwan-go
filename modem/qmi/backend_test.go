@@ -62,6 +62,84 @@ func TestApplyQMICellLocation(t *testing.T) {
 	}
 }
 
+func TestNetworkStatusFromServing(t *testing.T) {
+	tests := []struct {
+		name    string
+		serving qcom.NASServingSystem
+		want    NetworkStatus
+	}{
+		{
+			name: "maps a roaming LTE serving system",
+			serving: qcom.NASServingSystem{
+				RegistrationState:     qcom.NASRegistrationRegistered,
+				PSAttachState:         qcom.NASAttachAttached,
+				RadioInterfaces:       []qcom.NASRadioInterface{qcom.NASRadioInterfaceLTE},
+				RoamingIndicator:      qcom.NASRoamingIndicatorRoaming,
+				RoamingIndicatorKnown: true,
+				PLMN:                  qcom.NASPLMN{MCC: 460, MNC: 1, Description: "carrier"},
+				PLMNKnown:             true,
+				LocationAreaCode:      10,
+				TrackingAreaCode:      20,
+				CellID:                30,
+			},
+			want: NetworkStatus{
+				Registration:     RegistrationRoaming,
+				PacketService:    PacketServiceAttached,
+				Technology:       TechnologyLTE,
+				Available:        TechnologyLTE,
+				OperatorID:       "46001",
+				OperatorName:     "carrier",
+				RoamingText:      "roaming",
+				LocationAreaCode: 10,
+				TrackingAreaCode: 20,
+				CellID:           30,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := networkStatusFromServing(tt.serving); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("networkStatusFromServing() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSignalFromInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info qcom.NASSignalInfo
+		want Signal
+	}{
+		{
+			name: "maps LTE measurements",
+			info: qcom.NASSignalInfo{
+				LTEKnown: true,
+				LTE:      qcom.NASLTESignalInfo{RSSI: -70, RSRQ: -10, RSRP: -95, SNR: 125},
+			},
+			want: Signal{
+				Quality: 69,
+				Radios: []RadioSignal{{
+					Technology: TechnologyLTE,
+					RSSI:       knownSignal(-70),
+					RSRQ:       knownSignal(-10),
+					RSRP:       knownSignal(-95),
+					SNR:        knownSignal(12.5),
+				}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := signalFromInfo(tt.info); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("signalFromInfo() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 type capabilityTransport struct {
 	requests []qcom.Request
 }
