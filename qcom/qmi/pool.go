@@ -132,7 +132,7 @@ func (p *directPool) closeEntry(key string, entry *directEntry) error {
 func directCoreAvailable(core *transportCore) bool {
 	core.mu.Lock()
 	defer core.mu.Unlock()
-	return !core.closed && core.readErr == nil
+	return !core.closed && core.terminalErr == nil
 }
 
 func directDeviceKey(device string) string {

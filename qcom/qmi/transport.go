@@ -33,6 +33,16 @@ type Request struct {
 	qcom.Request
 }
 
+// TransportError reports a terminal transport failure. A QMI transport cannot
+// preserve transactions or client IDs after this error and must be reopened.
+type TransportError struct {
+	Err error
+}
+
+func (e *TransportError) Error() string { return e.Err.Error() }
+
+func (e *TransportError) Unwrap() error { return e.Err }
+
 func (r Request) MarshalBinary() ([]byte, error) {
 	return marshalRequest(r.Request)
 }
@@ -82,7 +92,7 @@ type transportCore struct {
 	pendingOwners map[messageKey]*transportLease
 	subs          map[uint64]*subscription
 	nextSub       uint64
-	readErr       error
+	terminalErr   error
 	closed        bool
 	txn           atomic.Uint32
 	ctlTxn        atomic.Uint32
@@ -90,6 +100,13 @@ type transportCore struct {
 
 // UsesProxy reports whether the transport was opened through qmi-proxy.
 func (t *Transport) UsesProxy() bool { return t.proxy }
+
+// TerminalError returns the error which made the transport unusable, if any.
+func (t *Transport) TerminalError() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.terminalErr
+}
 
 func New(conn Conn) *Transport {
 	core := &transportCore{
@@ -198,7 +215,9 @@ func (t *Transport) Do(ctx context.Context, req qcom.Request) (qcom.Response, er
 	t.writeMu.Unlock()
 	if writeErr != nil {
 		t.removePending(key)
-		return qcom.Response{}, fmt.Errorf("writing QMI request: %w", writeErr)
+		terminalErr := &TransportError{Err: fmt.Errorf("writing QMI request: %w", writeErr)}
+		t.fail(terminalErr)
+		return qcom.Response{}, terminalErr
 	}
 
 	select {
@@ -237,10 +256,10 @@ func (t *Transport) Indications(ctx context.Context, service qcom.ServiceType, c
 		sub.stop()
 		return nil, errors.New("QMI transport lease is closed")
 	}
-	if t.readErr != nil {
+	if t.terminalErr != nil {
 		t.mu.Unlock()
 		sub.stop()
-		return nil, t.readErr
+		return nil, t.terminalErr
 	}
 	if t.closed {
 		t.mu.Unlock()
@@ -405,8 +424,8 @@ func (t *Transport) addPending(key messageKey, ch chan responseResult) error {
 	if t.lease != nil && t.lease.closed.Load() {
 		return errors.New("QMI transport lease is closed")
 	}
-	if t.readErr != nil {
-		return t.readErr
+	if t.terminalErr != nil {
+		return t.terminalErr
 	}
 	if t.closed {
 		return errors.New("QMI transport is closed")
@@ -458,7 +477,7 @@ func (t *Transport) readLoop() {
 			if errors.Is(err, errUnexpectedServiceMessageType) {
 				continue
 			}
-			t.fail(fmt.Errorf("reading QMI message: %w", err))
+			t.fail(&TransportError{Err: fmt.Errorf("reading QMI message: %w", err)})
 			return
 		}
 		switch {
@@ -515,7 +534,7 @@ func (t *Transport) fail(err error) {
 		return
 	}
 	t.closed = true
-	t.readErr = err
+	t.terminalErr = err
 	pending := t.pending
 	t.pending = make(map[messageKey]chan responseResult)
 	t.pendingOwners = make(map[messageKey]*transportLease)

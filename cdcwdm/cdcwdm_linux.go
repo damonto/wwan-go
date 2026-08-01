@@ -19,6 +19,22 @@ const (
 	ioctlWDMMaxCommand        = 0x800248A0
 )
 
+// ErrDisconnected reports that the kernel control endpoint can no longer be
+// used. Callers must reopen the device instead of retrying the same file
+// descriptor.
+var ErrDisconnected = errors.New("cdc-wdm device disconnected")
+
+// DisconnectError preserves the poll flags which ended a cdc-wdm connection.
+type DisconnectError struct {
+	Revents int16
+}
+
+func (e *DisconnectError) Error() string {
+	return fmt.Sprintf("%s: poll revents=0x%X", ErrDisconnected, uint16(e.Revents))
+}
+
+func (e *DisconnectError) Unwrap() error { return ErrDisconnected }
+
 type Conn struct {
 	mu            sync.RWMutex
 	fd            int
@@ -168,7 +184,7 @@ func waitReady(fd int, events int16, deadline time.Time) error {
 			return net.ErrClosed
 		}
 		if revents&(unix.POLLERR|unix.POLLHUP) != 0 {
-			return fmt.Errorf("cdc-wdm poll failed: revents=0x%X", revents)
+			return &DisconnectError{Revents: revents}
 		}
 		if revents&events != 0 {
 			return nil

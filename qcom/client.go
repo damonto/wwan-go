@@ -69,6 +69,10 @@ type transportClientIDProvider interface {
 	ClientID(ctx context.Context, service ServiceType) (uint8, error)
 }
 
+type terminalErrorTransport interface {
+	TerminalError() error
+}
+
 // WithSlot selects the physical UICC slot used by UIM and CAT operations.
 func WithSlot(slot uint8) Option {
 	return func(c *config) {
@@ -111,14 +115,24 @@ func (c *Client) Close() error {
 		}
 
 		var releaseErr error
-		if !transportManagesClientIDs(transport) {
+		if !transportManagesClientIDs(transport) && transportTerminalError(transport) == nil {
 			services := make([]ServiceType, 0, len(c.clientIDs))
 			for service := range c.clientIDs {
 				services = append(services, service)
 			}
 			slices.Sort(services)
 			for _, service := range services {
-				releaseErr = errors.Join(releaseErr, c.releaseServiceClientIDLocked(ctx, service, c.clientIDs[service]))
+				if transportTerminalError(transport) != nil {
+					break
+				}
+				err := c.releaseServiceClientIDLocked(ctx, service, c.clientIDs[service])
+				if err == nil {
+					continue
+				}
+				if transportTerminalError(transport) != nil {
+					break
+				}
+				releaseErr = errors.Join(releaseErr, err)
 			}
 		}
 		c.clientIDs = nil
@@ -150,6 +164,14 @@ func transportManagesClientIDs(transport Transport) bool {
 	}
 	_, ok := boundQMIService(transport)
 	return ok
+}
+
+func transportTerminalError(transport Transport) error {
+	reporter, ok := transport.(terminalErrorTransport)
+	if !ok {
+		return nil
+	}
+	return reporter.TerminalError()
 }
 
 func (c *Client) nextTransactionID(service ServiceType) uint16 {

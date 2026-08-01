@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -68,6 +69,29 @@ type serviceBoundFakeTransport struct {
 
 func (t *serviceBoundFakeTransport) QMIService() ServiceType {
 	return t.service
+}
+
+type terminalFakeTransport struct {
+	fakeTransport
+	terminalErr error
+	failOnDo    error
+}
+
+func (t *terminalFakeTransport) Do(_ context.Context, _ Request) (Response, error) {
+	t.t.Helper()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.idx++
+	if t.terminalErr == nil {
+		t.terminalErr = t.failOnDo
+	}
+	return Response{}, t.terminalErr
+}
+
+func (t *terminalFakeTransport) TerminalError() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.terminalErr
 }
 
 type lockCheckingTransport struct {
@@ -1045,6 +1069,54 @@ func TestClientCloseIsIdempotent(t *testing.T) {
 	}
 	if reader.transport != nil {
 		t.Fatal("Transport was not cleared")
+	}
+}
+
+func TestClientCloseSkipsReleaseAfterTransportFailure(t *testing.T) {
+	tests := []struct {
+		name          string
+		terminalErr   error
+		failOnRelease error
+		wantCalls     int
+	}{
+		{
+			name:        "transport already failed",
+			terminalErr: errors.New("transport disconnected"),
+			wantCalls:   0,
+		},
+		{
+			name:          "transport fails during first release",
+			failOnRelease: errors.New("transport disconnected"),
+			wantCalls:     1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &terminalFakeTransport{
+				fakeTransport: fakeTransport{t: t},
+				terminalErr:   tt.terminalErr,
+				failOnDo:      tt.failOnRelease,
+			}
+			client := &Client{
+				transport: transport,
+				slot:      1,
+				clientIDs: map[ServiceType]uint8{
+					ServiceUIM: 7,
+					ServiceWMS: 8,
+				},
+			}
+
+			if err := client.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			if transport.idx != tt.wantCalls {
+				t.Fatalf("Do() calls = %d, want %d", transport.idx, tt.wantCalls)
+			}
+			if transport.closeCalls != 1 {
+				t.Fatalf("Close() calls = %d, want 1", transport.closeCalls)
+			}
+		})
 	}
 }
 

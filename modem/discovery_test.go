@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestDiscoverFixture(t *testing.T) {
@@ -118,6 +119,84 @@ func TestDiffDevices(t *testing.T) {
 	}
 	if got := diffDevices(current, next); !reflect.DeepEqual(got, want) {
 		t.Errorf("diffDevices() = %#v, want %#v", got, want)
+	}
+}
+
+func TestReconcileDeviceEventsPreservesSamePathReconnect(t *testing.T) {
+	tests := []struct {
+		name    string
+		current Device
+		removal kernelUevent
+	}{
+		{
+			name: "usbmisc control node",
+			current: Device{
+				Path:         "/dev/cdc-wdm0",
+				PhysicalPath: "/sys/devices/modem-1",
+				Protocol:     ProtocolQMI,
+				Ports: []Port{
+					{Type: PortQMI, Name: "cdc-wdm0", Path: "/dev/cdc-wdm0", SysPath: "/sys/class/usbmisc/cdc-wdm0"},
+				},
+			},
+			removal: kernelUevent{action: "remove", subsystem: "usbmisc", devName: "cdc-wdm0"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			current := devicesByPath([]Device{tt.current})
+			next, got := reconcileDeviceEvents(current, []kernelUevent{tt.removal}, []Device{tt.current})
+			want := []DeviceEvent{
+				{Type: DeviceRemoved, Device: tt.current},
+				{Type: DeviceAdded, Device: tt.current},
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("reconcileDeviceEvents() events = %#v, want %#v", got, want)
+			}
+			if !reflect.DeepEqual(next, devicesByPath([]Device{tt.current})) {
+				t.Fatalf("reconcileDeviceEvents() current = %#v, want final device", next)
+			}
+		})
+	}
+}
+
+func TestDeviceUeventQueueCoalescesNoiseAndRetainsRemoval(t *testing.T) {
+	tests := []struct {
+		name         string
+		noiseCount   int
+		removalCount int
+	}{
+		{name: "slow consumer during event storm", noiseCount: 10_000, removalCount: 10_000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			queue := newDeviceUeventQueue()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for range tt.noiseCount {
+					queue.push(kernelUevent{action: "change", subsystem: "net", devName: "wwan0"})
+				}
+				for range tt.removalCount {
+					queue.push(kernelUevent{action: "remove", subsystem: "usbmisc", devName: "cdc-wdm1"})
+				}
+			}()
+
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("uevent producer blocked behind a slow consumer")
+			}
+			batch := queue.take()
+			if !batch.rescan {
+				t.Fatal("rescan = false, want true")
+			}
+			want := []kernelUevent{{action: "remove", subsystem: "usbmisc", devName: "cdc-wdm1"}}
+			if !reflect.DeepEqual(batch.removals, want) {
+				t.Fatalf("removals = %#v, want %#v", batch.removals, want)
+			}
+		})
 	}
 }
 

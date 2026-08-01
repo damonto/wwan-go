@@ -155,6 +155,55 @@ func TestTransportEOFPreservesCause(t *testing.T) {
 			if !errors.Is(err, io.EOF) {
 				t.Fatalf("Do() error = %v, want io.EOF", err)
 			}
+			if _, ok := errors.AsType[*TransportError](err); !ok {
+				t.Fatalf("Do() error = %v, want *TransportError", err)
+			}
+			if got := transport.TerminalError(); !errors.Is(got, io.EOF) {
+				t.Fatalf("TerminalError() = %v, want io.EOF", got)
+			}
+		})
+	}
+}
+
+func TestTransportWriteFailureIsTerminal(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "write disconnected", err: errors.New("device disconnected")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := &writeErrorConn{
+				err:      tt.err,
+				closed:   make(chan struct{}),
+				readDone: make(chan struct{}),
+			}
+			transport := New(conn)
+			_, err := transport.Do(context.Background(), qcom.Request{
+				Service:       qcom.ServiceUIM,
+				ClientID:      7,
+				TransactionID: 1,
+				MessageID:     qcom.MessageGetCardStatus,
+			})
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("Do() error = %v, want %v", err, tt.err)
+			}
+			if _, ok := errors.AsType[*TransportError](err); !ok {
+				t.Fatalf("Do() error = %v, want *TransportError", err)
+			}
+			if got := transport.TerminalError(); !errors.Is(got, tt.err) {
+				t.Fatalf("TerminalError() = %v, want %v", got, tt.err)
+			}
+			if err := transport.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			select {
+			case <-conn.readDone:
+			case <-time.After(time.Second):
+				t.Fatal("read loop did not stop after Close")
+			}
 		})
 	}
 }
@@ -615,6 +664,30 @@ func (c *deadlineConn) Write(p []byte) (int, error)      { return len(p), nil }
 func (c *deadlineConn) Close() error                     { return nil }
 func (c *deadlineConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *deadlineConn) SetWriteDeadline(time.Time) error { return nil }
+
+type writeErrorConn struct {
+	err       error
+	closed    chan struct{}
+	readDone  chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *writeErrorConn) Read([]byte) (int, error) {
+	<-c.closed
+	close(c.readDone)
+	return 0, io.ErrClosedPipe
+}
+
+func (c *writeErrorConn) Write([]byte) (int, error)        { return 0, c.err }
+func (c *writeErrorConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *writeErrorConn) SetWriteDeadline(time.Time) error { return nil }
+
+func (c *writeErrorConn) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.closed)
+	})
+	return nil
+}
 
 type asyncDeadlineConn struct {
 	mu             sync.Mutex
