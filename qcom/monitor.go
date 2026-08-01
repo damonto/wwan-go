@@ -184,6 +184,11 @@ func (c *Client) WatchRefreshAll(ctx context.Context, session Session, aid []byt
 }
 
 func (c *Client) indicationTransport() (IndicationTransport, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.isOpenLocked() {
+		return nil, errClientClosed
+	}
 	transport, ok := c.transport.(IndicationTransport)
 	if !ok {
 		return nil, errors.New("QMI transport does not support indications")

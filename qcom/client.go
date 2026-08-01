@@ -10,29 +10,35 @@ import (
 )
 
 const (
-	DefaultRequestTimeout = 30 * time.Second
-	defaultCloseTimeout   = 5 * time.Second
+	DefaultRequestTimeout  = 30 * time.Second
+	defaultCloseTimeout    = 5 * time.Second
+	clientIDRequestTimeout = 10 * time.Second
 )
 
-// Client owns a QMI transport and lazily allocated service client IDs.
+// Client owns a QMI transport and every QMUX client ID allocated through it.
+// Closing Client invalidates any stateful session created from it.
 type Client struct {
-	mu         sync.Mutex
-	watchMu    sync.Mutex
-	pdcMu      sync.Mutex
-	locMu      sync.Mutex
-	pbmMu      sync.Mutex
-	wmsMu      sync.Mutex
-	transport  Transport
-	slot       uint8
-	catService ServiceType
-	clientIDs  map[ServiceType]uint8
-	txn        uint16
-	ctlTxn     uint8
-	pdcToken   uint32
-	wmsToken   uint32
-	closeOnce  sync.Once
-	closed     bool
-	closeErr   error
+	mu                 sync.Mutex
+	lifecycleMu        sync.Mutex
+	watchMu            sync.Mutex
+	pdcMu              sync.Mutex
+	locMu              sync.Mutex
+	pbmMu              sync.Mutex
+	wmsMu              sync.Mutex
+	transport          Transport
+	slot               uint8
+	catService         ServiceType
+	clientIDs          map[ServiceType]uint8
+	allocatedClientIDs map[allocatedClientID]struct{}
+	txn                uint16
+	ctlTxn             uint8
+	pdcToken           uint32
+	wmsToken           uint32
+	closeOnce          sync.Once
+	closing            bool
+	closed             bool
+	requestStop        context.CancelFunc
+	closeErr           error
 
 	uimEventRefs              map[uint32]int
 	dmsEventRefs              int
@@ -49,6 +55,11 @@ type Client struct {
 	pdcIndicationRefs         map[pdcIndicationRegistration]int
 	wdsProfileEventRefs       map[WDSProfileID]int
 	pbmIndicationRefs         map[PBMEventRegistrationMask]int
+}
+
+type allocatedClientID struct {
+	service  ServiceType
+	clientID uint8
 }
 
 // Option configures a Client.
@@ -101,31 +112,51 @@ func NewClient(transport Transport, opts ...Option) (*Client, error) {
 	}, nil
 }
 
+// Close cancels in-flight work, releases allocated QMUX client IDs, and closes the
+// transport. It is safe to call more than once.
 func (c *Client) Close() error {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
-	defer cancel()
 	c.closeOnce.Do(func() {
+		c.startClose()
+
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
 		transport := c.transport
 		if transport == nil {
+			c.clientIDs = nil
+			c.allocatedClientIDs = nil
+			c.catService = 0
 			c.closed = true
 			return
 		}
 
+		ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
+		defer cancel()
+
 		var releaseErr error
 		if !transportManagesClientIDs(transport) && transportTerminalError(transport) == nil {
-			services := make([]ServiceType, 0, len(c.clientIDs))
-			for service := range c.clientIDs {
-				services = append(services, service)
+			allocated := make(map[allocatedClientID]struct{}, len(c.allocatedClientIDs)+len(c.clientIDs))
+			for clientID := range c.allocatedClientIDs {
+				allocated[clientID] = struct{}{}
 			}
-			slices.Sort(services)
-			for _, service := range services {
+			for service, clientID := range c.clientIDs {
+				allocated[allocatedClientID{service: service, clientID: clientID}] = struct{}{}
+			}
+			clientIDs := make([]allocatedClientID, 0, len(allocated))
+			for clientID := range allocated {
+				clientIDs = append(clientIDs, clientID)
+			}
+			slices.SortFunc(clientIDs, func(a, b allocatedClientID) int {
+				if a.service != b.service {
+					return int(a.service) - int(b.service)
+				}
+				return int(a.clientID) - int(b.clientID)
+			})
+			for _, allocated := range clientIDs {
 				if transportTerminalError(transport) != nil {
 					break
 				}
-				err := c.releaseServiceClientIDLocked(ctx, service, c.clientIDs[service])
+				err := c.releaseServiceClientIDForCloseLocked(ctx, allocated.service, allocated.clientID)
 				if err == nil {
 					continue
 				}
@@ -136,6 +167,7 @@ func (c *Client) Close() error {
 			}
 		}
 		c.clientIDs = nil
+		c.allocatedClientIDs = nil
 		c.catService = 0
 
 		closeErr := transport.Close()
@@ -148,6 +180,60 @@ func (c *Client) Close() error {
 		c.closeErr = errors.Join(releaseErr, closeErr)
 	})
 	return c.closeErr
+}
+
+// startClose rejects new requests before waiting for the request mutex. The
+// separate lifecycle lock lets Close cancel a request that currently owns mu.
+func (c *Client) startClose() {
+	c.lifecycleMu.Lock()
+	c.closing = true
+	stop := c.requestStop
+	c.lifecycleMu.Unlock()
+
+	if stop != nil {
+		stop()
+	}
+}
+
+// isOpenLocked reports whether callers may start transport work. c.mu must be
+// held so transport and closed are read consistently with Close.
+func (c *Client) isOpenLocked() bool {
+	if c.closed || c.transport == nil {
+		return false
+	}
+
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	return !c.closing
+}
+
+// beginRequest registers the one request serialized by c.mu so Close can
+// cancel ordinary work before waiting for c.mu itself. Ownership transactions,
+// such as allocating a CID, finish under their own short timeout so a canceled
+// caller cannot orphan a resource that the modem already created.
+func (c *Client) beginRequest(ctx context.Context, cancelOnClose bool) (context.Context, func(), error) {
+	c.lifecycleMu.Lock()
+	if c.closing {
+		c.lifecycleMu.Unlock()
+		return nil, nil, errClientClosed
+	}
+	requestCtx := ctx
+	var stop context.CancelFunc
+	if cancelOnClose {
+		requestCtx, stop = context.WithCancel(ctx)
+	}
+	c.requestStop = stop
+	c.lifecycleMu.Unlock()
+
+	finish := func() {
+		if stop != nil {
+			stop()
+		}
+		c.lifecycleMu.Lock()
+		c.requestStop = nil
+		c.lifecycleMu.Unlock()
+	}
+	return requestCtx, finish, nil
 }
 
 func boundQMIService(transport Transport) (ServiceType, bool) {

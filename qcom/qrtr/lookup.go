@@ -2,6 +2,7 @@ package qrtr
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,15 +11,40 @@ import (
 	"unsafe"
 
 	"github.com/damonto/wwan-go/qcom"
+	"golang.org/x/sys/unix"
 )
 
-func (c *Conn) findService(serviceType qcom.ServiceType) (*service, error) {
-	if err := c.sendControlPacket(serviceType); err != nil {
+const serviceLookupTimeout = 5 * time.Second
+
+func (c *Conn) findService(ctx context.Context, serviceType qcom.ServiceType) (*service, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	timeout := time.Now().Add(5 * time.Second)
-	for time.Now().Before(timeout) {
-		buf, _, err := c.recvPacketWithDeadline(timeout, c.currentDeadlineSeq())
+	deadline := time.Now().Add(serviceLookupTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+
+	interruptDone := make(chan struct{})
+	stopInterrupt := context.AfterFunc(ctx, func() {
+		defer close(interruptDone)
+		// Waking the poll is sufficient; the loop observes ctx.Err directly.
+		_ = c.wakeReader()
+	})
+	defer func() {
+		if !stopInterrupt() {
+			<-interruptDone
+		}
+	}()
+
+	if err := c.sendControlPacket(ctx, deadline, serviceType); err != nil {
+		return nil, lookupContextError(ctx, err)
+	}
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		buf, _, err := c.recvPacketWithDeadline(deadline, c.currentDeadlineSeq())
 		if err != nil {
 			if errors.Is(err, errReadDeadlineChanged) {
 				continue
@@ -26,7 +52,7 @@ func (c *Conn) findService(serviceType qcom.ServiceType) (*service, error) {
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				break
 			}
-			return nil, err
+			return nil, lookupContextError(ctx, err)
 		}
 		if len(buf) < int(unsafe.Sizeof(controlPacket{})) {
 			continue
@@ -42,10 +68,16 @@ func (c *Conn) findService(serviceType qcom.ServiceType) (*service, error) {
 			return &service, nil
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if ctxDeadline, ok := ctx.Deadline(); ok && !time.Now().Before(ctxDeadline) {
+		return nil, context.DeadlineExceeded
+	}
 	return nil, fmt.Errorf("service %d not found", serviceType)
 }
 
-func (c *Conn) sendControlPacket(serviceType qcom.ServiceType) error {
+func (c *Conn) sendControlPacket(ctx context.Context, deadline time.Time, serviceType qcom.ServiceType) error {
 	pkt := &controlPacket{
 		Command: packetTypeNewLookup,
 		Service: service{
@@ -64,6 +96,47 @@ func (c *Conn) sendControlPacket(serviceType qcom.ServiceType) error {
 		return err
 	}
 	addr.Port = portControl
-	_, err = c.sendTo(addr, buf.Bytes())
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_, err = c.sendTo(addr, buf.Bytes())
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EWOULDBLOCK) {
+			return err
+		}
+		wait := min(writeRetryDelay, time.Until(deadline))
+		if wait <= 0 {
+			return os.ErrDeadlineExceeded
+		}
+		if err := waitLookupRetry(ctx, wait); err != nil {
+			return err
+		}
+	}
+}
+
+func waitLookupRetry(ctx context.Context, wait time.Duration) error {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func lookupContextError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
 	return err
 }

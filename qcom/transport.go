@@ -57,7 +57,7 @@ func (c *Client) withServiceClient(ctx context.Context, service ServiceType, fn 
 func (c *Client) serviceClientID(ctx context.Context, service ServiceType) (uint8, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.transport == nil {
+	if !c.isOpenLocked() {
 		return 0, errClientClosed
 	}
 	return c.serviceClientIDLocked(ctx, service)
@@ -65,7 +65,7 @@ func (c *Client) serviceClientID(ctx context.Context, service ServiceType) (uint
 
 func (c *Client) serviceClientIDLocked(ctx context.Context, service ServiceType) (uint8, error) {
 	if transport, ok := c.transport.(transportClientIDProvider); ok {
-		return transport.ClientID(ctx, service)
+		return c.transportClientIDLocked(ctx, transport, service)
 	}
 
 	boundService, serviceBound := boundQMIService(c.transport)
@@ -88,7 +88,23 @@ func (c *Client) serviceClientIDLocked(ctx context.Context, service ServiceType)
 		c.clientIDs = make(map[ServiceType]uint8)
 	}
 	c.clientIDs[service] = clientID
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	return clientID, nil
+}
+
+func (c *Client) transportClientIDLocked(
+	ctx context.Context,
+	transport transportClientIDProvider,
+	service ServiceType,
+) (uint8, error) {
+	requestCtx, finish, err := c.beginRequest(ctx, true)
+	if err != nil {
+		return 0, err
+	}
+	defer finish()
+	return transport.ClientID(requestCtx, service)
 }
 
 func (c *Client) forgetServiceClientID(service ServiceType, clientID uint8) bool {
@@ -100,6 +116,7 @@ func (c *Client) forgetServiceClientID(service ServiceType, clientID uint8) bool
 	if c.clientIDs[service] == clientID {
 		delete(c.clientIDs, service)
 	}
+	c.forgetAllocatedClientIDLocked(service, clientID)
 	return true
 }
 
@@ -110,7 +127,7 @@ func (c *Client) uimClientID(ctx context.Context) (uint8, error) {
 func (c *Client) allocateServiceClientID(ctx context.Context, service ServiceType) (uint8, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.transport == nil {
+	if !c.isOpenLocked() {
 		return 0, errClientClosed
 	}
 	return c.allocateServiceClientIDLocked(ctx, service)
@@ -122,7 +139,7 @@ func (c *Client) allocateServiceClientID(ctx context.Context, service ServiceTyp
 func (c *Client) sessionServiceClientID(ctx context.Context, service ServiceType) (uint8, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.transport == nil {
+	if !c.isOpenLocked() {
 		return 0, false, errClientClosed
 	}
 	if transportManagesClientIDs(c.transport) {
@@ -137,9 +154,19 @@ func (c *Client) allocateServiceClientIDLocked(ctx context.Context, service Serv
 	if service > 0xff {
 		return 0, fmt.Errorf("allocating QMI client ID: service 0x%X exceeds QMUX 8-bit limit", service)
 	}
-	resp, err := c.sendRequest(ctx, ServiceControl, 0, MessageAllocateClientID, tlv.TLVs{
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	// CID allocation transfers ownership. Once started, settle the transaction
+	// under a bounded internal timeout even if the caller goes away. The QMUX
+	// transport treats a written-but-unanswered allocation as terminal so the
+	// next direct core synchronizes the control point before allocating again.
+	requestCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), clientIDRequestTimeout)
+	defer cancel()
+	resp, err := c.sendRequest(requestCtx, ServiceControl, 0, MessageAllocateClientID, tlv.TLVs{
 		tlv.Uint(0x01, uint8(service)),
-	}, DefaultRequestTimeout)
+	}, clientIDRequestTimeout)
 	if err != nil {
 		return 0, err
 	}
@@ -154,13 +181,36 @@ func (c *Client) allocateServiceClientIDLocked(ctx context.Context, service Serv
 	if len(value) != 2 {
 		return 0, fmt.Errorf("allocating QMI client ID: allocated client TLV length %d, want 2", len(value))
 	}
-	return value[1], nil
+	allocatedService := ServiceType(value[0])
+	clientID := value[1]
+	if clientID == 0 {
+		return 0, errors.New("allocating QMI client ID: modem returned reserved client ID 0")
+	}
+	if allocatedService != service {
+		mismatchErr := fmt.Errorf(
+			"allocating QMI client ID: service mismatch: requested 0x%X, got 0x%X",
+			service,
+			allocatedService,
+		)
+		c.rememberAllocatedClientIDLocked(allocatedService, clientID)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), clientIDRequestTimeout)
+		defer cancel()
+		if err := c.releaseServiceClientIDLocked(cleanupCtx, allocatedService, clientID); err != nil {
+			return 0, errors.Join(mismatchErr, fmt.Errorf("releasing mismatched QMI client ID: %w", err))
+		}
+		return 0, mismatchErr
+	}
+	c.rememberAllocatedClientIDLocked(service, clientID)
+	if !c.isOpenLocked() {
+		return 0, errClientClosed
+	}
+	return clientID, nil
 }
 
 func (c *Client) releaseServiceClientID(ctx context.Context, service ServiceType, clientID uint8) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.transport == nil {
+	if !c.isOpenLocked() {
 		return errClientClosed
 	}
 	return c.releaseServiceClientIDLocked(ctx, service, clientID)
@@ -171,6 +221,40 @@ func (c *Client) releaseServiceClientIDLocked(ctx context.Context, service Servi
 		return fmt.Errorf("releasing QMI client ID: service 0x%X exceeds QMUX 8-bit limit", service)
 	}
 	resp, err := c.sendRequest(ctx, ServiceControl, 0, MessageReleaseClientID, tlv.TLVs{
+		tlv.Bytes(0x01, []byte{byte(service), clientID}),
+	}, DefaultRequestTimeout)
+	if err != nil {
+		return err
+	}
+	if err := resultOK(resp); err != nil {
+		return err
+	}
+	c.forgetAllocatedClientIDLocked(service, clientID)
+	return nil
+}
+
+func (c *Client) rememberAllocatedClientIDLocked(service ServiceType, clientID uint8) {
+	if c.allocatedClientIDs == nil {
+		c.allocatedClientIDs = make(map[allocatedClientID]struct{})
+	}
+	c.allocatedClientIDs[allocatedClientID{service: service, clientID: clientID}] = struct{}{}
+}
+
+func (c *Client) forgetAllocatedClientIDLocked(service ServiceType, clientID uint8) {
+	delete(c.allocatedClientIDs, allocatedClientID{service: service, clientID: clientID})
+}
+
+// releaseServiceClientIDForCloseLocked bypasses normal lifecycle admission.
+// Close owns c.mu exclusively and uses its own bounded cleanup context.
+func (c *Client) releaseServiceClientIDForCloseLocked(
+	ctx context.Context,
+	service ServiceType,
+	clientID uint8,
+) error {
+	if service > 0xff {
+		return fmt.Errorf("releasing QMI client ID: service 0x%X exceeds QMUX 8-bit limit", service)
+	}
+	resp, err := c.sendCloseRequest(ctx, ServiceControl, 0, MessageReleaseClientID, tlv.TLVs{
 		tlv.Bytes(0x01, []byte{byte(service), clientID}),
 	}, DefaultRequestTimeout)
 	if err != nil {
@@ -195,7 +279,7 @@ func (c *Client) requestWithTimeout(
 ) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.transport == nil {
+	if !c.isOpenLocked() {
 		return Response{}, errClientClosed
 	}
 	clientID, err := c.serviceClientIDLocked(ctx, ServiceUIM)
@@ -225,7 +309,7 @@ func (c *Client) requestServiceWithTimeout(
 ) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.transport == nil {
+	if !c.isOpenLocked() {
 		return Response{}, errClientClosed
 	}
 	return c.sendRequest(ctx, service, clientID, id, tlvs, timeout)
@@ -233,6 +317,37 @@ func (c *Client) requestServiceWithTimeout(
 
 // sendRequest assumes c.mu is held and c.transport is live.
 func (c *Client) sendRequest(
+	ctx context.Context,
+	service ServiceType,
+	clientID uint8,
+	id MessageID,
+	tlvs tlv.TLVs,
+	timeout time.Duration,
+) (Response, error) {
+	return c.doRequest(ctx, Request{
+		Service:       service,
+		ClientID:      clientID,
+		TransactionID: c.nextTransactionID(service),
+		MessageID:     id,
+		Timeout:       timeout,
+		TLVs:          tlvs,
+	})
+}
+
+// doRequest assumes c.mu is held and c.transport is live.
+func (c *Client) doRequest(ctx context.Context, req Request) (Response, error) {
+	cancelOnClose := req.Service != ServiceControl || req.MessageID != MessageAllocateClientID
+	requestCtx, finish, err := c.beginRequest(ctx, cancelOnClose)
+	if err != nil {
+		return Response{}, err
+	}
+	defer finish()
+	return c.transport.Do(requestCtx, req)
+}
+
+// sendCloseRequest is reserved for Close after it has canceled normal work and
+// acquired c.mu. Its context is independent from the canceled client lifecycle.
+func (c *Client) sendCloseRequest(
 	ctx context.Context,
 	service ServiceType,
 	clientID uint8,

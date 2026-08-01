@@ -159,6 +159,154 @@ func TestTransportDispatchesIndications(t *testing.T) {
 	}
 }
 
+func TestTransportCancelsBlockedWrite(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "request context canceled"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newBlockingPacketConn()
+			transport := New(conn)
+			defer transport.Close()
+
+			ctx, cancel := context.WithCancel(t.Context())
+			result := make(chan error, 1)
+			go func() {
+				_, err := transport.Do(ctx, qcom.Request{
+					Service:       qcom.ServiceUIM,
+					TransactionID: 3,
+					MessageID:     qcom.MessageReadTransparent,
+					Timeout:       time.Minute,
+				})
+				result <- err
+			}()
+
+			select {
+			case <-conn.writeStarted:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for blocked write")
+			}
+			cancel()
+
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("Do() error = %v, want context canceled", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Do() did not return after cancellation")
+			}
+		})
+	}
+}
+
+func TestTransportPreservesWriteFailureDuringCancellation(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "service disconnect", err: errors.New("service disconnected")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newCancelRacePacketConn(tt.err)
+			transport := New(conn)
+			defer transport.Close()
+
+			ctx, cancel := context.WithCancel(t.Context())
+			result := make(chan error, 1)
+			go func() {
+				_, err := transport.Do(ctx, qcom.Request{
+					Service:       qcom.ServiceUIM,
+					TransactionID: 3,
+					MessageID:     qcom.MessageReadTransparent,
+					Timeout:       time.Minute,
+				})
+				result <- err
+			}()
+
+			select {
+			case <-conn.writeStarted:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for write")
+			}
+			cancel()
+			close(conn.writeRelease)
+
+			select {
+			case err := <-result:
+				if !errors.Is(err, tt.err) {
+					t.Fatalf("Do() error = %v, want %v", err, tt.err)
+				}
+				if errors.Is(err, context.Canceled) {
+					t.Fatalf("Do() error = %v, should preserve the write failure", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Do() did not return")
+			}
+
+			_, nextErr := transport.Do(t.Context(), qcom.Request{
+				Service:       qcom.ServiceUIM,
+				TransactionID: 4,
+				MessageID:     qcom.MessageGetCardStatus,
+			})
+			if !errors.Is(nextErr, tt.err) {
+				t.Fatalf("second Do() error = %v, want terminal %v", nextErr, tt.err)
+			}
+		})
+	}
+}
+
+func TestTransportReturnsResponseClaimedAtCancellation(t *testing.T) {
+	tests := []struct {
+		name       string
+		iterations int
+	}{
+		{name: "response wins after pending claim", iterations: 100},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for range tt.iterations {
+				conn := newCallbackPacketConn()
+				transport := New(conn)
+				ctx, cancel := context.WithCancel(t.Context())
+				conn.onWrite = func() {
+					cancel()
+					transport.mu.Lock()
+					endpoint := transport.services[qcom.ServiceUIM]
+					transport.mu.Unlock()
+					endpoint.deliverResponse(qcom.Response{
+						Service:       qcom.ServiceUIM,
+						TransactionID: 3,
+						MessageID:     qcom.MessageReadTransparent,
+					})
+				}
+
+				resp, err := transport.Do(ctx, qcom.Request{
+					Service:       qcom.ServiceUIM,
+					TransactionID: 3,
+					MessageID:     qcom.MessageReadTransparent,
+					Timeout:       time.Minute,
+				})
+				if err != nil {
+					t.Fatalf("Do() error = %v, want claimed response", err)
+				}
+				if resp.MessageID != qcom.MessageReadTransparent {
+					t.Fatalf("response MessageID = 0x%04X, want 0x%04X", resp.MessageID, qcom.MessageReadTransparent)
+				}
+				if err := transport.Close(); err != nil {
+					t.Fatalf("Close() error = %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestTransportRejectsWrongService(t *testing.T) {
 	transport := New(&deadlinePacketConn{})
 
@@ -178,6 +326,29 @@ func TestTransportRejectsWrongIndicationService(t *testing.T) {
 	_, err := transport.Indications(context.Background(), qcom.ServiceCAT2, 0, qcom.MessageSendEnvelope)
 	if err == nil {
 		t.Fatal("Indications() error = nil, want service mismatch")
+	}
+}
+
+func TestTransportRequiresWriteDeadlineSupport(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "custom connection without write deadline"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := New(readDeadlineOnlyPacketConn{})
+			defer transport.Close()
+			_, err := transport.Do(t.Context(), qcom.Request{
+				Service:       qcom.ServiceUIM,
+				TransactionID: 1,
+				MessageID:     qcom.MessageGetCardStatus,
+			})
+			if err == nil {
+				t.Fatal("Do() error = nil, want missing write deadline support")
+			}
+		})
 	}
 }
 
@@ -311,6 +482,146 @@ type deadlinePacketConn struct {
 	frames [][]byte
 }
 
+type readDeadlineOnlyPacketConn struct{}
+
+func (readDeadlineOnlyPacketConn) Read([]byte) (int, error)        { return 0, io.EOF }
+func (readDeadlineOnlyPacketConn) Write(p []byte) (int, error)     { return len(p), nil }
+func (readDeadlineOnlyPacketConn) Close() error                    { return nil }
+func (readDeadlineOnlyPacketConn) SetReadDeadline(time.Time) error { return nil }
+
+type blockingPacketConn struct {
+	mu              sync.Mutex
+	writeDeadline   time.Time
+	deadlineChanged chan struct{}
+	writeStarted    chan struct{}
+	closed          chan struct{}
+	startOnce       sync.Once
+	closeOnce       sync.Once
+}
+
+type cancelRacePacketConn struct {
+	err          error
+	writeStarted chan struct{}
+	writeRelease chan struct{}
+	closed       chan struct{}
+	startOnce    sync.Once
+	closeOnce    sync.Once
+}
+
+func newCancelRacePacketConn(err error) *cancelRacePacketConn {
+	return &cancelRacePacketConn{
+		err:          err,
+		writeStarted: make(chan struct{}),
+		writeRelease: make(chan struct{}),
+		closed:       make(chan struct{}),
+	}
+}
+
+func (c *cancelRacePacketConn) Read([]byte) (int, error) {
+	<-c.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (c *cancelRacePacketConn) Write([]byte) (int, error) {
+	c.startOnce.Do(func() {
+		close(c.writeStarted)
+	})
+	<-c.writeRelease
+	return 0, c.err
+}
+
+func (c *cancelRacePacketConn) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.closed)
+	})
+	return nil
+}
+
+func (c *cancelRacePacketConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *cancelRacePacketConn) SetWriteDeadline(time.Time) error { return nil }
+
+type callbackPacketConn struct {
+	onWrite   func()
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newCallbackPacketConn() *callbackPacketConn {
+	return &callbackPacketConn{closed: make(chan struct{})}
+}
+
+func (c *callbackPacketConn) Read([]byte) (int, error) {
+	<-c.closed
+	return 0, io.EOF
+}
+
+func (c *callbackPacketConn) Write(p []byte) (int, error) {
+	c.onWrite()
+	return len(p), nil
+}
+
+func (c *callbackPacketConn) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.closed)
+	})
+	return nil
+}
+
+func (c *callbackPacketConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *callbackPacketConn) SetWriteDeadline(time.Time) error { return nil }
+
+func newBlockingPacketConn() *blockingPacketConn {
+	return &blockingPacketConn{
+		deadlineChanged: make(chan struct{}, 1),
+		writeStarted:    make(chan struct{}),
+		closed:          make(chan struct{}),
+	}
+}
+
+func (c *blockingPacketConn) Read([]byte) (int, error) {
+	<-c.closed
+	return 0, io.EOF
+}
+
+func (c *blockingPacketConn) Write([]byte) (int, error) {
+	c.startOnce.Do(func() {
+		close(c.writeStarted)
+	})
+	for {
+		c.mu.Lock()
+		deadline := c.writeDeadline
+		c.mu.Unlock()
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return 0, context.DeadlineExceeded
+		}
+		select {
+		case <-c.deadlineChanged:
+		case <-c.closed:
+			return 0, io.ErrClosedPipe
+		}
+	}
+}
+
+func (c *blockingPacketConn) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.closed)
+	})
+	return nil
+}
+
+func (c *blockingPacketConn) SetReadDeadline(time.Time) error { return nil }
+
+func (c *blockingPacketConn) SetWriteDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	c.writeDeadline = deadline
+	c.mu.Unlock()
+	select {
+	case c.deadlineChanged <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
 func (c *deadlinePacketConn) Read(p []byte) (int, error) {
 	if len(c.frames) == 0 {
 		return 0, io.EOF
@@ -325,6 +636,7 @@ func (c *deadlinePacketConn) Close() error                { return nil }
 func (c *deadlinePacketConn) SetReadDeadline(time.Time) error {
 	return nil
 }
+func (c *deadlinePacketConn) SetWriteDeadline(time.Time) error { return nil }
 
 type asyncPacketConn struct {
 	mu           sync.Mutex
@@ -368,7 +680,8 @@ func (c *asyncPacketConn) Close() error {
 	return nil
 }
 
-func (c *asyncPacketConn) SetReadDeadline(time.Time) error { return nil }
+func (c *asyncPacketConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *asyncPacketConn) SetWriteDeadline(time.Time) error { return nil }
 
 func (c *asyncPacketConn) waitWrites(tb testing.TB, want int) {
 	tb.Helper()

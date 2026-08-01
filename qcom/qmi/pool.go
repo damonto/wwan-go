@@ -2,14 +2,22 @@ package qmi
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/damonto/wwan-go/qcom"
 )
 
+const directSyncTimeout = 10 * time.Second
+
 type directPool struct {
-	mu      sync.Mutex
-	entries map[string]*directEntry
+	mu         sync.Mutex
+	entries    map[string]*directEntry
+	initialize func(context.Context, *Transport) error
 }
 
 type directEntry struct {
@@ -71,26 +79,56 @@ func (p *directPool) acquire(ctx context.Context, device string, dialer Dialer) 
 		p.mu.Unlock()
 
 		conn, err := dialer.Dial(ctx)
-		p.mu.Lock()
 		if err != nil {
+			p.mu.Lock()
 			delete(p.entries, key)
 			close(entry.opening)
 			close(entry.closed)
 			p.mu.Unlock()
 			return nil, err
 		}
-		entry.core = &transportCore{
-			conn:          conn,
-			pending:       make(map[messageKey]chan responseResult),
-			pendingOwners: make(map[messageKey]*transportLease),
-			subs:          make(map[uint64]*subscription),
+		core := newTransportCore(conn)
+		bootstrap := &Transport{transportCore: core, shared: true}
+		if err := p.initializeCore(ctx, bootstrap); err != nil {
+			closeErr := bootstrap.closeCore()
+			p.mu.Lock()
+			delete(p.entries, key)
+			close(entry.opening)
+			close(entry.closed)
+			p.mu.Unlock()
+			initErr := fmt.Errorf("initialize direct QMI transport: %w", err)
+			if closeErr != nil {
+				return nil, errors.Join(initErr, fmt.Errorf("close direct QMI transport: %w", closeErr))
+			}
+			return nil, initErr
 		}
+		p.mu.Lock()
+		entry.core = core
 		entry.refs = 1
 		close(entry.opening)
 		transport := p.lease(key, entry.core)
 		p.mu.Unlock()
 		return transport, nil
 	}
+}
+
+func (p *directPool) initializeCore(ctx context.Context, transport *Transport) error {
+	if p.initialize != nil {
+		return p.initialize(ctx, transport)
+	}
+	resp, err := transport.Do(ctx, qcom.Request{
+		Service:   qcom.ServiceControl,
+		ClientID:  0,
+		MessageID: qcom.MessageCTLSync,
+		Timeout:   directSyncTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("synchronize QMI control point: %w", err)
+	}
+	if err := qcom.ResultError(resp.TLVs); err != nil {
+		return fmt.Errorf("synchronize QMI control point: %w", err)
+	}
+	return nil
 }
 
 func (p *directPool) lease(key string, core *transportCore) *Transport {

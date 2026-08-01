@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -121,6 +122,126 @@ func (t *lockCheckingTransport) Do(_ context.Context, req Request) (Response, er
 }
 
 func (t *lockCheckingTransport) Close() error { return nil }
+
+type closeCancelTransport struct {
+	mu             sync.Mutex
+	blockedMessage MessageID
+	requestStarted chan struct{}
+	startOnce      sync.Once
+	requests       []Request
+	closeCalls     int
+}
+
+type allocationCloseTransport struct {
+	mu                 sync.Mutex
+	service            ServiceType
+	clientID           uint8
+	requestStarted     chan struct{}
+	continueAllocation chan struct{}
+	startOnce          sync.Once
+	requests           []Request
+	closeCalls         int
+}
+
+func (t *allocationCloseTransport) Do(ctx context.Context, req Request) (Response, error) {
+	t.mu.Lock()
+	t.requests = append(t.requests, req)
+	t.mu.Unlock()
+
+	switch req.MessageID {
+	case MessageAllocateClientID:
+		t.startOnce.Do(func() {
+			close(t.requestStarted)
+		})
+		select {
+		case <-t.continueAllocation:
+			return successResponse(req.MessageID, tlv.Bytes(0x01, []byte{byte(t.service), t.clientID})), nil
+		case <-ctx.Done():
+			return Response{}, ctx.Err()
+		}
+	case MessageReleaseClientID:
+		return successResponse(req.MessageID), nil
+	default:
+		return Response{}, errors.New("unexpected QMI request during allocation close test")
+	}
+}
+
+func (t *allocationCloseTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.closeCalls++
+	return nil
+}
+
+func (t *allocationCloseTransport) snapshot() ([]Request, int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return slices.Clone(t.requests), t.closeCalls
+}
+
+func (t *closeCancelTransport) Do(ctx context.Context, req Request) (Response, error) {
+	t.mu.Lock()
+	t.requests = append(t.requests, req)
+	t.mu.Unlock()
+
+	if req.MessageID == MessageReleaseClientID {
+		return successResponse(req.MessageID), nil
+	}
+	if req.MessageID != t.blockedMessage {
+		return Response{}, errors.New("unexpected QMI request during close cancellation test")
+	}
+
+	t.startOnce.Do(func() {
+		close(t.requestStarted)
+	})
+	<-ctx.Done()
+	return Response{}, ctx.Err()
+}
+
+func (t *closeCancelTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.closeCalls++
+	return nil
+}
+
+func (t *closeCancelTransport) snapshot() ([]Request, int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return slices.Clone(t.requests), t.closeCalls
+}
+
+type cancelingClientIDTransport struct {
+	mu             sync.Mutex
+	requestStarted chan struct{}
+	startOnce      sync.Once
+	closeCalls     int
+}
+
+func (t *cancelingClientIDTransport) ClientID(ctx context.Context, _ ServiceType) (uint8, error) {
+	t.startOnce.Do(func() {
+		close(t.requestStarted)
+	})
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func (t *cancelingClientIDTransport) Do(context.Context, Request) (Response, error) {
+	return Response{}, errors.New("unexpected QMI request while opening transport service")
+}
+
+func (t *cancelingClientIDTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.closeCalls++
+	return nil
+}
+
+func (t *cancelingClientIDTransport) closeCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.closeCalls
+}
 
 func TestNewClientDoesNotAllocateServiceClients(t *testing.T) {
 	tests := []struct {
@@ -360,6 +481,55 @@ func TestAllocateServiceClientIDRejectsMalformedTLV(t *testing.T) {
 			client := &Client{transport: transport}
 			if _, err := client.allocateServiceClientIDLocked(context.Background(), ServiceDMS); err == nil {
 				t.Fatal("allocateServiceClientIDLocked() error = nil, want non-nil")
+			}
+		})
+	}
+}
+
+func TestAllocateServiceClientIDValidatesOwnership(t *testing.T) {
+	tests := []struct {
+		name        string
+		value       []byte
+		wantRelease bool
+	}{
+		{
+			name:        "service mismatch releases returned client",
+			value:       []byte{byte(ServiceNAS), 5},
+			wantRelease: true,
+		},
+		{
+			name:  "reserved client ID",
+			value: []byte{byte(ServiceDMS), 0},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := []transportCall{{
+				resp: successResponse(MessageAllocateClientID, tlv.Bytes(0x01, tt.value)),
+			}}
+			if tt.wantRelease {
+				calls = append(calls, transportCall{
+					check: func(req Request) {
+						if req.Service != ServiceControl || req.MessageID != MessageReleaseClientID {
+							t.Fatalf("cleanup request = %+v, want CID release", req)
+						}
+						assertTLV(t, req.TLVs, 0x01, tt.value)
+					},
+					resp: successResponse(MessageReleaseClientID),
+				})
+			}
+			transport := &fakeTransport{t: t, calls: calls}
+			client := &Client{transport: transport}
+
+			if _, err := client.allocateServiceClientIDLocked(t.Context(), ServiceDMS); err == nil {
+				t.Fatal("allocateServiceClientIDLocked() error = nil, want ownership validation error")
+			}
+			if got := transport.callCount(); got != len(calls) {
+				t.Fatalf("Do() calls = %d, want %d", got, len(calls))
+			}
+			if len(client.allocatedClientIDs) != 0 {
+				t.Fatalf("allocated client IDs = %v, want empty", client.allocatedClientIDs)
 			}
 		})
 	}
@@ -1069,6 +1239,342 @@ func TestClientCloseIsIdempotent(t *testing.T) {
 	}
 	if reader.transport != nil {
 		t.Fatal("Transport was not cleared")
+	}
+}
+
+func TestClientCloseCancelsInFlightRequests(t *testing.T) {
+	tests := []struct {
+		name           string
+		service        ServiceType
+		blockedMessage MessageID
+		call           func(context.Context, *Client) error
+	}{
+		{
+			name:           "service request",
+			service:        ServiceDMS,
+			blockedMessage: MessageDMSGetMSISDN,
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.MSISDN(ctx)
+				return err
+			},
+		},
+		{
+			name:           "incremental NAS request",
+			service:        ServiceNAS,
+			blockedMessage: MessageNASIncrementalNetworkScan,
+			call: func(ctx context.Context, client *Client) error {
+				_, _, err := client.startNASIncrementalNetworkScan(ctx, 7, nil)
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &closeCancelTransport{
+				blockedMessage: tt.blockedMessage,
+				requestStarted: make(chan struct{}),
+			}
+			client := &Client{
+				transport: transport,
+				slot:      1,
+				clientIDs: map[ServiceType]uint8{tt.service: 7},
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+
+			requestErr := make(chan error, 1)
+			go func() {
+				requestErr <- tt.call(ctx, client)
+			}()
+
+			select {
+			case <-transport.requestStarted:
+			case <-ctx.Done():
+				t.Fatalf("waiting for request start: %v", ctx.Err())
+			}
+
+			closeErr := make(chan error, 1)
+			go func() {
+				closeErr <- client.Close()
+			}()
+
+			select {
+			case err := <-requestErr:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("request error = %v, want context canceled", err)
+				}
+			case <-ctx.Done():
+				t.Fatalf("waiting for canceled request: %v", ctx.Err())
+			}
+			select {
+			case err := <-closeErr:
+				if err != nil {
+					t.Fatalf("Close() error = %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatalf("waiting for Close(): %v", ctx.Err())
+			}
+
+			if err := client.Close(); err != nil {
+				t.Fatalf("second Close() error = %v", err)
+			}
+			requests, closeCalls := transport.snapshot()
+			if len(requests) != 2 {
+				t.Fatalf("Do() requests = %+v, want blocked request and CID release", requests)
+			}
+			if requests[0].MessageID != tt.blockedMessage {
+				t.Fatalf("first MessageID = 0x%04X, want 0x%04X", requests[0].MessageID, tt.blockedMessage)
+			}
+			if requests[1].Service != ServiceControl || requests[1].MessageID != MessageReleaseClientID {
+				t.Fatalf("second request = %+v, want CID release", requests[1])
+			}
+			assertTLV(t, requests[1].TLVs, 0x01, []byte{byte(tt.service), 7})
+			if closeCalls != 1 {
+				t.Fatalf("transport Close() calls = %d, want 1", closeCalls)
+			}
+		})
+	}
+}
+
+func TestClientCloseReleasesInFlightClientIDAllocation(t *testing.T) {
+	tests := []struct {
+		name     string
+		service  ServiceType
+		clientID uint8
+	}{
+		{name: "DMS allocation", service: ServiceDMS, clientID: 7},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &allocationCloseTransport{
+				service:            tt.service,
+				clientID:           tt.clientID,
+				requestStarted:     make(chan struct{}),
+				continueAllocation: make(chan struct{}),
+			}
+			client := &Client{transport: transport, slot: 1}
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+
+			requestErr := make(chan error, 1)
+			go func() {
+				_, err := client.serviceClientID(ctx, tt.service)
+				requestErr <- err
+			}()
+
+			select {
+			case <-transport.requestStarted:
+			case <-ctx.Done():
+				t.Fatalf("waiting for allocation start: %v", ctx.Err())
+			}
+
+			client.startClose()
+			closeErr := make(chan error, 1)
+			go func() {
+				closeErr <- client.Close()
+			}()
+			close(transport.continueAllocation)
+
+			select {
+			case err := <-requestErr:
+				if !errors.Is(err, errClientClosed) {
+					t.Fatalf("allocation error = %v, want client closed", err)
+				}
+			case <-ctx.Done():
+				t.Fatalf("waiting for allocation completion: %v", ctx.Err())
+			}
+			select {
+			case err := <-closeErr:
+				if err != nil {
+					t.Fatalf("Close() error = %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatalf("waiting for Close(): %v", ctx.Err())
+			}
+
+			requests, closeCalls := transport.snapshot()
+			if len(requests) != 2 {
+				t.Fatalf("Do() requests = %+v, want allocation and release", requests)
+			}
+			if requests[0].MessageID != MessageAllocateClientID {
+				t.Fatalf("first request = %+v, want client ID allocation", requests[0])
+			}
+			if requests[1].MessageID != MessageReleaseClientID {
+				t.Fatalf("second request = %+v, want client ID release", requests[1])
+			}
+			assertTLV(t, requests[1].TLVs, 0x01, []byte{byte(tt.service), tt.clientID})
+			if closeCalls != 1 {
+				t.Fatalf("transport Close() calls = %d, want 1", closeCalls)
+			}
+			if len(client.allocatedClientIDs) != 0 {
+				t.Fatalf("allocated client IDs = %v, want empty", client.allocatedClientIDs)
+			}
+		})
+	}
+}
+
+func TestClientIDAllocationSurvivesCallerCancellation(t *testing.T) {
+	tests := []struct {
+		name     string
+		service  ServiceType
+		clientID uint8
+	}{
+		{name: "DMS allocation", service: ServiceDMS, clientID: 7},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &allocationCloseTransport{
+				service:            tt.service,
+				clientID:           tt.clientID,
+				requestStarted:     make(chan struct{}),
+				continueAllocation: make(chan struct{}),
+			}
+			client := &Client{transport: transport, slot: 1}
+			ctx, cancel := context.WithCancel(t.Context())
+
+			requestErr := make(chan error, 1)
+			go func() {
+				_, err := client.serviceClientID(ctx, tt.service)
+				requestErr <- err
+			}()
+
+			select {
+			case <-transport.requestStarted:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for allocation start")
+			}
+			cancel()
+			close(transport.continueAllocation)
+
+			select {
+			case err := <-requestErr:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("allocation error = %v, want context canceled", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("allocation did not finish after response")
+			}
+			if got := client.clientIDs[tt.service]; got != tt.clientID {
+				t.Fatalf("cached client ID = %d, want %d", got, tt.clientID)
+			}
+			if err := client.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+
+			requests, _ := transport.snapshot()
+			if len(requests) != 2 || requests[1].MessageID != MessageReleaseClientID {
+				t.Fatalf("Do() requests = %+v, want allocation followed by release", requests)
+			}
+			assertTLV(t, requests[1].TLVs, 0x01, []byte{byte(tt.service), tt.clientID})
+		})
+	}
+}
+
+func TestClientCloseCancelsTransportClientID(t *testing.T) {
+	tests := []struct {
+		name    string
+		service ServiceType
+	}{
+		{name: "QRTR service open", service: ServiceDMS},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &cancelingClientIDTransport{requestStarted: make(chan struct{})}
+			client := &Client{transport: transport, slot: 1}
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+
+			requestErr := make(chan error, 1)
+			go func() {
+				_, err := client.serviceClientID(ctx, tt.service)
+				requestErr <- err
+			}()
+
+			select {
+			case <-transport.requestStarted:
+			case <-ctx.Done():
+				t.Fatalf("waiting for service open: %v", ctx.Err())
+			}
+
+			closeErr := make(chan error, 1)
+			go func() {
+				closeErr <- client.Close()
+			}()
+
+			select {
+			case err := <-requestErr:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("service open error = %v, want context canceled", err)
+				}
+			case <-ctx.Done():
+				t.Fatalf("waiting for canceled service open: %v", ctx.Err())
+			}
+			select {
+			case err := <-closeErr:
+				if err != nil {
+					t.Fatalf("Close() error = %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatalf("waiting for Close(): %v", ctx.Err())
+			}
+			if got := transport.closeCount(); got != 1 {
+				t.Fatalf("transport Close() calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestClientRejectsWorkWhileClosing(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(context.Context, *Client) error
+	}{
+		{
+			name: "QMI request",
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.CardStatus(ctx)
+				return err
+			},
+		},
+		{
+			name: "service client allocation",
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.serviceClientID(ctx, ServiceDMS)
+				return err
+			},
+		},
+		{
+			name: "indication transport",
+			call: func(_ context.Context, client *Client) error {
+				_, err := client.indicationTransport()
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeTransport{t: t}
+			client := &Client{transport: transport, slot: 1}
+			client.startClose()
+
+			if err := tt.call(t.Context(), client); !errors.Is(err, errClientClosed) {
+				t.Fatalf("call() error = %v, want client closed", err)
+			}
+			if err := client.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			if got := transport.callCount(); got != 0 {
+				t.Fatalf("Do() calls = %d, want 0", got)
+			}
+			if transport.closeCalls != 1 {
+				t.Fatalf("transport Close() calls = %d, want 1", transport.closeCalls)
+			}
+		})
 	}
 }
 

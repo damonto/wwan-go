@@ -208,6 +208,62 @@ func TestTransportWriteFailureIsTerminal(t *testing.T) {
 	}
 }
 
+func TestTransportPreservesWriteFailureDuringCancellation(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "device disconnect", err: errors.New("device disconnected")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newCancelRaceWriteConn(tt.err)
+			transport := New(conn)
+			defer transport.Close()
+
+			ctx, cancel := context.WithCancel(t.Context())
+			result := make(chan error, 1)
+			go func() {
+				_, err := transport.Do(ctx, qcom.Request{
+					Service:       qcom.ServiceUIM,
+					ClientID:      7,
+					TransactionID: 1,
+					MessageID:     qcom.MessageGetCardStatus,
+					Timeout:       time.Minute,
+				})
+				result <- err
+			}()
+
+			select {
+			case <-conn.writeStarted:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for write")
+			}
+			cancel()
+			close(conn.writeRelease)
+
+			select {
+			case err := <-result:
+				if !errors.Is(err, tt.err) {
+					t.Fatalf("Do() error = %v, want %v", err, tt.err)
+				}
+				if errors.Is(err, context.Canceled) {
+					t.Fatalf("Do() error = %v, should preserve the write failure", err)
+				}
+				if _, ok := errors.AsType[*TransportError](err); !ok {
+					t.Fatalf("Do() error = %v, want *TransportError", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Do() did not return")
+			}
+			if terminalErr := transport.TerminalError(); !errors.Is(terminalErr, tt.err) {
+				t.Fatalf("TerminalError() = %v, want %v", terminalErr, tt.err)
+			}
+		})
+	}
+}
+
 func TestMarshalRequestReturnsTLVError(t *testing.T) {
 	req := qcom.Request{
 		Service:       qcom.ServiceUIM,
@@ -574,6 +630,116 @@ func TestTransportClearsWriteDeadlineBeforeNextWrite(t *testing.T) {
 	}
 }
 
+func TestTransportCancelsBlockedWrite(t *testing.T) {
+	tests := []struct {
+		name    string
+		service qcom.ServiceType
+		client  uint8
+		message qcom.MessageID
+		tlvs    tlv.TLVs
+	}{
+		{
+			name:    "ordinary request",
+			service: qcom.ServiceUIM,
+			client:  7,
+			message: qcom.MessageReadTransparent,
+		},
+		{
+			name:    "client ID allocation before any bytes are written",
+			service: qcom.ServiceControl,
+			message: qcom.MessageAllocateClientID,
+			tlvs:    tlv.TLVs{tlv.Uint(0x01, uint8(qcom.ServiceDMS))},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newBlockingWriteConn()
+			transport := New(conn)
+			defer transport.Close()
+
+			ctx, cancel := context.WithCancel(t.Context())
+			result := make(chan error, 1)
+			go func() {
+				_, err := transport.Do(ctx, qcom.Request{
+					Service:       tt.service,
+					ClientID:      tt.client,
+					TransactionID: 3,
+					MessageID:     tt.message,
+					Timeout:       time.Minute,
+					TLVs:          tt.tlvs,
+				})
+				result <- err
+			}()
+
+			select {
+			case <-conn.writeStarted:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for blocked write")
+			}
+			cancel()
+
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("Do() error = %v, want context canceled", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Do() did not return after cancellation")
+			}
+			if err := transport.TerminalError(); err != nil {
+				t.Fatalf("TerminalError() = %v, want nil for an interrupted zero-byte write", err)
+			}
+		})
+	}
+}
+
+func TestTransportTerminatesOnUncertainClientIDAllocation(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "allocation response timeout after write"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newAsyncDeadlineConn()
+			transport := New(conn)
+			defer transport.Close()
+
+			_, err := transport.Do(t.Context(), qcom.Request{
+				Service:       qcom.ServiceControl,
+				ClientID:      0,
+				TransactionID: 1,
+				MessageID:     qcom.MessageAllocateClientID,
+				Timeout:       20 * time.Millisecond,
+				TLVs:          tlv.TLVs{tlv.Uint(0x01, uint8(qcom.ServiceDMS))},
+			})
+			var transportErr *TransportError
+			if !errors.As(err, &transportErr) {
+				t.Fatalf("Do() error = %v, want terminal transport error", err)
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Do() error = %v, want deadline exceeded cause", err)
+			}
+			if terminalErr := transport.TerminalError(); terminalErr == nil {
+				t.Fatal("TerminalError() = nil, want uncertain allocation failure")
+			}
+
+			_, nextErr := transport.Do(t.Context(), qcom.Request{
+				Service:       qcom.ServiceUIM,
+				ClientID:      7,
+				TransactionID: 2,
+				MessageID:     qcom.MessageGetCardStatus,
+				Timeout:       time.Second,
+			})
+			if !errors.As(nextErr, &transportErr) {
+				t.Fatalf("second Do() error = %v, want terminal transport error", nextErr)
+			}
+		})
+	}
+}
+
 func TestTransportCanUnsubscribeWhileDeliveringIndication(t *testing.T) {
 	transport := New(&deadlineConn{})
 	ind := qcom.Indication{
@@ -653,6 +819,68 @@ type deadlineConn struct {
 	read *bytes.Reader
 }
 
+type blockingWriteConn struct {
+	mu              sync.Mutex
+	writeDeadline   time.Time
+	deadlineChanged chan struct{}
+	writeStarted    chan struct{}
+	closed          chan struct{}
+	startOnce       sync.Once
+	closeOnce       sync.Once
+}
+
+func newBlockingWriteConn() *blockingWriteConn {
+	return &blockingWriteConn{
+		deadlineChanged: make(chan struct{}, 1),
+		writeStarted:    make(chan struct{}),
+		closed:          make(chan struct{}),
+	}
+}
+
+func (c *blockingWriteConn) Read([]byte) (int, error) {
+	<-c.closed
+	return 0, io.EOF
+}
+
+func (c *blockingWriteConn) Write([]byte) (int, error) {
+	c.startOnce.Do(func() {
+		close(c.writeStarted)
+	})
+	for {
+		c.mu.Lock()
+		deadline := c.writeDeadline
+		c.mu.Unlock()
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return 0, context.DeadlineExceeded
+		}
+		select {
+		case <-c.deadlineChanged:
+		case <-c.closed:
+			return 0, io.ErrClosedPipe
+		}
+	}
+}
+
+func (c *blockingWriteConn) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.closed)
+	})
+	return nil
+}
+
+func (c *blockingWriteConn) SetReadDeadline(time.Time) error { return nil }
+
+func (c *blockingWriteConn) SetWriteDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	c.writeDeadline = deadline
+	c.mu.Unlock()
+	select {
+	case c.deadlineChanged <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
 func (c *deadlineConn) Read(p []byte) (int, error) {
 	if c.read == nil {
 		return 0, io.EOF
@@ -671,6 +899,47 @@ type writeErrorConn struct {
 	readDone  chan struct{}
 	closeOnce sync.Once
 }
+
+type cancelRaceWriteConn struct {
+	err          error
+	writeStarted chan struct{}
+	writeRelease chan struct{}
+	closed       chan struct{}
+	startOnce    sync.Once
+	closeOnce    sync.Once
+}
+
+func newCancelRaceWriteConn(err error) *cancelRaceWriteConn {
+	return &cancelRaceWriteConn{
+		err:          err,
+		writeStarted: make(chan struct{}),
+		writeRelease: make(chan struct{}),
+		closed:       make(chan struct{}),
+	}
+}
+
+func (c *cancelRaceWriteConn) Read([]byte) (int, error) {
+	<-c.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (c *cancelRaceWriteConn) Write([]byte) (int, error) {
+	c.startOnce.Do(func() {
+		close(c.writeStarted)
+	})
+	<-c.writeRelease
+	return 0, c.err
+}
+
+func (c *cancelRaceWriteConn) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.closed)
+	})
+	return nil
+}
+
+func (c *cancelRaceWriteConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *cancelRaceWriteConn) SetWriteDeadline(time.Time) error { return nil }
 
 func (c *writeErrorConn) Read([]byte) (int, error) {
 	<-c.closed

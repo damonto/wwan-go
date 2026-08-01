@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -19,6 +20,10 @@ type packetConn interface {
 	io.ReadWriter
 	SetReadDeadline(time.Time) error
 	Close() error
+}
+
+type writeDeadlineSetter interface {
+	SetWriteDeadline(time.Time) error
 }
 
 type Header struct {
@@ -169,22 +174,23 @@ type serviceTransport struct {
 	conn    packetConn
 	service qcom.ServiceType
 
-	writeMu  sync.Mutex
-	readOnce sync.Once
-	mu       sync.Mutex
-	pending  map[messageKey]chan responseResult
-	subs     map[uint64]*subscription
-	nextSub  uint64
-	readErr  error
-	closed   bool
+	writeGate chan struct{}
+	readOnce  sync.Once
+	mu        sync.Mutex
+	pending   map[messageKey]chan responseResult
+	subs      map[uint64]*subscription
+	nextSub   uint64
+	readErr   error
+	closed    bool
 }
 
 func newServiceTransport(conn packetConn, service qcom.ServiceType) *serviceTransport {
 	return &serviceTransport{
-		conn:    conn,
-		service: service,
-		pending: make(map[messageKey]chan responseResult),
-		subs:    make(map[uint64]*subscription),
+		conn:      conn,
+		service:   service,
+		writeGate: newWriteGate(),
+		pending:   make(map[messageKey]chan responseResult),
+		subs:      make(map[uint64]*subscription),
 	}
 }
 
@@ -197,6 +203,10 @@ func (t *serviceTransport) Close() error {
 func (t *serviceTransport) Do(ctx context.Context, req qcom.Request) (qcom.Response, error) {
 	if req.Service != t.service {
 		return qcom.Response{}, fmt.Errorf("QRTR service endpoint 0x%X received request for service 0x%X", t.service, req.Service)
+	}
+	deadlineWriter, ok := t.conn.(writeDeadlineSetter)
+	if !ok {
+		return qcom.Response{}, errors.New("QRTR connection does not support write deadlines")
 	}
 
 	packet, err := (Request{Request: req}).MarshalBinary()
@@ -217,21 +227,70 @@ func (t *serviceTransport) Do(ctx context.Context, req qcom.Request) (qcom.Respo
 	}
 	t.startReader()
 
-	t.writeMu.Lock()
-	if err := writeFull(t.conn, packet); err != nil {
-		t.writeMu.Unlock()
+	if err := acquireWrite(waitCtx, t.writeGate); err != nil {
 		t.removePending(key)
-		return qcom.Response{}, fmt.Errorf("writing QRTR request: %w", err)
+		return qcom.Response{}, err
 	}
-	t.writeMu.Unlock()
+	if err := waitCtx.Err(); err != nil {
+		releaseWrite(t.writeGate)
+		t.removePending(key)
+		return qcom.Response{}, err
+	}
+
+	deadline, hasDeadline := waitCtx.Deadline()
+	if hasDeadline {
+		if err := deadlineWriter.SetWriteDeadline(deadline); err != nil {
+			releaseWrite(t.writeGate)
+			t.removePending(key)
+			return qcom.Response{}, fmt.Errorf("setting QRTR write deadline: %w", err)
+		}
+	}
+	interruptDone := make(chan struct{})
+	stopInterrupt := context.AfterFunc(waitCtx, func() {
+		defer close(interruptDone)
+		// The write result remains authoritative; this deadline only wakes a
+		// syscall whose request context has already ended.
+		_ = deadlineWriter.SetWriteDeadline(time.Now())
+	})
+	written, writeErr := t.conn.Write(packet)
+	if writeErr == nil && written != len(packet) {
+		writeErr = io.ErrShortWrite
+	}
+	if !stopInterrupt() {
+		<-interruptDone
+	}
+	// A stale deadline would incorrectly fail the next request on this service.
+	_ = deadlineWriter.SetWriteDeadline(time.Time{})
+	releaseWrite(t.writeGate)
+	if writeErr != nil {
+		if !t.expirePending(key, result) {
+			outcome := <-result
+			return outcome.resp, outcome.err
+		}
+		if ctxErr := waitCtx.Err(); ctxErr != nil && writeInterruptedByContext(writeErr) && (written == 0 || written == len(packet)) {
+			return qcom.Response{}, ctxErr
+		}
+		terminalErr := fmt.Errorf("writing QRTR request: %w", writeErr)
+		t.fail(terminalErr)
+		return qcom.Response{}, terminalErr
+	}
 
 	select {
 	case result := <-result:
 		return result.resp, result.err
 	case <-waitCtx.Done():
-		t.removePending(key)
+		if !t.expirePending(key, result) {
+			outcome := <-result
+			return outcome.resp, outcome.err
+		}
 		return qcom.Response{}, waitCtx.Err()
 	}
+}
+
+func writeInterruptedByContext(err error) bool {
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, os.ErrDeadlineExceeded)
 }
 
 func (t *serviceTransport) Indications(ctx context.Context, id qcom.MessageID) (<-chan qcom.Indication, error) {
@@ -410,6 +469,16 @@ func (t *serviceTransport) removePending(key messageKey) {
 	t.mu.Unlock()
 }
 
+func (t *serviceTransport) expirePending(key messageKey, ch chan responseResult) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.pending[key] != ch {
+		return false
+	}
+	delete(t.pending, key)
+	return true
+}
+
 func (t *serviceTransport) removeFinishedSubscription(id uint64, sub *subscription) {
 	<-sub.done
 	t.mu.Lock()
@@ -544,16 +613,21 @@ func marshalRequest(req qcom.Request) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-func writeFull(w io.Writer, p []byte) error {
-	for len(p) > 0 {
-		n, err := w.Write(p)
-		if err != nil {
-			return err
-		}
-		if n <= 0 {
-			return io.ErrShortWrite
-		}
-		p = p[n:]
+func newWriteGate() chan struct{} {
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return gate
+}
+
+func acquireWrite(ctx context.Context, gate <-chan struct{}) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-gate:
+		return nil
 	}
-	return nil
+}
+
+func releaseWrite(gate chan<- struct{}) {
+	gate <- struct{}{}
 }

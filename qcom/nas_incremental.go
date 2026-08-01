@@ -115,11 +115,11 @@ func (c *Client) startNASIncrementalNetworkScan(
 ) (uint16, Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.transport == nil {
+	if !c.isOpenLocked() {
 		return 0, Response{}, errClientClosed
 	}
 	transactionID := c.nextTransactionID(ServiceNAS)
-	resp, err := c.transport.Do(ctx, Request{
+	resp, err := c.doRequest(ctx, Request{
 		Service:       ServiceNAS,
 		ClientID:      clientID,
 		TransactionID: transactionID,

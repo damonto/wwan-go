@@ -13,7 +13,7 @@ func (c *Client) SendEnvelope(ctx context.Context, envelope []byte) (EnvelopeRes
 func (c *Client) catClient(ctx context.Context) (ServiceType, uint8, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.transport == nil {
+	if !c.isOpenLocked() {
 		return 0, 0, errClientClosed
 	}
 
@@ -44,7 +44,7 @@ func (c *Client) catClient(ctx context.Context) (ServiceType, uint8, error) {
 func (c *Client) releaseCATClient(ctx context.Context, service ServiceType, clientID uint8) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.transport == nil {
+	if !c.isOpenLocked() {
 		return nil
 	}
 	if c.catService != service || c.clientIDs[service] != clientID {
@@ -62,16 +62,16 @@ func (c *Client) releaseCATClient(ctx context.Context, service ServiceType, clie
 
 func (c *Client) catServiceType(ctx context.Context) (ServiceType, error) {
 	if transport, ok := c.transport.(transportClientIDProvider); ok {
-		if _, err := transport.ClientID(ctx, ServiceCAT2); err == nil {
+		if _, err := c.transportClientIDLocked(ctx, transport, ServiceCAT2); err == nil {
 			return ServiceCAT2, nil
 		}
-		if _, err := transport.ClientID(ctx, ServiceCAT); err == nil {
+		if _, err := c.transportClientIDLocked(ctx, transport, ServiceCAT); err == nil {
 			return ServiceCAT, nil
 		}
 		return 0, errors.New("detecting QMI CAT service: CAT2/CAT service is not exposed")
 	}
 
-	versions, err := c.serviceVersions(ctx)
+	versions, err := c.serviceVersionsLocked(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -88,12 +88,17 @@ func (c *Client) catServiceType(ctx context.Context) (ServiceType, error) {
 	return 0, errors.New("detecting QMI CAT service: CAT2/CAT service is not exposed")
 }
 
-func (c *Client) serviceVersions(ctx context.Context) ([]serviceVersion, error) {
-	return c.ServiceVersions(ctx)
-}
-
 // ServiceVersions returns the QMI services advertised by the device.
 func (c *Client) ServiceVersions(ctx context.Context) ([]ServiceVersion, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.isOpenLocked() {
+		return nil, errClientClosed
+	}
+	return c.serviceVersionsLocked(ctx)
+}
+
+func (c *Client) serviceVersionsLocked(ctx context.Context) ([]serviceVersion, error) {
 	resp, err := c.sendRequest(ctx, ServiceControl, 0, MessageGetVersionInfo, nil, DefaultRequestTimeout)
 	if err != nil {
 		return nil, err

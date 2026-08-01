@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -85,7 +86,7 @@ type transportLease struct {
 type transportCore struct {
 	conn Conn
 
-	writeMu       sync.Mutex
+	writeGate     chan struct{}
 	readOnce      sync.Once
 	mu            sync.Mutex
 	pending       map[messageKey]chan responseResult
@@ -109,15 +110,20 @@ func (t *Transport) TerminalError() error {
 }
 
 func New(conn Conn) *Transport {
-	core := &transportCore{
+	core := newTransportCore(conn)
+	transport := &Transport{transportCore: core}
+	transport.release = transport.closeCore
+	return transport
+}
+
+func newTransportCore(conn Conn) *transportCore {
+	return &transportCore{
 		conn:          conn,
+		writeGate:     newWriteGate(),
 		pending:       make(map[messageKey]chan responseResult),
 		pendingOwners: make(map[messageKey]*transportLease),
 		subs:          make(map[uint64]*subscription),
 	}
-	transport := &Transport{transportCore: core}
-	transport.release = transport.closeCore
-	return transport
 }
 
 func (t *Transport) Close() error {
@@ -199,22 +205,49 @@ func (t *Transport) Do(ctx context.Context, req qcom.Request) (qcom.Response, er
 	}
 	t.startReader()
 
-	deadline, hasDeadline := qcom.RequestDeadline(ctx, req.Timeout)
-	t.writeMu.Lock()
+	if err := acquireWrite(waitCtx, t.writeGate); err != nil {
+		t.removePending(key)
+		return qcom.Response{}, err
+	}
+	if err := waitCtx.Err(); err != nil {
+		releaseWrite(t.writeGate)
+		t.removePending(key)
+		return qcom.Response{}, err
+	}
+
+	deadline, hasDeadline := waitCtx.Deadline()
 	if hasDeadline {
 		if err := t.conn.SetWriteDeadline(deadline); err != nil {
-			t.writeMu.Unlock()
+			releaseWrite(t.writeGate)
 			t.removePending(key)
 			return qcom.Response{}, fmt.Errorf("setting QMI write deadline: %w", err)
 		}
 	}
-	writeErr := writeFull(t.conn, packet)
-	if hasDeadline {
-		_ = t.conn.SetWriteDeadline(time.Time{})
+	interruptDone := make(chan struct{})
+	stopInterrupt := context.AfterFunc(waitCtx, func() {
+		defer close(interruptDone)
+		// The write result remains authoritative; this deadline only wakes a
+		// syscall whose request context has already ended.
+		_ = t.conn.SetWriteDeadline(time.Now())
+	})
+	written, writeErr := writeFull(t.conn, packet)
+	if !stopInterrupt() {
+		<-interruptDone
 	}
-	t.writeMu.Unlock()
+	// A stale deadline would incorrectly fail the next writer sharing this core.
+	_ = t.conn.SetWriteDeadline(time.Time{})
+	releaseWrite(t.writeGate)
 	if writeErr != nil {
-		t.removePending(key)
+		if !t.expirePending(key, result) {
+			outcome := <-result
+			return outcome.resp, outcome.err
+		}
+		if ctxErr := waitCtx.Err(); ctxErr != nil && writeInterruptedByContext(writeErr) && (written == 0 || written == len(packet)) {
+			if written == len(packet) && isClientIDAllocation(req) {
+				return qcom.Response{}, t.failUncertainClientIDAllocation(ctxErr)
+			}
+			return qcom.Response{}, ctxErr
+		}
 		terminalErr := &TransportError{Err: fmt.Errorf("writing QMI request: %w", writeErr)}
 		t.fail(terminalErr)
 		return qcom.Response{}, terminalErr
@@ -224,9 +257,31 @@ func (t *Transport) Do(ctx context.Context, req qcom.Request) (qcom.Response, er
 	case result := <-result:
 		return result.resp, result.err
 	case <-waitCtx.Done():
-		t.removePending(key)
+		if !t.expirePending(key, result) {
+			outcome := <-result
+			return outcome.resp, outcome.err
+		}
+		if isClientIDAllocation(req) {
+			return qcom.Response{}, t.failUncertainClientIDAllocation(waitCtx.Err())
+		}
 		return qcom.Response{}, waitCtx.Err()
 	}
+}
+
+func isClientIDAllocation(req qcom.Request) bool {
+	return req.Service == qcom.ServiceControl && req.MessageID == qcom.MessageAllocateClientID
+}
+
+func writeInterruptedByContext(err error) bool {
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, os.ErrDeadlineExceeded)
+}
+
+func (t *Transport) failUncertainClientIDAllocation(err error) error {
+	terminalErr := &TransportError{Err: fmt.Errorf("completing QMI client ID allocation: result unknown: %w", err)}
+	t.fail(terminalErr)
+	return terminalErr
 }
 
 func (t *Transport) nextTransactionID(service qcom.ServiceType) uint16 {
@@ -445,6 +500,17 @@ func (t *Transport) removePending(key messageKey) {
 	t.mu.Unlock()
 }
 
+func (t *Transport) expirePending(key messageKey, ch chan responseResult) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.pending[key] != ch {
+		return false
+	}
+	delete(t.pending, key)
+	delete(t.pendingOwners, key)
+	return true
+}
+
 func (t *Transport) removeFinishedSubscription(id uint64, sub *subscription) {
 	<-sub.done
 	t.mu.Lock()
@@ -627,16 +693,37 @@ func validateRequest(req qcom.Request) error {
 	return nil
 }
 
-func writeFull(w io.Writer, p []byte) error {
+func newWriteGate() chan struct{} {
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return gate
+}
+
+func acquireWrite(ctx context.Context, gate <-chan struct{}) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-gate:
+		return nil
+	}
+}
+
+func releaseWrite(gate chan<- struct{}) {
+	gate <- struct{}{}
+}
+
+func writeFull(w io.Writer, p []byte) (int, error) {
+	written := 0
 	for len(p) > 0 {
 		n, err := w.Write(p)
+		written += n
+		p = p[n:]
 		if err != nil {
-			return err
+			return written, err
 		}
 		if n <= 0 {
-			return io.ErrShortWrite
+			return written, io.ErrShortWrite
 		}
-		p = p[n:]
 	}
-	return nil
+	return written, nil
 }

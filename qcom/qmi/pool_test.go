@@ -63,9 +63,86 @@ func (c *poolConn) Close() error {
 func (*poolConn) SetReadDeadline(time.Time) error  { return nil }
 func (*poolConn) SetWriteDeadline(time.Time) error { return nil }
 
+func newTestDirectPool() *directPool {
+	return &directPool{initialize: func(context.Context, *Transport) error { return nil }}
+}
+
+func TestDirectPoolSynchronizesNewCoreOnce(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "two leases on one direct endpoint"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			conn := newAsyncDeadlineConn()
+			conn.frames <- controlResultFrame(1, qcom.MessageCTLSync)
+			pool := new(directPool)
+			dialer := fakeDialer{conn: conn}
+
+			first, err := pool.acquire(ctx, "/dev/wwan0qmi0", dialer)
+			if err != nil {
+				t.Fatalf("acquire(first) error = %v", err)
+			}
+			second, err := pool.acquire(ctx, "/dev/wwan0qmi0", dialer)
+			if err != nil {
+				t.Fatalf("acquire(second) error = %v", err)
+			}
+
+			conn.mu.Lock()
+			writes := len(conn.writeDeadlines)
+			conn.mu.Unlock()
+			if writes != 1 {
+				t.Fatalf("direct initialization writes = %d, want one CTL sync", writes)
+			}
+			if err := first.Close(); err != nil {
+				t.Fatalf("first Close() error = %v", err)
+			}
+			if err := second.Close(); err != nil {
+				t.Fatalf("second Close() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestDirectPoolClosesCoreAfterInitializationFailure(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "CTL sync rejected"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initErr := errors.New("sync rejected")
+			pool := &directPool{initialize: func(context.Context, *Transport) error { return initErr }}
+			dialer := new(poolDialer)
+
+			if _, err := pool.acquire(t.Context(), "/dev/wwan0qmi0", dialer); !errors.Is(err, initErr) {
+				t.Fatalf("acquire() error = %v, want initialization error", err)
+			}
+			conns := dialer.connections()
+			if len(conns) != 1 {
+				t.Fatalf("Dial() calls = %d, want 1", len(conns))
+			}
+			if got := conns[0].closes.Load(); got != 1 {
+				t.Fatalf("connection closes = %d, want 1", got)
+			}
+			pool.mu.Lock()
+			remaining := len(pool.entries)
+			pool.mu.Unlock()
+			if remaining != 0 {
+				t.Fatalf("pool entries = %d, want empty", remaining)
+			}
+		})
+	}
+}
+
 func TestDirectPoolGroupsLeasesByDevice(t *testing.T) {
 	ctx := context.Background()
-	pool := new(directPool)
+	pool := newTestDirectPool()
 	dialer := new(poolDialer)
 
 	data5a, err := pool.acquire(ctx, "/dev/wwan0qmi0", dialer)
@@ -126,7 +203,7 @@ func TestDirectPoolGroupsLeasesByDevice(t *testing.T) {
 
 func TestDirectPoolCloseRemovesOnlyLeaseSubscriptions(t *testing.T) {
 	ctx := context.Background()
-	pool := new(directPool)
+	pool := newTestDirectPool()
 	dialer := new(poolDialer)
 	first, err := pool.acquire(ctx, "/dev/wwan0qmi0", dialer)
 	if err != nil {
@@ -179,7 +256,7 @@ func TestDirectPoolReplacesFailedCore(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			pool := new(directPool)
+			pool := newTestDirectPool()
 			dialer := new(poolDialer)
 
 			first, err := pool.acquire(ctx, "/dev/wwan0qmi0", dialer)
@@ -237,7 +314,7 @@ func TestDirectPoolWaitsForPhysicalCloseBeforeRedial(t *testing.T) {
 					return new(poolConn)
 				},
 			}
-			pool := new(directPool)
+			pool := newTestDirectPool()
 			first, err := pool.acquire(context.Background(), "/dev/wwan0qmi0", dialer)
 			if err != nil {
 				t.Fatalf("acquire(first) error = %v", err)

@@ -1,6 +1,7 @@
 package qrtr
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,44 +15,52 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const writeRetryDelay = 10 * time.Millisecond
+
 type Conn struct {
-	mu           sync.Mutex
-	cond         *sync.Cond
-	activeOps    int
-	fd           int
-	fdValid      bool
-	wakeFD       int
-	wakeFDValid  bool
-	service      *service
-	readDeadline time.Time
-	deadlineSeq  uint64
-	pollWaiters  int
+	mu            sync.Mutex
+	cond          *sync.Cond
+	activeOps     int
+	fd            int
+	fdValid       bool
+	wakeFD        int
+	wakeFDValid   bool
+	service       *service
+	readDeadline  time.Time
+	writeDeadline time.Time
+	deadlineSeq   uint64
+	pollWaiters   int
 }
 
 var errReadDeadlineChanged = errors.New("read deadline changed")
 
-func openService(serviceType qcom.ServiceType) (*Conn, error) {
+func openService(ctx context.Context, serviceType qcom.ServiceType) (*Conn, error) {
 	conn, err := newConn()
 	if err != nil {
 		return nil, err
 	}
-	conn.service, err = conn.findService(serviceType)
+	conn.service, err = conn.findService(ctx, serviceType)
 	if err != nil {
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("closing QRTR service connection: %w", closeErr))
+		}
 		return nil, err
 	}
 	return conn, nil
 }
 
 func newConn() (*Conn, error) {
-	fd, err := unix.Socket(unix.AF_QIPCRTR, unix.SOCK_DGRAM, 0)
+	fd, err := unix.Socket(unix.AF_QIPCRTR, unix.SOCK_DGRAM|unix.SOCK_NONBLOCK, 0)
 	if err != nil {
 		return nil, fmt.Errorf("create QRTR socket: %w", err)
 	}
 	wakeFD, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
 	if err != nil {
-		unix.Close(fd)
-		return nil, fmt.Errorf("create QRTR wake eventfd: %w", err)
+		var closeErr error
+		if err := unix.Close(fd); err != nil {
+			closeErr = fmt.Errorf("closing QRTR socket after wake eventfd error: %w", err)
+		}
+		return nil, errors.Join(fmt.Errorf("create QRTR wake eventfd: %w", err), closeErr)
 	}
 	return newConnWithFDs(fd, wakeFD), nil
 }
@@ -288,15 +297,60 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
+func (c *Conn) wakeReader() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.fdValid {
+		return net.ErrClosed
+	}
+	return notifyWakeFD(c.wakeFD, c.wakeFDValid)
+}
+
+func (c *Conn) SetWriteDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.fdValid {
+		return net.ErrClosed
+	}
+	c.writeDeadline = t
+	return nil
+}
+
 func (c *Conn) Write(b []byte) (int, error) {
 	if c.service == nil {
 		return 0, errors.New("QRTR service is not set")
 	}
-	return c.sendTo(&sockAddr{
+	dest := &sockAddr{
 		Family: unix.AF_QIPCRTR,
 		Node:   c.service.Node,
 		Port:   c.service.Port,
-	}, b)
+	}
+	for {
+		deadline := c.currentWriteDeadline()
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return 0, os.ErrDeadlineExceeded
+		}
+
+		n, err := c.sendTo(dest, b)
+		if err == nil {
+			return n, nil
+		}
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EWOULDBLOCK) {
+			return n, err
+		}
+
+		wait := writeRetryDelay
+		if !deadline.IsZero() {
+			wait = min(wait, time.Until(deadline))
+			if wait <= 0 {
+				return 0, os.ErrDeadlineExceeded
+			}
+		}
+		time.Sleep(wait)
+	}
 }
 
 func (c *Conn) Close() error {
@@ -383,6 +437,12 @@ func (c *Conn) currentReadDeadline() (time.Time, uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.readDeadline, c.deadlineSeq
+}
+
+func (c *Conn) currentWriteDeadline() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writeDeadline
 }
 
 func (c *Conn) currentDeadlineSeq() uint64 {

@@ -55,7 +55,7 @@ func (d DirectDialer) Dial(ctx context.Context, service qcom.ServiceType) (packe
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return openService(service)
+	return openService(ctx, service)
 }
 
 var (

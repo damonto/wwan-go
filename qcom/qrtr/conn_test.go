@@ -25,6 +25,9 @@ func TestConnBoundarySemantics(t *testing.T) {
 	if err := conn.SetReadDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("SetReadDeadline on zero conn error = %v, want net.ErrClosed", err)
 	}
+	if err := conn.SetWriteDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("SetWriteDeadline on zero conn error = %v, want net.ErrClosed", err)
+	}
 }
 
 func TestConnCloseIsStateful(t *testing.T) {
@@ -70,6 +73,12 @@ func TestConnSetReadDeadline(t *testing.T) {
 	if got, _ := conn.currentReadDeadline(); !got.Equal(deadline) {
 		t.Fatalf("read deadline = %s, want %s", got, deadline)
 	}
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		t.Fatalf("SetWriteDeadline failed: %v", err)
+	}
+	if got := conn.currentWriteDeadline(); !got.Equal(deadline) {
+		t.Fatalf("write deadline = %s, want %s", got, deadline)
+	}
 }
 
 func TestWaitReadableWakesOnDeadlineChange(t *testing.T) {
@@ -103,6 +112,50 @@ func TestWaitReadableWakesOnDeadlineChange(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("waitReadable did not wake")
+	}
+}
+
+func TestConnWakeReaderInterruptsPoll(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "context cancellation wake"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fds := make([]int, 2)
+			if err := unix.Pipe(fds); err != nil {
+				t.Fatalf("create pipe: %v", err)
+			}
+			defer unix.Close(fds[1])
+
+			wakeFD, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+			if err != nil {
+				t.Fatalf("create eventfd: %v", err)
+			}
+			conn := newConnWithFDs(fds[0], wakeFD)
+			defer conn.Close()
+
+			done := make(chan error, 1)
+			go func() {
+				done <- waitReadable(fds[0], wakeFD, true, -1)
+			}()
+
+			time.Sleep(10 * time.Millisecond)
+			if err := conn.wakeReader(); err != nil {
+				t.Fatalf("wakeReader() error = %v", err)
+			}
+
+			select {
+			case err := <-done:
+				if !errors.Is(err, errReadDeadlineChanged) {
+					t.Fatalf("waitReadable error = %v, want errReadDeadlineChanged", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("wakeReader did not interrupt poll")
+			}
+		})
 	}
 }
 

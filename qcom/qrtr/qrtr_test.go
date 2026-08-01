@@ -36,10 +36,11 @@ func (d *fakeDialer) dialedServices() []qcom.ServiceType {
 
 type fakeConn struct{}
 
-func (fakeConn) Read([]byte) (int, error)        { return 0, io.EOF }
-func (fakeConn) Write(p []byte) (int, error)     { return len(p), nil }
-func (fakeConn) Close() error                    { return nil }
-func (fakeConn) SetReadDeadline(time.Time) error { return nil }
+func (fakeConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (fakeConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (fakeConn) Close() error                     { return nil }
+func (fakeConn) SetReadDeadline(time.Time) error  { return nil }
+func (fakeConn) SetWriteDeadline(time.Time) error { return nil }
 
 func TestOpenUsesDialer(t *testing.T) {
 	tests := []struct {
