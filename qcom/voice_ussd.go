@@ -112,11 +112,9 @@ func (r *VoiceUSSDNoWaitResult) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		result.DataKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x13); ok {
-		alpha, err := decodeVoiceAlphaIdentifier(value)
-		if err != nil {
+		if err := result.Alpha.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI Voice USSD no-wait result: %w", err)
 		}
-		result.Alpha = alpha
 		result.AlphaKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x14); ok {

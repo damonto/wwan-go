@@ -40,8 +40,8 @@ func (address Address) MarshalBinary() ([]byte, error) {
 		return nil, fmt.Errorf("marshaling address: %w", err)
 	}
 
-	body, err := NewBCD(value)
-	if err != nil {
+	var body BCD
+	if err := body.UnmarshalText([]byte(value)); err != nil {
 		return nil, fmt.Errorf("marshaling address: %w", err)
 	}
 	return append([]byte{tonNPI}, body...), nil

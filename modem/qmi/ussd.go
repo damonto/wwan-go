@@ -89,7 +89,10 @@ func encodeQMIUSSD(text string) (qcom.VoiceUSSDData, error) {
 	if ascii {
 		return qcom.VoiceUSSDData{Encoding: qcom.VoiceUSSDEncodingASCII, Data: []byte(text)}, nil
 	}
-	data := sms.UCS2Bytes(utf16.Encode([]rune(text)))
+	data, err := sms.UCS2(text).MarshalBinary()
+	if err != nil {
+		return qcom.VoiceUSSDData{}, fmt.Errorf("encoding QMI USSD: %w", err)
+	}
 	if len(data) > 255 {
 		return qcom.VoiceUSSDData{}, fmt.Errorf("encoding QMI USSD: payload length %d exceeds 255", len(data))
 	}
@@ -98,8 +101,12 @@ func encodeQMIUSSD(text string) (qcom.VoiceUSSDData, error) {
 
 func qmiUSSDResult(result qcom.VoiceUSSDResult) (USSDMessage, error) {
 	if len(result.UTF16) != 0 {
-		data := sms.UCS2Bytes(result.UTF16)
-		return USSDMessage{Text: string(utf16.Decode(result.UTF16)), DCS: uint32(qcom.VoiceUSSDEncodingUCS2), Data: data}, nil
+		text := sms.UCS2(string(utf16.Decode(result.UTF16)))
+		data, err := text.MarshalBinary()
+		if err != nil {
+			return USSDMessage{}, fmt.Errorf("decoding QMI USSD result: %w", err)
+		}
+		return USSDMessage{Text: text.String(), DCS: uint32(qcom.VoiceUSSDEncodingUCS2), Data: data}, nil
 	}
 	if result.DataKnown {
 		return qmiUSSDData(result.Data)
@@ -113,8 +120,13 @@ func qmiUSSDEvent(event qcom.VoiceUSSDEvent) (USSDMessage, error) {
 		message.State = USSDStateUserResponse
 	}
 	if len(event.UTF16) != 0 {
-		message.Text = string(utf16.Decode(event.UTF16))
-		message.Data = sms.UCS2Bytes(event.UTF16)
+		text := sms.UCS2(string(utf16.Decode(event.UTF16)))
+		data, err := text.MarshalBinary()
+		if err != nil {
+			return USSDMessage{}, fmt.Errorf("decoding QMI USSD event: %w", err)
+		}
+		message.Text = text.String()
+		message.Data = data
 		message.DCS = uint32(qcom.VoiceUSSDEncodingUCS2)
 		return message, nil
 	}
@@ -135,11 +147,11 @@ func qmiUSSDData(data qcom.VoiceUSSDData) (USSDMessage, error) {
 	case qcom.VoiceUSSDEncodingASCII, qcom.VoiceUSSDEncoding8Bit:
 		message.Text = string(data.Data)
 	case qcom.VoiceUSSDEncodingUCS2:
-		text, err := sms.DecodeUCS2(data.Data)
-		if err != nil {
+		var text sms.UCS2
+		if err := text.UnmarshalBinary(data.Data); err != nil {
 			return USSDMessage{}, fmt.Errorf("decoding QMI USSD: %w", err)
 		}
-		message.Text = text
+		message.Text = text.String()
 	default:
 		return USSDMessage{}, fmt.Errorf("decoding QMI USSD: encoding %d is not supported", data.Encoding)
 	}

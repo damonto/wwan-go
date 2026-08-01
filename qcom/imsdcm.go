@@ -96,10 +96,11 @@ func (r IMSDCMPDPActivateRequest) Request() (Request, error) {
 		}
 	}
 	if r.Instance != nil {
-		if err := validateIMSDCMInstance(*r.Instance); err != nil {
+		value, err := r.Instance.MarshalBinary()
+		if err != nil {
 			return Request{}, err
 		}
-		tlvs = append(tlvs, tlv.Uint(0x13, uint32(*r.Instance)))
+		tlvs = append(tlvs, tlv.Bytes(0x13, value))
 	}
 	return Request{
 		Service:       ServiceIMSDCM,
@@ -113,23 +114,8 @@ func (r IMSDCMPDPActivateRequest) Request() (Request, error) {
 
 // MarshalBinary encodes the mandatory IMS DCM connection aggregate.
 func (c IMSDCMConnection) MarshalBinary() ([]byte, error) {
-	if c.APN == "" {
-		return nil, errors.New("IMS DCM APN is required")
-	}
-	if strings.IndexByte(c.APN, 0) >= 0 {
-		return nil, errors.New("IMS DCM APN contains a NUL byte")
-	}
-	if len(c.APN) > imsDCMMaxAPNLength {
-		return nil, fmt.Errorf("IMS DCM APN length %d exceeds maximum %d", len(c.APN), imsDCMMaxAPNLength)
-	}
-	if c.APNType > IMSDCMAPNWLAN {
-		return nil, fmt.Errorf("IMS DCM APN type %d is out of range", c.APNType)
-	}
-	if c.RAT > IMSDCMRATWLAN {
-		return nil, fmt.Errorf("IMS DCM RAT %d is out of range", c.RAT)
-	}
-	if c.IPFamily > IMSDCMIPv6 {
-		return nil, fmt.Errorf("IMS DCM IP family %d is out of range", c.IPFamily)
+	if err := c.validate(); err != nil {
+		return nil, err
 	}
 	value := make([]byte, 0, 1+len(c.APN)+16)
 	value = append(value, byte(len(c.APN)))
@@ -139,6 +125,51 @@ func (c IMSDCMConnection) MarshalBinary() ([]byte, error) {
 	value = binary.LittleEndian.AppendUint32(value, uint32(c.IPFamily))
 	value = binary.LittleEndian.AppendUint32(value, c.WDSProfileNum)
 	return value, nil
+}
+
+// UnmarshalBinary decodes the mandatory IMS DCM connection aggregate.
+func (c *IMSDCMConnection) UnmarshalBinary(value []byte) error {
+	if len(value) < 17 {
+		return fmt.Errorf("IMS DCM connection length %d is shorter than 17", len(value))
+	}
+	apnLength := int(value[0])
+	if len(value) != 1+apnLength+16 {
+		return fmt.Errorf("IMS DCM connection length %d, want %d", len(value), 1+apnLength+16)
+	}
+	parsed := IMSDCMConnection{
+		APN:           string(value[1 : 1+apnLength]),
+		APNType:       IMSDCMAPNType(binary.LittleEndian.Uint32(value[1+apnLength:])),
+		RAT:           IMSDCMRAT(binary.LittleEndian.Uint32(value[5+apnLength:])),
+		IPFamily:      IMSDCMIPFamily(binary.LittleEndian.Uint32(value[9+apnLength:])),
+		WDSProfileNum: binary.LittleEndian.Uint32(value[13+apnLength:]),
+	}
+	if err := parsed.validate(); err != nil {
+		return err
+	}
+	*c = parsed
+	return nil
+}
+
+func (c IMSDCMConnection) validate() error {
+	if c.APN == "" {
+		return errors.New("IMS DCM APN is required")
+	}
+	if strings.IndexByte(c.APN, 0) >= 0 {
+		return errors.New("IMS DCM APN contains a NUL byte")
+	}
+	if len(c.APN) > imsDCMMaxAPNLength {
+		return fmt.Errorf("IMS DCM APN length %d exceeds maximum %d", len(c.APN), imsDCMMaxAPNLength)
+	}
+	if c.APNType > IMSDCMAPNWLAN {
+		return fmt.Errorf("IMS DCM APN type %d is out of range", c.APNType)
+	}
+	if c.RAT > IMSDCMRATWLAN {
+		return fmt.Errorf("IMS DCM RAT %d is out of range", c.RAT)
+	}
+	if c.IPFamily > IMSDCMIPv6 {
+		return fmt.Errorf("IMS DCM IP family %d is out of range", c.IPFamily)
+	}
+	return nil
 }
 
 // IMSDCMPDPActivateResponse contains fields from the immediate activation response.
@@ -169,11 +200,9 @@ func (r *IMSDCMPDPActivateResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		r.SequenceNumberKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x12); ok {
-		instance, err := decodeIMSDCMInstance(value)
-		if err != nil {
+		if err := r.Instance.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI IMS DCM activation response instance: %w", err)
 		}
-		r.Instance = instance
 		r.InstanceKnown = true
 	}
 	return nil
@@ -231,11 +260,9 @@ func (r *IMSDCMPDPActivation) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		r.AddressKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x12); ok {
-		instance, err := decodeIMSDCMInstance(value)
-		if err != nil {
+		if err := r.Instance.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI IMS DCM activation instance: %w", err)
 		}
-		r.Instance = instance
 		r.InstanceKnown = true
 	}
 	return nil
@@ -254,10 +281,11 @@ type IMSDCMPDPDeactivateRequest struct {
 func (r IMSDCMPDPDeactivateRequest) Request() (Request, error) {
 	tlvs := tlv.TLVs{tlv.Uint(0x01, r.PDPID)}
 	if r.Instance != nil {
-		if err := validateIMSDCMInstance(*r.Instance); err != nil {
+		value, err := r.Instance.MarshalBinary()
+		if err != nil {
 			return Request{}, err
 		}
-		tlvs = append(tlvs, tlv.Uint(0x10, uint32(*r.Instance)))
+		tlvs = append(tlvs, tlv.Bytes(0x10, value))
 	}
 	return Request{
 		Service:       ServiceIMSDCM,
@@ -288,11 +316,9 @@ func (r *IMSDCMPDPDeactivateResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		r.PDPIDKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x11); ok {
-		instance, err := decodeIMSDCMInstance(value)
-		if err != nil {
+		if err := r.Instance.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI IMS DCM deactivation response instance: %w", err)
 		}
-		r.Instance = instance
 		r.InstanceKnown = true
 	}
 	return nil
@@ -385,18 +411,30 @@ func (c *Client) imsDCMRequest(ctx context.Context, req Request, dst tlvUnmarsha
 	})
 }
 
-func validateIMSDCMInstance(instance IMSDCMInstance) error {
+func (instance IMSDCMInstance) validate() error {
 	if instance < IMSDCMInstanceNone || instance > IMSDCMInstance2 {
 		return fmt.Errorf("IMS DCM instance %d is out of range", instance)
 	}
 	return nil
 }
 
-func decodeIMSDCMInstance(value []byte) (IMSDCMInstance, error) {
-	if len(value) != 4 {
-		return 0, fmt.Errorf("instance TLV length %d, want 4", len(value))
+func (instance IMSDCMInstance) MarshalBinary() ([]byte, error) {
+	if err := instance.validate(); err != nil {
+		return nil, err
 	}
-	return IMSDCMInstance(int32(binary.LittleEndian.Uint32(value))), nil
+	return binary.LittleEndian.AppendUint32(nil, uint32(instance)), nil
+}
+
+func (instance *IMSDCMInstance) UnmarshalBinary(value []byte) error {
+	if len(value) != 4 {
+		return fmt.Errorf("instance length %d, want 4", len(value))
+	}
+	decoded := IMSDCMInstance(int32(binary.LittleEndian.Uint32(value)))
+	if err := decoded.validate(); err != nil {
+		return err
+	}
+	*instance = decoded
+	return nil
 }
 
 func decodeIMSDCMAddress(value []byte) (netip.Addr, error) {

@@ -119,12 +119,59 @@ func TestNetworkStatusFromServing(t *testing.T) {
 				CellID:           30,
 			},
 		},
+		{
+			name: "decodes a packed GSM7 roaming operator name",
+			serving: qcom.NASServingSystem{
+				RegistrationState:     qcom.NASRegistrationRegistered,
+				RoamingIndicator:      qcom.NASRoamingIndicatorRoaming,
+				RoamingIndicatorKnown: true,
+				PLMN: qcom.NASPLMN{
+					MCC: 222, MNC: 50,
+					Description: string([]byte{0x49, 0x76, 0x3A, 0x4C, 0x06}),
+				},
+				PLMNKnown: true,
+			},
+			want: NetworkStatus{
+				Registration: RegistrationRoaming,
+				OperatorID:   "22250",
+				OperatorName: "Iliad",
+				RoamingText:  "roaming",
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := networkStatusFromServing(tt.serving); !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("networkStatusFromServing() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestQMINetworkDescription(t *testing.T) {
+	tests := []struct {
+		name  string
+		value []byte
+		want  string
+	}{
+		{name: "ASCII", value: []byte("T-Mobile"), want: "T-Mobile"},
+		{name: "UTF-8", value: []byte("中国移动"), want: "中国移动"},
+		{name: "packed GSM7", value: []byte{0x49, 0x76, 0x3A, 0x4C, 0x06}, want: "Iliad"},
+		{
+			name: "UCS2 little endian",
+			value: []byte{
+				0x54, 0x00, 0x2D, 0x00, 0x4D, 0x00, 0x6F, 0x00,
+				0x62, 0x00, 0x69, 0x00, 0x6C, 0x00, 0x65, 0x00,
+			},
+			want: "T-Mobile",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := decodeQMINetworkDescription(string(tt.value)); got != tt.want {
+				t.Errorf("decodeQMINetworkDescription() = %q, want %q", got, tt.want)
 			}
 		})
 	}

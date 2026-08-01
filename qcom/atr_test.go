@@ -35,12 +35,12 @@ func TestClientATR(t *testing.T) {
 			resp: successResponse(MessageGetATR, tlv.Bytes(0x10, []byte{
 				0x03, 0x3B,
 			})),
-			wantErr: "ATR length 3 exceeds remaining 1",
+			wantErr: "value length 2, want 4",
 		},
 		{
 			name:    "ATR trailing data",
 			resp:    successResponse(MessageGetATR, tlv.Bytes(0x10, []byte{0x01, 0x3B, 0x00})),
-			wantErr: "ATR has 1 trailing bytes",
+			wantErr: "value length 3, want 2",
 		},
 		{
 			name:    "QMI failure",
@@ -90,58 +90,6 @@ func TestClientATR(t *testing.T) {
 			}
 			if !bytes.Equal(got, tt.want) {
 				t.Fatalf("ATR() = % X, want % X", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestDecodeATR(t *testing.T) {
-	tests := []struct {
-		name    string
-		data    []byte
-		want    []byte
-		wantErr string
-	}{
-		{
-			name: "empty ATR",
-			data: []byte{0x00},
-			want: []byte{},
-		},
-		{
-			name: "ATR",
-			data: []byte{0x02, 0x3B, 0x9F},
-			want: []byte{0x3B, 0x9F},
-		},
-		{
-			name:    "missing length",
-			wantErr: "ATR length is missing",
-		},
-		{
-			name:    "truncated value",
-			data:    []byte{0x02, 0x3B},
-			wantErr: "ATR length 2 exceeds remaining 1",
-		},
-		{
-			name:    "trailing data",
-			data:    []byte{0x01, 0x3B, 0x00},
-			wantErr: "ATR has 1 trailing bytes",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := decodeATR(tt.data)
-			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("decodeATR() error = %v, want text %q", err, tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("decodeATR() error = %v", err)
-			}
-			if !bytes.Equal(got, tt.want) {
-				t.Fatalf("decodeATR() = % X, want % X", got, tt.want)
 			}
 		})
 	}

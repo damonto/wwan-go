@@ -114,22 +114,19 @@ func TestWMSRouteCodecRejectsMalformedInput(t *testing.T) {
 		{
 			name: "count truncated",
 			fn: func() error {
-				_, err := decodeWMSRoutes([]byte{1})
-				return err
+				return new(wmsRouteList).UnmarshalBinary([]byte{1})
 			},
 		},
 		{
 			name: "entry truncated",
 			fn: func() error {
-				_, err := decodeWMSRoutes([]byte{1, 0, 0, 1})
-				return err
+				return new(wmsRouteList).UnmarshalBinary([]byte{1, 0, 0, 1})
 			},
 		},
 		{
 			name: "count too large",
 			fn: func() error {
-				_, err := decodeWMSRoutes([]byte{11, 0})
-				return err
+				return new(wmsRouteList).UnmarshalBinary([]byte{11, 0})
 			},
 		},
 	}

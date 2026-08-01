@@ -152,11 +152,9 @@ type NASEventReport struct {
 func (e *NASEventReport) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	*e = NASEventReport{}
 	if value, ok := tlv.Value(tlvs, nasTLVEventReportSignalStrength); ok {
-		strength, err := parseNASSignalStrength(value)
-		if err != nil {
+		if err := e.SignalStrength.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI NAS event signal strength: %w", err)
 		}
-		e.SignalStrength = strength
 		e.SignalStrengthKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVEventReportRFBand); ok {

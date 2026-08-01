@@ -754,8 +754,8 @@ func dsdUint32TLV(tlvs tlv.TLVs, typ uint8) (uint32, bool, error) {
 func (status *DSDSystemStatus) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	*status = DSDSystemStatus{}
 	if value, ok := tlv.Value(tlvs, 0x10); ok {
-		systems, err := decodeDSDSystemList(value)
-		if err != nil {
+		var systems dsdSystems
+		if err := systems.UnmarshalBinary(value); err != nil {
 			return err
 		}
 		status.Available = systems
@@ -765,10 +765,14 @@ func (status *DSDSystemStatus) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		if len(value) != 32 {
 			return fmt.Errorf("parsing QMI DSD system status: preferred systems TLV length %d, want 32", len(value))
 		}
-		status.Preferred = DSDPreferredSystems{
-			Current:     decodeDSDSystem(value[:16]),
-			Recommended: decodeDSDSystem(value[16:32]),
+		var preferred DSDPreferredSystems
+		if err := preferred.Current.UnmarshalBinary(value[:16]); err != nil {
+			return fmt.Errorf("parsing QMI DSD current preferred system: %w", err)
 		}
+		if err := preferred.Recommended.UnmarshalBinary(value[16:32]); err != nil {
+			return fmt.Errorf("parsing QMI DSD recommended system: %w", err)
+		}
+		status.Preferred = preferred
 		status.PreferredKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x14); ok {
@@ -781,30 +785,61 @@ func (status *DSDSystemStatus) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	return nil
 }
 
-func decodeDSDSystemList(value []byte) ([]DSDSystem, error) {
+type dsdSystems []DSDSystem
+
+func (systems dsdSystems) MarshalBinary() ([]byte, error) {
+	if len(systems) > dsdAvailableSystemMax {
+		return nil, fmt.Errorf("available-system count %d exceeds %d", len(systems), dsdAvailableSystemMax)
+	}
+	value := make([]byte, 1, 1+len(systems)*16)
+	value[0] = byte(len(systems))
+	for i, system := range systems {
+		encoded, err := system.MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("available system %d: %w", i, err)
+		}
+		value = append(value, encoded...)
+	}
+	return value, nil
+}
+
+func (systems *dsdSystems) UnmarshalBinary(value []byte) error {
 	if len(value) < 1 {
-		return nil, errors.New("parsing QMI DSD system status: available-system count is missing")
+		return errors.New("available-system count is missing")
 	}
 	count := int(value[0])
 	if count > dsdAvailableSystemMax {
-		return nil, fmt.Errorf("parsing QMI DSD system status: available-system count %d exceeds %d", count, dsdAvailableSystemMax)
+		return fmt.Errorf("available-system count %d exceeds %d", count, dsdAvailableSystemMax)
 	}
 	value = value[1:]
 	wantLen := count * 16
 	if len(value) != wantLen {
-		return nil, fmt.Errorf("parsing QMI DSD system status: available-system list length %d, want %d", len(value), wantLen)
+		return fmt.Errorf("available-system list length %d, want %d", len(value), wantLen)
 	}
-	systems := make([]DSDSystem, 0, count)
+	decoded := make(dsdSystems, count)
 	for i := range count {
-		systems = append(systems, decodeDSDSystem(value[i*16:(i+1)*16]))
+		if err := decoded[i].UnmarshalBinary(value[i*16 : (i+1)*16]); err != nil {
+			return fmt.Errorf("available system %d: %w", i, err)
+		}
 	}
-	return systems, nil
+	*systems = decoded
+	return nil
 }
 
-func decodeDSDSystem(value []byte) DSDSystem {
-	return DSDSystem{
+func (system DSDSystem) MarshalBinary() ([]byte, error) {
+	value := binary.LittleEndian.AppendUint32(nil, uint32(system.Network))
+	value = binary.LittleEndian.AppendUint32(value, uint32(system.RAT))
+	return binary.LittleEndian.AppendUint64(value, uint64(system.ServiceOptions)), nil
+}
+
+func (system *DSDSystem) UnmarshalBinary(value []byte) error {
+	if len(value) != 16 {
+		return fmt.Errorf("DSD system length %d, want 16", len(value))
+	}
+	*system = DSDSystem{
 		Network:        DSDNetwork(binary.LittleEndian.Uint32(value[:4])),
 		RAT:            DSDRAT(binary.LittleEndian.Uint32(value[4:8])),
 		ServiceOptions: DSDServiceOptionMask(binary.LittleEndian.Uint64(value[8:16])),
 	}
+	return nil
 }

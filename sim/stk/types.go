@@ -1,7 +1,9 @@
 package stk
 
 import (
+	"errors"
 	"fmt"
+	"unicode/utf8"
 )
 
 const (
@@ -234,7 +236,11 @@ func (r EnvelopeResponse) HasMore() bool {
 
 type gsm7Text string
 
-func (text gsm7Text) MarshalText() ([]byte, error) {
+func (text gsm7Text) String() string {
+	return string(text)
+}
+
+func (text gsm7Text) MarshalBinary() ([]byte, error) {
 	value := string(text)
 	if value == "" {
 		return nil, nil
@@ -262,7 +268,7 @@ func (text gsm7Text) MarshalText() ([]byte, error) {
 	return out, nil
 }
 
-func (text *gsm7Text) UnmarshalText(data []byte) error {
+func (text *gsm7Text) UnmarshalBinary(data []byte) error {
 	if len(data) == 0 {
 		*text = ""
 		return nil
@@ -305,6 +311,25 @@ func (text *gsm7Text) UnmarshalText(data []byte) error {
 		out = append(out, r)
 	}
 	*text = gsm7Text(string(out))
+	return nil
+}
+
+func (text gsm7Text) MarshalText() ([]byte, error) {
+	if _, err := text.MarshalBinary(); err != nil {
+		return nil, err
+	}
+	return []byte(text), nil
+}
+
+func (text *gsm7Text) UnmarshalText(data []byte) error {
+	if !utf8.Valid(data) {
+		return errors.New("decoding packed GSM text: value is not valid UTF-8")
+	}
+	decoded := gsm7Text(string(data))
+	if _, err := decoded.MarshalBinary(); err != nil {
+		return err
+	}
+	*text = decoded
 	return nil
 }
 

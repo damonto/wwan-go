@@ -96,10 +96,40 @@ type WMSCDMAForceOnDC struct {
 	ServiceOption WMSCDMAServiceOption
 }
 
+// MarshalBinary encodes the force-on-dedicated-channel aggregate.
+func (force WMSCDMAForceOnDC) MarshalBinary() ([]byte, error) {
+	return []byte{boolByte(force.Force), byte(force.ServiceOption)}, nil
+}
+
+// UnmarshalBinary decodes the force-on-dedicated-channel aggregate.
+func (force *WMSCDMAForceOnDC) UnmarshalBinary(value []byte) error {
+	if len(value) != 2 {
+		return fmt.Errorf("CDMA force-on-DC length %d, want 2", len(value))
+	}
+	*force = WMSCDMAForceOnDC{
+		Force:         value[0] != 0,
+		ServiceOption: WMSCDMAServiceOption(value[1]),
+	}
+	return nil
+}
+
 // WMSGSMCauseInfo contains the RP and TP causes returned by a 3GPP network.
 type WMSGSMCauseInfo struct {
 	RPCause uint16
 	TPCause uint8
+}
+
+func (cause WMSGSMCauseInfo) MarshalBinary() ([]byte, error) {
+	value := binary.LittleEndian.AppendUint16(nil, cause.RPCause)
+	return append(value, cause.TPCause), nil
+}
+
+func (cause *WMSGSMCauseInfo) UnmarshalBinary(value []byte) error {
+	if len(value) != 3 {
+		return fmt.Errorf("GSM cause length %d, want 3", len(value))
+	}
+	*cause = WMSGSMCauseInfo{RPCause: binary.LittleEndian.Uint16(value[:2]), TPCause: value[2]}
+	return nil
 }
 
 // WMSDeliveryFailureType classifies a temporary or permanent send failure.
@@ -124,16 +154,57 @@ type WMSRejectCause struct {
 	Value uint8
 }
 
+func (cause WMSRejectCause) MarshalBinary() ([]byte, error) {
+	value := binary.LittleEndian.AppendUint32(nil, cause.Type)
+	return append(value, cause.Value), nil
+}
+
+func (cause *WMSRejectCause) UnmarshalBinary(value []byte) error {
+	if len(value) != 5 {
+		return fmt.Errorf("reject cause length %d, want 5", len(value))
+	}
+	*cause = WMSRejectCause{Type: binary.LittleEndian.Uint32(value[:4]), Value: value[4]}
+	return nil
+}
+
 // WMSAck3GPP2Failure contains the CDMA failure information sent in a negative ACK.
 type WMSAck3GPP2Failure struct {
 	ErrorClass uint8
 	CauseCode  uint8
 }
 
+// MarshalBinary encodes a CDMA negative-ACK failure.
+func (failure WMSAck3GPP2Failure) MarshalBinary() ([]byte, error) {
+	return []byte{failure.ErrorClass, failure.CauseCode}, nil
+}
+
+// UnmarshalBinary decodes a CDMA negative-ACK failure.
+func (failure *WMSAck3GPP2Failure) UnmarshalBinary(value []byte) error {
+	if len(value) != 2 {
+		return fmt.Errorf("3GPP2 ACK failure length %d, want 2", len(value))
+	}
+	*failure = WMSAck3GPP2Failure{ErrorClass: value[0], CauseCode: value[1]}
+	return nil
+}
+
 // WMSAck3GPPFailure contains the GSM/UMTS failure information sent in a negative ACK.
 type WMSAck3GPPFailure struct {
 	RPCause uint8
 	TPCause uint8
+}
+
+// MarshalBinary encodes a 3GPP negative-ACK failure.
+func (failure WMSAck3GPPFailure) MarshalBinary() ([]byte, error) {
+	return []byte{failure.RPCause, failure.TPCause}, nil
+}
+
+// UnmarshalBinary decodes a 3GPP negative-ACK failure.
+func (failure *WMSAck3GPPFailure) UnmarshalBinary(value []byte) error {
+	if len(value) != 2 {
+		return fmt.Errorf("3GPP ACK failure length %d, want 2", len(value))
+	}
+	*failure = WMSAck3GPPFailure{RPCause: value[0], TPCause: value[1]}
+	return nil
 }
 
 // WMSAckFailureCause explains why the modem could not deliver a network ACK.
@@ -173,6 +244,24 @@ func (e *WMSAckError) Unwrap() error {
 type WMSMessageReference struct {
 	Storage WMSStorage
 	Index   uint32
+}
+
+// MarshalBinary encodes a modem SMS storage reference.
+func (reference WMSMessageReference) MarshalBinary() ([]byte, error) {
+	value := []byte{byte(reference.Storage)}
+	return binary.LittleEndian.AppendUint32(value, reference.Index), nil
+}
+
+// UnmarshalBinary decodes a modem SMS storage reference.
+func (reference *WMSMessageReference) UnmarshalBinary(value []byte) error {
+	if len(value) != 5 {
+		return fmt.Errorf("WMS message reference length %d, want 5", len(value))
+	}
+	*reference = WMSMessageReference{
+		Storage: WMSStorage(value[0]),
+		Index:   binary.LittleEndian.Uint32(value[1:5]),
+	}
+	return nil
 }
 
 // WMSRawMessage contains a raw CDMA or 3GPP SMS PDU.
@@ -271,6 +360,29 @@ type WMSAckRequest struct {
 	SMSOnIMS      *bool
 }
 
+type wmsAckInfo struct {
+	TransactionID uint32
+	Protocol      WMSMessageProtocol
+	Success       bool
+}
+
+func (ack wmsAckInfo) MarshalBinary() ([]byte, error) {
+	value := binary.LittleEndian.AppendUint32(nil, ack.TransactionID)
+	return append(value, byte(ack.Protocol), boolByte(ack.Success)), nil
+}
+
+func (ack *wmsAckInfo) UnmarshalBinary(value []byte) error {
+	if len(value) != 6 {
+		return fmt.Errorf("WMS ACK info length %d, want 6", len(value))
+	}
+	*ack = wmsAckInfo{
+		TransactionID: binary.LittleEndian.Uint32(value[:4]),
+		Protocol:      WMSMessageProtocol(value[4]),
+		Success:       value[5] != 0,
+	}
+	return nil
+}
+
 // WMSETWSNotificationType identifies an ETWS primary or secondary notification.
 type WMSETWSNotificationType uint8
 
@@ -355,10 +467,11 @@ func (c *Client) WMSSendRaw(ctx context.Context, format WMSMessageFormat, data [
 
 	tlvs := tlv.TLVs{tlv.Bytes(0x01, value)}
 	if options.ForceOnDC != nil {
-		tlvs = append(tlvs, tlv.Bytes(0x10, []byte{
-			boolByte(options.ForceOnDC.Force),
-			byte(options.ForceOnDC.ServiceOption),
-		}))
+		force, err := options.ForceOnDC.MarshalBinary()
+		if err != nil {
+			return WMSSendResult{}, fmt.Errorf("encoding QMI WMS force-on-DC: %w", err)
+		}
+		tlvs = append(tlvs, tlv.Bytes(0x10, force))
 	}
 	if options.FollowOnDC {
 		tlvs = append(tlvs, tlv.Uint(0x11, uint8(1)))
@@ -440,8 +553,10 @@ func (c *Client) WMSWriteRaw(ctx context.Context, req WMSWriteRequest) (WMSMessa
 
 // WMSReadRaw reads one SMS from modem storage.
 func (c *Client) WMSReadRaw(ctx context.Context, req WMSReadRequest) (WMSRawMessage, error) {
-	value := []byte{byte(req.Reference.Storage)}
-	value = binary.LittleEndian.AppendUint32(value, req.Reference.Index)
+	value, err := req.Reference.MarshalBinary()
+	if err != nil {
+		return WMSRawMessage{}, fmt.Errorf("reading QMI WMS raw message: %w", err)
+	}
 	tlvs := tlv.TLVs{tlv.Bytes(0x01, value)}
 	if req.MessageMode != nil {
 		tlvs = append(tlvs, tlv.Uint(0x10, uint8(*req.MessageMode)))
@@ -451,7 +566,7 @@ func (c *Client) WMSReadRaw(ctx context.Context, req WMSReadRequest) (WMSRawMess
 	}
 
 	var message WMSRawMessage
-	err := c.withServiceClient(ctx, ServiceWMS, func(clientID uint8) error {
+	err = c.withServiceClient(ctx, ServiceWMS, func(clientID uint8) error {
 		resp, err := c.requestService(ctx, ServiceWMS, clientID, MessageWMSRawRead, tlvs)
 		if err != nil {
 			return err
@@ -560,21 +675,34 @@ func (c *Client) WMSSetEventReport(ctx context.Context, config WMSEventReportCon
 
 // WMSAcknowledge sends the network ACK required by a transfer-route message.
 func (c *Client) WMSAcknowledge(ctx context.Context, req WMSAckRequest) error {
-	// The IDL aggregate order is transaction ID, protocol, success.
-	value := binary.LittleEndian.AppendUint32(nil, req.TransactionID)
-	value = append(value, byte(req.Protocol), boolByte(req.Success))
+	value, err := (wmsAckInfo{
+		TransactionID: req.TransactionID,
+		Protocol:      req.Protocol,
+		Success:       req.Success,
+	}).MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("acknowledging QMI WMS message: encoding ACK info: %w", err)
+	}
 	tlvs := tlv.TLVs{tlv.Bytes(0x01, value)}
 	if req.Failure3GPP2 != nil {
-		tlvs = append(tlvs, tlv.Bytes(0x10, []byte{req.Failure3GPP2.ErrorClass, req.Failure3GPP2.CauseCode}))
+		failure, err := req.Failure3GPP2.MarshalBinary()
+		if err != nil {
+			return fmt.Errorf("acknowledging QMI WMS message: encoding 3GPP2 failure: %w", err)
+		}
+		tlvs = append(tlvs, tlv.Bytes(0x10, failure))
 	}
 	if req.Failure3GPP != nil {
-		tlvs = append(tlvs, tlv.Bytes(0x11, []byte{req.Failure3GPP.RPCause, req.Failure3GPP.TPCause}))
+		failure, err := req.Failure3GPP.MarshalBinary()
+		if err != nil {
+			return fmt.Errorf("acknowledging QMI WMS message: encoding 3GPP failure: %w", err)
+		}
+		tlvs = append(tlvs, tlv.Bytes(0x11, failure))
 	}
 	if req.SMSOnIMS != nil {
 		tlvs = append(tlvs, tlv.Uint(0x12, boolByte(*req.SMSOnIMS)))
 	}
 
-	err := c.withServiceClient(ctx, ServiceWMS, func(clientID uint8) error {
+	err = c.withServiceClient(ctx, ServiceWMS, func(clientID uint8) error {
 		resp, err := c.requestService(ctx, ServiceWMS, clientID, MessageWMSSendAck, tlvs)
 		if err != nil {
 			return err
@@ -797,10 +925,9 @@ func (r *WMSSendResult) unmarshalRawSendTLVs(tlvs tlv.TLVs) error {
 		result.ErrorClassKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x12); ok {
-		if len(value) != 3 {
-			return fmt.Errorf("parsing QMI WMS raw send response: GSM cause TLV length %d, want 3", len(value))
+		if err := result.GSMCause.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing QMI WMS raw send response: %w", err)
 		}
-		result.GSMCause = WMSGSMCauseInfo{RPCause: binary.LittleEndian.Uint16(value[:2]), TPCause: value[2]}
 		result.GSMCauseKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x13); ok {
@@ -821,9 +948,10 @@ func (r *WMSSendResult) unmarshalRawSendTLVs(tlvs tlv.TLVs) error {
 		}
 	}
 	if value, ok := tlv.Value(tlvs, 0x16); ok {
-		if err := decodeWMSRejectCause(&result, value); err != nil {
+		if err := result.RejectCause.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI WMS raw send response: %w", err)
 		}
+		result.RejectCauseKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x17); ok {
 		if len(value) != 2 {
@@ -875,18 +1003,6 @@ func decodeWMSCallControl(result *WMSSendResult, value []byte) error {
 	return nil
 }
 
-func decodeWMSRejectCause(result *WMSSendResult, value []byte) error {
-	if len(value) != 5 {
-		return fmt.Errorf("reject cause TLV length %d, want 5", len(value))
-	}
-	result.RejectCause = WMSRejectCause{
-		Type:  binary.LittleEndian.Uint32(value[:4]),
-		Value: value[4],
-	}
-	result.RejectCauseKnown = true
-	return nil
-}
-
 func decodeWMSMessageList(storage WMSStorage, value []byte) ([]WMSListedMessage, error) {
 	if len(value) < 4 {
 		return nil, errors.New("parsing QMI WMS message list: count is truncated")
@@ -916,15 +1032,11 @@ func (m *WMSIncomingMessage) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	message := WMSIncomingMessage{}
 	found := false
 	if value, ok := tlv.Value(tlvs, 0x10); ok {
-		if len(value) != 5 {
-			return fmt.Errorf("parsing QMI WMS MT message: storage reference TLV length %d, want 5", len(value))
+		if err := message.Reference.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing QMI WMS MT message: %w", err)
 		}
 		found = true
 		message.Stored = true
-		message.Reference = WMSMessageReference{
-			Storage: WMSStorage(value[0]),
-			Index:   binary.LittleEndian.Uint32(value[1:5]),
-		}
 	} else if value, ok := tlv.Value(tlvs, 0x11); ok {
 		if len(value) < 8 {
 			return errors.New("parsing QMI WMS transfer message: header is truncated")
@@ -987,16 +1099,28 @@ func (m *WMSIncomingMessage) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	return nil
 }
 
-func decodeWMSSMSCAddress(value []byte) (WMSSMSCAddress, error) {
+func (address WMSSMSCAddress) MarshalBinary() ([]byte, error) {
+	if len(address.Type) != 3 {
+		return nil, fmt.Errorf("SMSC address type length %d, want 3", len(address.Type))
+	}
+	if len(address.Digits) > 0xff {
+		return nil, fmt.Errorf("SMSC address digit length %d exceeds 255", len(address.Digits))
+	}
+	value := append([]byte(address.Type), byte(len(address.Digits)))
+	return append(value, address.Digits...), nil
+}
+
+func (address *WMSSMSCAddress) UnmarshalBinary(value []byte) error {
 	if len(value) < 4 {
-		return WMSSMSCAddress{}, errors.New("parsing QMI WMS SMSC address: value is truncated")
+		return errors.New("SMSC address is truncated")
 	}
 	length := int(value[3])
 	if len(value) != 4+length {
-		return WMSSMSCAddress{}, fmt.Errorf("parsing QMI WMS SMSC address: value length %d, want %d", len(value), 4+length)
+		return fmt.Errorf("SMSC address length %d, want %d", len(value), 4+length)
 	}
-	return WMSSMSCAddress{
+	*address = WMSSMSCAddress{
 		Type:   string(value[:3]),
 		Digits: string(value[4 : 4+length]),
-	}, nil
+	}
+	return nil
 }

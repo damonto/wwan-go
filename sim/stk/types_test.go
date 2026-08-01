@@ -3,6 +3,7 @@ package stk
 import (
 	"bytes"
 	"encoding"
+	"fmt"
 	"testing"
 )
 
@@ -11,6 +12,21 @@ func TestTextBinaryAndText(t *testing.T) {
 	var _ encoding.BinaryUnmarshaler = (*TextString)(nil)
 	var _ encoding.BinaryMarshaler = AlphaIdentifier{}
 	var _ encoding.BinaryUnmarshaler = (*AlphaIdentifier)(nil)
+	var _ encoding.BinaryMarshaler = gsm7Text("")
+	var _ encoding.BinaryUnmarshaler = (*gsm7Text)(nil)
+	var _ encoding.TextMarshaler = gsm7Text("")
+	var _ encoding.TextUnmarshaler = (*gsm7Text)(nil)
+	var _ fmt.Stringer = gsm7Text("")
+	var _ encoding.BinaryMarshaler = gsmDefaultText("")
+	var _ encoding.BinaryUnmarshaler = (*gsmDefaultText)(nil)
+	var _ encoding.TextMarshaler = gsmDefaultText("")
+	var _ encoding.TextUnmarshaler = (*gsmDefaultText)(nil)
+	var _ fmt.Stringer = gsmDefaultText("")
+	var _ encoding.BinaryMarshaler = ucs2Text("")
+	var _ encoding.BinaryUnmarshaler = (*ucs2Text)(nil)
+	var _ encoding.TextMarshaler = ucs2Text("")
+	var _ encoding.TextUnmarshaler = (*ucs2Text)(nil)
+	var _ fmt.Stringer = ucs2Text("")
 
 	tests := []struct {
 		name string
@@ -173,10 +189,15 @@ func TestTextDecodingRejectsInvalidCharacters(t *testing.T) {
 		name string
 		run  func() error
 	}{
-		{name: "unknown GSM extension", run: func() error { _, err := decodeGSMDefault([]byte{0x1b, 0x00}); return err }},
-		{name: "lone high surrogate", run: func() error { _, err := decodeUCS2([]byte{0xd8, 0x00}); return err }},
-		{name: "lone low surrogate", run: func() error { _, err := decodeUCS2([]byte{0xdc, 0x00}); return err }},
-		{name: "UTF16 surrogate pair", run: func() error { _, err := decodeUCS2([]byte{0xd8, 0x3d, 0xde, 0x00}); return err }},
+		{name: "unknown GSM extension", run: func() error { return new(gsmDefaultText).UnmarshalBinary([]byte{0x1b, 0x00}) }},
+		{name: "invalid GSM UTF-8", run: func() error { return new(gsmDefaultText).UnmarshalText([]byte{0xff}) }},
+		{name: "unrepresentable GSM text", run: func() error { return new(gsmDefaultText).UnmarshalText([]byte("😀")) }},
+		{name: "lone high surrogate", run: func() error { return new(ucs2Text).UnmarshalBinary([]byte{0xd8, 0x00}) }},
+		{name: "lone low surrogate", run: func() error { return new(ucs2Text).UnmarshalBinary([]byte{0xdc, 0x00}) }},
+		{name: "UTF16 surrogate pair", run: func() error { return new(ucs2Text).UnmarshalBinary([]byte{0xd8, 0x3d, 0xde, 0x00}) }},
+		{name: "marshal invalid UCS2 UTF-8", run: func() error { _, err := ucs2Text(string([]byte{0xff})).MarshalText(); return err }},
+		{name: "invalid UCS2 UTF-8", run: func() error { return new(ucs2Text).UnmarshalText([]byte{0xff}) }},
+		{name: "unrepresentable UCS2 text", run: func() error { return new(ucs2Text).UnmarshalText([]byte("😀")) }},
 		{name: "alpha supplementary character", run: func() error { _, err := (AlphaIdentifier{Value: "😀"}).MarshalBinary(); return err }},
 	}
 
@@ -189,7 +210,7 @@ func TestTextDecodingRejectsInvalidCharacters(t *testing.T) {
 	}
 }
 
-func TestGSM7Text(t *testing.T) {
+func TestGSM7BinaryAndText(t *testing.T) {
 	tests := []struct {
 		name string
 		want string
@@ -201,17 +222,28 @@ func TestGSM7Text(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			encoded, err := gsm7Text(tt.want).MarshalText()
+			encoded, err := gsm7Text(tt.want).MarshalBinary()
 			if err != nil {
-				t.Fatalf("MarshalText() error = %v", err)
+				t.Fatalf("MarshalBinary() error = %v", err)
 			}
 
 			var got gsm7Text
-			if err := got.UnmarshalText(encoded); err != nil {
-				t.Fatalf("UnmarshalText() error = %v", err)
+			if err := got.UnmarshalBinary(encoded); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 			if string(got) != tt.want {
-				t.Fatalf("UnmarshalText() = %q, want %q", got, tt.want)
+				t.Fatalf("UnmarshalBinary() = %q, want %q", got, tt.want)
+			}
+
+			text, err := got.MarshalText()
+			if err != nil {
+				t.Fatalf("MarshalText() error = %v", err)
+			}
+			if string(text) != tt.want {
+				t.Fatalf("MarshalText() = %q, want %q", text, tt.want)
+			}
+			if err := got.UnmarshalText(text); err != nil {
+				t.Fatalf("UnmarshalText() error = %v", err)
 			}
 		})
 	}

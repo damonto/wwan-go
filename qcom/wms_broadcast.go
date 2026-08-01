@@ -79,11 +79,73 @@ type WMS3GPPBroadcastChannel struct {
 	Selected bool
 }
 
+// MarshalBinary encodes one 3GPP broadcast channel range.
+func (channel WMS3GPPBroadcastChannel) MarshalBinary() ([]byte, error) {
+	if channel.Start > channel.End {
+		return nil, fmt.Errorf("3GPP broadcast channel starts at %d after end %d", channel.Start, channel.End)
+	}
+	value := binary.LittleEndian.AppendUint16(nil, channel.Start)
+	value = binary.LittleEndian.AppendUint16(value, channel.End)
+	return append(value, boolByte(channel.Selected)), nil
+}
+
+// UnmarshalBinary decodes one 3GPP broadcast channel range.
+func (channel *WMS3GPPBroadcastChannel) UnmarshalBinary(value []byte) error {
+	if len(value) != 5 {
+		return fmt.Errorf("3GPP broadcast channel length %d, want 5", len(value))
+	}
+	selected, err := decodeWMSBool(value[4])
+	if err != nil {
+		return fmt.Errorf("3GPP broadcast channel selection: %w", err)
+	}
+	parsed := WMS3GPPBroadcastChannel{
+		Start:    binary.LittleEndian.Uint16(value[:2]),
+		End:      binary.LittleEndian.Uint16(value[2:4]),
+		Selected: selected,
+	}
+	if parsed.Start > parsed.End {
+		return fmt.Errorf("3GPP broadcast channel start %d is after end %d", parsed.Start, parsed.End)
+	}
+	*channel = parsed
+	return nil
+}
+
 // WMS3GPP2BroadcastChannel selects one 3GPP2 category and language pair.
 type WMS3GPP2BroadcastChannel struct {
 	ServiceCategory WMSServiceCategory
 	Language        WMSLanguage
 	Selected        bool
+}
+
+// MarshalBinary encodes one 3GPP2 broadcast category.
+func (channel WMS3GPP2BroadcastChannel) MarshalBinary() ([]byte, error) {
+	if channel.Language > WMSLanguageHebrew {
+		return nil, fmt.Errorf("3GPP2 broadcast channel language %d is outside the supported range", channel.Language)
+	}
+	value := binary.LittleEndian.AppendUint16(nil, uint16(channel.ServiceCategory))
+	value = binary.LittleEndian.AppendUint16(value, uint16(channel.Language))
+	return append(value, boolByte(channel.Selected)), nil
+}
+
+// UnmarshalBinary decodes one 3GPP2 broadcast category.
+func (channel *WMS3GPP2BroadcastChannel) UnmarshalBinary(value []byte) error {
+	if len(value) != 5 {
+		return fmt.Errorf("3GPP2 broadcast channel length %d, want 5", len(value))
+	}
+	language := WMSLanguage(binary.LittleEndian.Uint16(value[2:4]))
+	if language > WMSLanguageHebrew {
+		return fmt.Errorf("3GPP2 broadcast channel language %d is outside the supported range", language)
+	}
+	selected, err := decodeWMSBool(value[4])
+	if err != nil {
+		return fmt.Errorf("3GPP2 broadcast channel selection: %w", err)
+	}
+	*channel = WMS3GPP2BroadcastChannel{
+		ServiceCategory: WMSServiceCategory(binary.LittleEndian.Uint16(value[:2])),
+		Language:        language,
+		Selected:        selected,
+	}
+	return nil
 }
 
 // WMSBroadcastActivation controls reception of broadcast SMS messages.
@@ -267,12 +329,11 @@ func encodeWMS3GPPBroadcastChannels(channels []WMS3GPPBroadcastChannel) ([]byte,
 	value := make([]byte, 2, 2+len(channels)*5)
 	binary.LittleEndian.PutUint16(value, uint16(len(channels)))
 	for i, channel := range channels {
-		if channel.Start > channel.End {
-			return nil, fmt.Errorf("3GPP broadcast channel %d starts at %d after end %d", i, channel.Start, channel.End)
+		encoded, err := channel.MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("3GPP broadcast channel %d: %w", i, err)
 		}
-		value = binary.LittleEndian.AppendUint16(value, channel.Start)
-		value = binary.LittleEndian.AppendUint16(value, channel.End)
-		value = append(value, boolByte(channel.Selected))
+		value = append(value, encoded...)
 	}
 	return value, nil
 }
@@ -284,12 +345,11 @@ func encodeWMS3GPP2BroadcastChannels(channels []WMS3GPP2BroadcastChannel) ([]byt
 	value := make([]byte, 2, 2+len(channels)*5)
 	binary.LittleEndian.PutUint16(value, uint16(len(channels)))
 	for i, channel := range channels {
-		if channel.Language > WMSLanguageHebrew {
-			return nil, fmt.Errorf("3GPP2 broadcast channel %d has language %d outside the supported range", i, channel.Language)
+		encoded, err := channel.MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("3GPP2 broadcast channel %d: %w", i, err)
 		}
-		value = binary.LittleEndian.AppendUint16(value, uint16(channel.ServiceCategory))
-		value = binary.LittleEndian.AppendUint16(value, uint16(channel.Language))
-		value = append(value, boolByte(channel.Selected))
+		value = append(value, encoded...)
 	}
 	return value, nil
 }
@@ -301,17 +361,8 @@ func decodeWMS3GPPBroadcastConfig(value []byte) (bool, []WMS3GPPBroadcastChannel
 	}
 	channels := make([]WMS3GPPBroadcastChannel, count)
 	for i := range count {
-		selected, err := decodeWMSBool(entries[4])
-		if err != nil {
-			return false, nil, fmt.Errorf("parsing QMI WMS 3GPP broadcast channel %d selection: %w", i, err)
-		}
-		channels[i] = WMS3GPPBroadcastChannel{
-			Start:    binary.LittleEndian.Uint16(entries),
-			End:      binary.LittleEndian.Uint16(entries[2:]),
-			Selected: selected,
-		}
-		if channels[i].Start > channels[i].End {
-			return false, nil, fmt.Errorf("parsing QMI WMS 3GPP broadcast channel %d: start %d is after end %d", i, channels[i].Start, channels[i].End)
+		if err := channels[i].UnmarshalBinary(entries[:5]); err != nil {
+			return false, nil, fmt.Errorf("parsing QMI WMS 3GPP broadcast channel %d: %w", i, err)
 		}
 		entries = entries[5:]
 	}
@@ -325,18 +376,8 @@ func decodeWMS3GPP2BroadcastConfig(value []byte) (bool, []WMS3GPP2BroadcastChann
 	}
 	channels := make([]WMS3GPP2BroadcastChannel, count)
 	for i := range count {
-		language := WMSLanguage(binary.LittleEndian.Uint16(entries[2:]))
-		if language > WMSLanguageHebrew {
-			return false, nil, fmt.Errorf("parsing QMI WMS 3GPP2 broadcast channel %d: language %d is outside the supported range", i, language)
-		}
-		selected, err := decodeWMSBool(entries[4])
-		if err != nil {
-			return false, nil, fmt.Errorf("parsing QMI WMS 3GPP2 broadcast channel %d selection: %w", i, err)
-		}
-		channels[i] = WMS3GPP2BroadcastChannel{
-			ServiceCategory: WMSServiceCategory(binary.LittleEndian.Uint16(entries)),
-			Language:        language,
-			Selected:        selected,
+		if err := channels[i].UnmarshalBinary(entries[:5]); err != nil {
+			return false, nil, fmt.Errorf("parsing QMI WMS 3GPP2 broadcast channel %d: %w", i, err)
 		}
 		entries = entries[5:]
 	}

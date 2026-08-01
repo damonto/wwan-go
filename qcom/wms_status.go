@@ -510,10 +510,8 @@ func (a *WMSSMSCAddress) unmarshalTLVs(tlvs tlv.TLVs) error {
 	if !ok {
 		return errors.New("parsing QMI WMS SMSC address indication: address TLV missing")
 	}
-	address, err := decodeWMSSMSCAddress(value)
-	if err != nil {
-		return err
+	if err := a.UnmarshalBinary(value); err != nil {
+		return fmt.Errorf("parsing QMI WMS SMSC address indication: %w", err)
 	}
-	*a = address
 	return nil
 }

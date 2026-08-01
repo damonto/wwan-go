@@ -33,9 +33,9 @@ func TestSMSPDUBoundaries(t *testing.T) {
 			assembler := Assembler{}
 			var got Message
 			for _, pdu := range pdus {
-				part, err := DecodePDU(pdu)
-				if err != nil {
-					t.Fatalf("DecodePDU() error = %v", err)
+				var part Part
+				if err := part.UnmarshalBinary(pdu); err != nil {
+					t.Fatalf("UnmarshalBinary() error = %v", err)
 				}
 				if message, complete := assembler.Add(part); complete {
 					got = message
@@ -67,11 +67,14 @@ func TestDecodeSMSPDUUDH(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			septets, _ := EncodeGSM7("hello")
-			pdu := buildSubmitPDU(MessageConfig{Number: "+15551234"}, smsAlphabetGSM7, septets, tt.header)
-			part, err := DecodePDU(pdu)
+			septets, err := GSM7("hello").MarshalBinary()
 			if err != nil {
-				t.Fatalf("DecodePDU() error = %v", err)
+				t.Fatalf("MarshalText() error = %v", err)
+			}
+			pdu := buildSubmitPDU(MessageConfig{Number: "+15551234"}, smsAlphabetGSM7, septets, tt.header)
+			var part Part
+			if err := part.UnmarshalBinary(pdu); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 			if part.Reference != tt.wantRef || part.Total != tt.wantTotal || part.Index != tt.wantIndex {
 				t.Errorf("multipart = (%#x, %d, %d), want (%#x, %d, %d)", part.Reference, part.Total, part.Index, tt.wantRef, tt.wantTotal, tt.wantIndex)
@@ -93,7 +96,10 @@ func TestDecodeSMSPDUAlphanumericOrigin(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			septets, _ := EncodeGSM7("hello")
+			septets, err := GSM7("hello").MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalText() error = %v", err)
+			}
 			header := []byte{5, 0, 3, 0x42, 3, 2}
 			packed, headerSeptets := PackSeptets(septets, header)
 			pdu := append([]byte{0, 0x40}, test.address...)
@@ -102,9 +108,9 @@ func TestDecodeSMSPDUAlphanumericOrigin(t *testing.T) {
 			pdu = append(pdu, byte(headerSeptets+len(septets)))
 			pdu = append(pdu, packed...)
 
-			part, err := DecodePDU(pdu)
-			if err != nil {
-				t.Fatalf("DecodePDU() error = %v", err)
+			var part Part
+			if err := part.UnmarshalBinary(pdu); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 			if part.Message.Number != test.wantNumber {
 				t.Errorf("number = %q, want %q", part.Message.Number, test.wantNumber)
@@ -126,8 +132,7 @@ func TestSMSAssemblerOutOfOrderAndDuplicate(t *testing.T) {
 	}
 	parts := make([]Part, len(pdus))
 	for i, pdu := range pdus {
-		parts[i], err = DecodePDU(pdu)
-		if err != nil {
+		if err := parts[i].UnmarshalBinary(pdu); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -161,8 +166,9 @@ func TestDecodeSMSPDUFailures(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := DecodePDU(tt.pdu); err == nil {
-				t.Fatal("DecodePDU() error = nil, want non-nil")
+			var part Part
+			if err := part.UnmarshalBinary(tt.pdu); err == nil {
+				t.Fatal("UnmarshalBinary() error = nil, want non-nil")
 			}
 		})
 	}
@@ -172,9 +178,9 @@ func TestDecodeSMSStatusReport(t *testing.T) {
 	pdu := []byte{0, 2, 0x2a}
 	pdu = appendAddress(pdu, "+15551234")
 	pdu = append(pdu, make([]byte, 15)...)
-	part, err := DecodePDU(pdu)
-	if err != nil {
-		t.Fatalf("DecodePDU() error = %v", err)
+	var part Part
+	if err := part.UnmarshalBinary(pdu); err != nil {
+		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 	if !part.Message.DeliveryReport || part.Message.MessageReference != 0x2a {
 		t.Errorf("status report = %+v, want delivery report reference 42", part.Message)

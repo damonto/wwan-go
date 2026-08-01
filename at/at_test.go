@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -13,9 +14,19 @@ import (
 )
 
 var (
-	_ encoding.TextMarshaler   = CSIMCommand(nil)
-	_ encoding.TextMarshaler   = CSIMResponse(nil)
-	_ encoding.TextUnmarshaler = (*CSIMResponse)(nil)
+	_ encoding.BinaryMarshaler   = CSIMCommand(nil)
+	_ encoding.BinaryUnmarshaler = (*CSIMCommand)(nil)
+	_ encoding.TextMarshaler     = CSIMCommand(nil)
+	_ encoding.TextUnmarshaler   = (*CSIMCommand)(nil)
+	_ encoding.BinaryMarshaler   = CSIMResponse(nil)
+	_ encoding.BinaryUnmarshaler = (*CSIMResponse)(nil)
+	_ encoding.TextMarshaler     = CSIMResponse(nil)
+	_ encoding.TextUnmarshaler   = (*CSIMResponse)(nil)
+	_ encoding.TextMarshaler     = csimData(nil)
+	_ encoding.TextUnmarshaler   = (*csimData)(nil)
+	_ fmt.Stringer               = CSIMCommand(nil)
+	_ fmt.Stringer               = CSIMResponse(nil)
+	_ fmt.Stringer               = csimData(nil)
 )
 
 type scriptPort struct {
@@ -207,7 +218,7 @@ func TestCSIMResponseUnmarshalTextReportsBareDecodeError(t *testing.T) {
 	if !strings.Contains(err.Error(), `"not-hex"`) {
 		t.Fatalf("UnmarshalText() error = %q, want line context", err.Error())
 	}
-	if !strings.Contains(err.Error(), "invalid CSIM response data") {
+	if !strings.Contains(err.Error(), "invalid CSIM data") {
 		t.Fatalf("UnmarshalText() error = %q, want data error", err.Error())
 	}
 }
@@ -235,17 +246,64 @@ func TestCSIMResponseUnmarshalTextRejectsUnknownBareStatusWord(t *testing.T) {
 }
 
 func TestCSIMCommandMarshalText(t *testing.T) {
-	command, err := newCSIMCommand([]byte{0x00, 0xC0, 0x00, 0x00, 0x10})
-	if err != nil {
-		t.Fatalf("newCSIMCommand() error = %v", err)
+	tests := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{name: "APDU", data: []byte{0x00, 0xC0, 0x00, 0x00, 0x10}, want: `AT+CSIM=10,"00C0000010"`},
+		{name: "empty", data: []byte{}, want: `AT+CSIM=0,""`},
 	}
 
-	got, err := command.MarshalText()
-	if err != nil {
-		t.Fatalf("MarshalText() error = %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := bytes.Clone(tt.data)
+			var command CSIMCommand
+			if err := command.UnmarshalBinary(data); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if len(data) != 0 {
+				data[0] ^= 0xFF
+			}
+			got, err := command.MarshalText()
+			if err != nil {
+				t.Fatalf("MarshalText() error = %v", err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("MarshalText() = %q, want %q", got, tt.want)
+			}
+
+			var decoded CSIMCommand
+			if err := decoded.UnmarshalText(got); err != nil {
+				t.Fatalf("UnmarshalText() error = %v", err)
+			}
+			if !bytes.Equal(decoded, tt.data) {
+				t.Fatalf("UnmarshalText() = % X, want % X", decoded, tt.data)
+			}
+			if decoded.String() != tt.want {
+				t.Fatalf("String() = %q, want %q", decoded, tt.want)
+			}
+		})
 	}
-	if string(got) != `AT+CSIM=10,"00C0000010"` {
-		t.Fatalf("MarshalText() = %q, want %q", string(got), `AT+CSIM=10,"00C0000010"`)
+}
+
+func TestCSIMCommandErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "nil binary", run: func() error { return new(CSIMCommand).UnmarshalBinary(nil) }},
+		{name: "missing prefix", run: func() error { return new(CSIMCommand).UnmarshalText([]byte(`CSIM=2,"00"`)) }},
+		{name: "missing separator", run: func() error { return new(CSIMCommand).UnmarshalText([]byte("AT+CSIM=00")) }},
+		{name: "invalid hex", run: func() error { return new(CSIMCommand).UnmarshalText([]byte(`AT+CSIM=2,"GG"`)) }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.run(); err == nil {
+				t.Fatal("codec error = nil, want non-nil")
+			}
+		})
 	}
 }
 

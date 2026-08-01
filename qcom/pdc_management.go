@@ -77,7 +77,10 @@ func (r PDCDeleteConfigRequest) Request() (Request, error) {
 		tlvs = append(tlvs, tlv.Uint(0x10, *r.Token))
 	}
 	if len(r.Config.ID) != 0 {
-		id := append([]byte{byte(len(r.Config.ID))}, r.Config.ID...)
+		id, err := qmiLength8Bytes(r.Config.ID).MarshalBinary()
+		if err != nil {
+			return Request{}, fmt.Errorf("encoding QMI PDC configuration deletion: %w", err)
+		}
 		tlvs = append(tlvs, tlv.Bytes(0x11, id))
 	}
 	return Request{
@@ -331,9 +334,12 @@ func (i *PDCGetDefaultConfigInfoIndication) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		i.Info.Size, i.Info.SizeKnown = parsed, true
 	}
 	if value, ok := tlv.Value(tlvs, 0x13); ok {
-		parsed, err := decodePDCBytes(value, pdcConfigDescriptionMax)
-		if err != nil {
+		var parsed qmiLength8Bytes
+		if err := parsed.UnmarshalBinary(value); err != nil {
 			return err
+		}
+		if len(parsed) > pdcConfigDescriptionMax {
+			return fmt.Errorf("value length %d exceeds %d", len(parsed), pdcConfigDescriptionMax)
 		}
 		i.Info.Description, i.Info.DescriptionKnown = string(parsed), true
 	}

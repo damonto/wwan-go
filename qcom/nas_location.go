@@ -273,53 +273,46 @@ func (c *Client) CellLocationInfo(ctx context.Context) (NASCellLocationInfo, err
 func (i *NASCellLocationInfo) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	*i = NASCellLocationInfo{}
 	if value, ok := tlv.Value(tlvs, nasTLVLocationGERAN); ok {
-		parsed, err := decodeNASGERANLocation(value)
-		if err != nil {
+		if err := i.GERAN.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI NAS GERAN location: %w", err)
 		}
-		i.GERAN, i.GERANKnown = parsed, true
+		i.GERANKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVLocationUMTS); ok {
-		parsed, err := decodeNASUMTSLocation(value)
-		if err != nil {
+		if err := i.UMTS.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI NAS UMTS location: %w", err)
 		}
-		i.UMTS, i.UMTSKnown = parsed, true
+		i.UMTSKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVLocationCDMA); ok {
-		parsed, err := decodeNASCDMALocation(value)
-		if err != nil {
+		if err := i.CDMA.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI NAS CDMA location: %w", err)
 		}
-		i.CDMA, i.CDMAKnown = parsed, true
+		i.CDMAKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVLocationLTEIntra); ok {
-		parsed, err := decodeNASLTEIntraFrequency(value)
-		if err != nil {
+		if err := i.LTEIntra.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI NAS LTE intrafrequency location: %w", err)
 		}
-		i.LTEIntra, i.LTEIntraKnown = parsed, true
+		i.LTEIntraKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVLocationLTEInter); ok {
-		parsed, err := decodeNASLTEInterFrequency(value)
-		if err != nil {
+		if err := i.LTEInter.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI NAS LTE interfrequency location: %w", err)
 		}
-		i.LTEInter, i.LTEInterKnown = parsed, true
+		i.LTEInterKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVLocationLTEGERAN); ok {
-		parsed, err := decodeNASLTEGERANNeighbors(value)
-		if err != nil {
+		if err := i.LTEGERAN.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI NAS LTE GERAN-neighbor location: %w", err)
 		}
-		i.LTEGERAN, i.LTEGERANKnown = parsed, true
+		i.LTEGERANKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVLocationLTEWCDMA); ok {
-		parsed, err := decodeNASLTEWCDMANeighbors(value)
-		if err != nil {
+		if err := i.LTEWCDMA.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI NAS LTE WCDMA-neighbor location: %w", err)
 		}
-		i.LTEWCDMA, i.LTEWCDMAKnown = parsed, true
+		i.LTEWCDMAKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVLocationUMTSCellID); ok {
 		parsed, err := decodeNASLocationUint32(value)
@@ -329,11 +322,10 @@ func (i *NASCellLocationInfo) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		i.UMTSCellID, i.UMTSCellIDKnown = parsed, true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVLocationUMTSLTE); ok {
-		parsed, err := decodeNASUMTSLTENeighbors(value)
-		if err != nil {
+		if err := i.UMTSLTE.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI NAS UMTS LTE-neighbor location: %w", err)
 		}
-		i.UMTSLTE, i.UMTSLTEKnown = parsed, true
+		i.UMTSLTEKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVLocationLTETimingAdvance); ok {
 		parsed, err := decodeNASLocationUint32(value)
@@ -371,82 +363,81 @@ func (i *NASCellLocationInfo) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		i.NR5GARFCN, i.NR5GARFCNKnown = parsed, true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVLocationNR5GCell); ok {
-		parsed, err := decodeNASNR5GLocation(value)
-		if err != nil {
+		if err := i.NR5G.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI NAS NR5G location: %w", err)
 		}
-		i.NR5G, i.NR5GKnown = parsed, true
+		i.NR5GKnown = true
 	}
 	return nil
 }
 
-func decodeNASGERANLocation(value []byte) (NASGERANCellLocation, error) {
+func (location *NASGERANCellLocation) UnmarshalBinary(value []byte) error {
 	c := nasLocationCursor{value: value}
 	cellID, err := c.uint32()
 	if err != nil {
-		return NASGERANCellLocation{}, err
+		return err
 	}
 	rawPLMN, err := c.take(3)
 	if err != nil {
-		return NASGERANCellLocation{}, err
+		return err
 	}
 	plmn, plmnKnown, err := decodeNASLocationPLMN(rawPLMN)
 	if err != nil && cellID != math.MaxUint32 {
-		return NASGERANCellLocation{}, fmt.Errorf("parsing QMI NAS GERAN information PLMN: %w", err)
+		return fmt.Errorf("parsing QMI NAS GERAN information PLMN: %w", err)
 	}
 	lac, err := c.uint16()
 	if err != nil {
-		return NASGERANCellLocation{}, err
+		return err
 	}
 	arfcn, err := c.uint16()
 	if err != nil {
-		return NASGERANCellLocation{}, err
+		return err
 	}
 	bsic, err := c.uint8()
 	if err != nil {
-		return NASGERANCellLocation{}, err
+		return err
 	}
 	timingAdvance, err := c.uint32()
 	if err != nil {
-		return NASGERANCellLocation{}, err
+		return err
 	}
 	rxLevel, err := c.uint16()
 	if err != nil {
-		return NASGERANCellLocation{}, err
+		return err
 	}
 	count, err := c.uint8()
 	if err != nil {
-		return NASGERANCellLocation{}, err
+		return err
 	}
 	neighbors := make([]NASGERANNeighborCell, int(count))
 	for index := range neighbors {
 		neighborID, err := c.uint32()
 		if err != nil {
-			return NASGERANCellLocation{}, err
+			return err
 		}
 		neighborPLMNRaw, err := c.take(3)
 		if err != nil {
-			return NASGERANCellLocation{}, err
+			return err
 		}
 		neighborPLMN, neighborPLMNKnown, err := decodeNASLocationPLMN(neighborPLMNRaw)
 		if err != nil && neighborID != math.MaxUint32 {
-			return NASGERANCellLocation{}, fmt.Errorf("parsing QMI NAS GERAN neighbor %d PLMN: %w", index, err)
+			return fmt.Errorf("parsing QMI NAS GERAN neighbor %d PLMN: %w", index, err)
 		}
 		neighborLAC, err := c.uint16()
 		if err != nil {
-			return NASGERANCellLocation{}, err
+			return err
 		}
 		neighborARFCN, err := c.uint16()
 		if err != nil {
-			return NASGERANCellLocation{}, err
+			return err
 		}
 		neighborBSIC, err := c.uint8()
 		if err != nil {
-			return NASGERANCellLocation{}, err
+			return err
 		}
 		neighborRXLevel, err := c.uint16()
 		if err != nil {
-			return NASGERANCellLocation{}, err
+			return err
 		}
 		neighbors[index] = NASGERANNeighborCell{
 			CellID: neighborID, CellIDKnown: neighborID != math.MaxUint32,
@@ -455,93 +446,95 @@ func decodeNASGERANLocation(value []byte) (NASGERANCellLocation, error) {
 		}
 	}
 	if err := c.finish(); err != nil {
-		return NASGERANCellLocation{}, err
+		return err
 	}
-	return NASGERANCellLocation{
+	*location = NASGERANCellLocation{
 		CellID: cellID, CellIDKnown: cellID != math.MaxUint32,
 		PLMN: plmn, PLMNKnown: plmnKnown && cellID != math.MaxUint32,
 		LAC: lac, ARFCN: arfcn, BSIC: bsic,
 		TimingAdvance: timingAdvance, TimingAdvanceKnown: timingAdvance != math.MaxUint32,
 		RXLevel: rxLevel, Neighbors: neighbors,
-	}, nil
+	}
+	return nil
 }
 
-func decodeNASUMTSLocation(value []byte) (NASUMTSCellLocation, error) {
+func (location *NASUMTSCellLocation) UnmarshalBinary(value []byte) error {
 	c := nasLocationCursor{value: value}
 	cellID, err := c.uint16()
 	if err != nil {
-		return NASUMTSCellLocation{}, err
+		return err
 	}
 	rawPLMN, err := c.take(3)
 	if err != nil {
-		return NASUMTSCellLocation{}, err
+		return err
 	}
 	plmn, plmnKnown, err := decodeNASLocationPLMN(rawPLMN)
 	if err != nil {
-		return NASUMTSCellLocation{}, fmt.Errorf("parsing QMI NAS UMTS information PLMN: %w", err)
+		return fmt.Errorf("parsing QMI NAS UMTS information PLMN: %w", err)
 	}
 	lac, err := c.uint16()
 	if err != nil {
-		return NASUMTSCellLocation{}, err
+		return err
 	}
 	uarfcn, err := c.uint16()
 	if err != nil {
-		return NASUMTSCellLocation{}, err
+		return err
 	}
 	psc, err := c.uint16()
 	if err != nil {
-		return NASUMTSCellLocation{}, err
+		return err
 	}
 	rscp, err := c.int16()
 	if err != nil {
-		return NASUMTSCellLocation{}, err
+		return err
 	}
 	ecio, err := c.int16()
 	if err != nil {
-		return NASUMTSCellLocation{}, err
+		return err
 	}
 	monitoredCount, err := c.uint8()
 	if err != nil {
-		return NASUMTSCellLocation{}, err
+		return err
 	}
 	neighbors := make([]NASUMTSNeighborCell, int(monitoredCount))
 	for index := range neighbors {
 		neighbors[index], err = decodeNASUMTSNeighbor(&c)
 		if err != nil {
-			return NASUMTSCellLocation{}, err
+			return err
 		}
 	}
 	geranCount, err := c.uint8()
 	if err != nil {
-		return NASUMTSCellLocation{}, err
+		return err
 	}
 	geranNeighbors := make([]NASUMTSGERANNeighborCell, int(geranCount))
 	for index := range geranNeighbors {
 		neighborARFCN, err := c.uint16()
 		if err != nil {
-			return NASUMTSCellLocation{}, err
+			return err
 		}
 		ncc, err := c.uint8()
 		if err != nil {
-			return NASUMTSCellLocation{}, err
+			return err
 		}
 		bcc, err := c.uint8()
 		if err != nil {
-			return NASUMTSCellLocation{}, err
+			return err
 		}
 		rssi, err := c.int16()
 		if err != nil {
-			return NASUMTSCellLocation{}, err
+			return err
 		}
 		geranNeighbors[index] = NASUMTSGERANNeighborCell{ARFCN: neighborARFCN, NCC: ncc, BCC: bcc, RSSI: rssi}
 	}
 	if err := c.finish(); err != nil {
-		return NASUMTSCellLocation{}, err
+		return err
 	}
-	return NASUMTSCellLocation{
+	*location = NASUMTSCellLocation{
 		CellID: cellID, PLMN: plmn, PLMNKnown: plmnKnown, LAC: lac, UARFCN: uarfcn,
 		PSC: psc, RSCP: rscp, ECIO: ecio, Neighbors: neighbors, GERANNeighbors: geranNeighbors,
-	}, nil
+	}
+	return nil
 }
 
 func decodeNASUMTSNeighbor(c *nasLocationCursor) (NASUMTSNeighborCell, error) {
@@ -564,109 +557,111 @@ func decodeNASUMTSNeighbor(c *nasLocationCursor) (NASUMTSNeighborCell, error) {
 	return NASUMTSNeighborCell{UARFCN: uarfcn, PSC: psc, RSCP: rscp, ECIO: ecio}, nil
 }
 
-func decodeNASCDMALocation(value []byte) (NASCDMACellLocation, error) {
+func (location *NASCDMACellLocation) UnmarshalBinary(value []byte) error {
 	if len(value) != 16 {
-		return NASCDMACellLocation{}, fmt.Errorf("parsing QMI NAS CDMA information: TLV length %d, want 16", len(value))
+		return fmt.Errorf("parsing QMI NAS CDMA information: TLV length %d, want 16", len(value))
 	}
-	return NASCDMACellLocation{
+	*location = NASCDMACellLocation{
 		SystemID: binary.LittleEndian.Uint16(value[0:2]), NetworkID: binary.LittleEndian.Uint16(value[2:4]),
 		BaseStationID: binary.LittleEndian.Uint16(value[4:6]), ReferencePN: binary.LittleEndian.Uint16(value[6:8]),
 		Latitude: binary.LittleEndian.Uint32(value[8:12]), Longitude: binary.LittleEndian.Uint32(value[12:16]),
-	}, nil
+	}
+	return nil
 }
 
-func decodeNASLTEIntraFrequency(value []byte) (NASLTEIntraFrequency, error) {
+func (location *NASLTEIntraFrequency) UnmarshalBinary(value []byte) error {
 	c := nasLocationCursor{value: value}
 	idle, err := c.uint8()
 	if err != nil {
-		return NASLTEIntraFrequency{}, err
+		return err
 	}
 	rawPLMN, err := c.take(3)
 	if err != nil {
-		return NASLTEIntraFrequency{}, err
+		return err
 	}
 	plmn, plmnKnown, err := decodeNASLocationPLMN(rawPLMN)
 	if err != nil {
-		return NASLTEIntraFrequency{}, fmt.Errorf("parsing QMI NAS LTE intrafrequency PLMN: %w", err)
+		return fmt.Errorf("parsing QMI NAS LTE intrafrequency PLMN: %w", err)
 	}
 	tac, err := c.uint16()
 	if err != nil {
-		return NASLTEIntraFrequency{}, err
+		return err
 	}
 	globalCellID, err := c.uint32()
 	if err != nil {
-		return NASLTEIntraFrequency{}, err
+		return err
 	}
 	earfcn, err := c.uint16()
 	if err != nil {
-		return NASLTEIntraFrequency{}, err
+		return err
 	}
 	servingCellID, err := c.uint16()
 	if err != nil {
-		return NASLTEIntraFrequency{}, err
+		return err
 	}
 	priority, err := c.uint8()
 	if err != nil {
-		return NASLTEIntraFrequency{}, err
+		return err
 	}
 	nonIntra, err := c.uint8()
 	if err != nil {
-		return NASLTEIntraFrequency{}, err
+		return err
 	}
 	servingLow, err := c.uint8()
 	if err != nil {
-		return NASLTEIntraFrequency{}, err
+		return err
 	}
 	intra, err := c.uint8()
 	if err != nil {
-		return NASLTEIntraFrequency{}, err
+		return err
 	}
 	cells, err := decodeNASLTECells(&c)
 	if err != nil {
-		return NASLTEIntraFrequency{}, err
+		return err
 	}
 	if err := c.finish(); err != nil {
-		return NASLTEIntraFrequency{}, err
+		return err
 	}
-	return NASLTEIntraFrequency{
+	*location = NASLTEIntraFrequency{
 		UEInIdle: idle != 0, PLMN: plmn, PLMNKnown: plmnKnown, TrackingAreaCode: tac,
 		GlobalCellID: globalCellID, EARFCN: earfcn, ServingCellID: servingCellID,
 		CellReselectionPriority: priority, NonIntraSearchThreshold: nonIntra,
 		ServingCellLowThreshold: servingLow, IntraSearchThreshold: intra, Cells: cells,
-	}, nil
+	}
+	return nil
 }
 
-func decodeNASLTEInterFrequency(value []byte) (NASLTEInterFrequency, error) {
+func (location *NASLTEInterFrequency) UnmarshalBinary(value []byte) error {
 	c := nasLocationCursor{value: value}
 	idle, err := c.uint8()
 	if err != nil {
-		return NASLTEInterFrequency{}, err
+		return err
 	}
 	count, err := c.uint8()
 	if err != nil {
-		return NASLTEInterFrequency{}, err
+		return err
 	}
 	frequencies := make([]NASLTEInterFrequencyEntry, int(count))
 	for index := range frequencies {
 		earfcn, err := c.uint16()
 		if err != nil {
-			return NASLTEInterFrequency{}, err
+			return err
 		}
 		low, err := c.uint8()
 		if err != nil {
-			return NASLTEInterFrequency{}, err
+			return err
 		}
 		high, err := c.uint8()
 		if err != nil {
-			return NASLTEInterFrequency{}, err
+			return err
 		}
 		priority, err := c.uint8()
 		if err != nil {
-			return NASLTEInterFrequency{}, err
+			return err
 		}
 		cells, err := decodeNASLTECells(&c)
 		if err != nil {
-			return NASLTEInterFrequency{}, err
+			return err
 		}
 		frequencies[index] = NASLTEInterFrequencyEntry{
 			EARFCN: earfcn, LowThreshold: low, HighThreshold: high,
@@ -674,9 +669,10 @@ func decodeNASLTEInterFrequency(value []byte) (NASLTEInterFrequency, error) {
 		}
 	}
 	if err := c.finish(); err != nil {
-		return NASLTEInterFrequency{}, err
+		return err
 	}
-	return NASLTEInterFrequency{UEInIdle: idle != 0, Frequencies: frequencies}, nil
+	*location = NASLTEInterFrequency{UEInIdle: idle != 0, Frequencies: frequencies}
+	return nil
 }
 
 func decodeNASLTECells(c *nasLocationCursor) ([]NASLTECellMeasurement, error) {
@@ -713,63 +709,63 @@ func decodeNASLTECells(c *nasLocationCursor) ([]NASLTECellMeasurement, error) {
 	return cells, nil
 }
 
-func decodeNASLTEGERANNeighbors(value []byte) (NASLTEGERANNeighbors, error) {
+func (location *NASLTEGERANNeighbors) UnmarshalBinary(value []byte) error {
 	c := nasLocationCursor{value: value}
 	idle, err := c.uint8()
 	if err != nil {
-		return NASLTEGERANNeighbors{}, err
+		return err
 	}
 	count, err := c.uint8()
 	if err != nil {
-		return NASLTEGERANNeighbors{}, err
+		return err
 	}
 	frequencies := make([]NASLTEGERANFrequency, int(count))
 	for index := range frequencies {
 		priority, err := c.uint8()
 		if err != nil {
-			return NASLTEGERANNeighbors{}, err
+			return err
 		}
 		high, err := c.uint8()
 		if err != nil {
-			return NASLTEGERANNeighbors{}, err
+			return err
 		}
 		low, err := c.uint8()
 		if err != nil {
-			return NASLTEGERANNeighbors{}, err
+			return err
 		}
 		ncc, err := c.uint8()
 		if err != nil {
-			return NASLTEGERANNeighbors{}, err
+			return err
 		}
 		cellCount, err := c.uint8()
 		if err != nil {
-			return NASLTEGERANNeighbors{}, err
+			return err
 		}
 		cells := make([]NASLTEGERANCell, int(cellCount))
 		for cellIndex := range cells {
 			arfcn, err := c.uint16()
 			if err != nil {
-				return NASLTEGERANNeighbors{}, err
+				return err
 			}
 			band1900, err := c.uint8()
 			if err != nil {
-				return NASLTEGERANNeighbors{}, err
+				return err
 			}
 			cellIDValid, err := c.uint8()
 			if err != nil {
-				return NASLTEGERANNeighbors{}, err
+				return err
 			}
 			bsic, err := c.uint8()
 			if err != nil {
-				return NASLTEGERANNeighbors{}, err
+				return err
 			}
 			rssi, err := c.int16()
 			if err != nil {
-				return NASLTEGERANNeighbors{}, err
+				return err
 			}
 			srxlev, err := c.int16()
 			if err != nil {
-				return NASLTEGERANNeighbors{}, err
+				return err
 			}
 			cells[cellIndex] = NASLTEGERANCell{
 				ARFCN: arfcn, Band1900: band1900 != 0, CellIDValid: cellIDValid != 0,
@@ -782,60 +778,61 @@ func decodeNASLTEGERANNeighbors(value []byte) (NASLTEGERANNeighbors, error) {
 		}
 	}
 	if err := c.finish(); err != nil {
-		return NASLTEGERANNeighbors{}, err
+		return err
 	}
-	return NASLTEGERANNeighbors{UEInIdle: idle != 0, Frequencies: frequencies}, nil
+	*location = NASLTEGERANNeighbors{UEInIdle: idle != 0, Frequencies: frequencies}
+	return nil
 }
 
-func decodeNASLTEWCDMANeighbors(value []byte) (NASLTEWCDMANeighbors, error) {
+func (location *NASLTEWCDMANeighbors) UnmarshalBinary(value []byte) error {
 	c := nasLocationCursor{value: value}
 	idle, err := c.uint8()
 	if err != nil {
-		return NASLTEWCDMANeighbors{}, err
+		return err
 	}
 	count, err := c.uint8()
 	if err != nil {
-		return NASLTEWCDMANeighbors{}, err
+		return err
 	}
 	frequencies := make([]NASLTEWCDMAFrequency, int(count))
 	for index := range frequencies {
 		uarfcn, err := c.uint16()
 		if err != nil {
-			return NASLTEWCDMANeighbors{}, err
+			return err
 		}
 		priority, err := c.uint8()
 		if err != nil {
-			return NASLTEWCDMANeighbors{}, err
+			return err
 		}
 		high, err := c.uint16()
 		if err != nil {
-			return NASLTEWCDMANeighbors{}, err
+			return err
 		}
 		low, err := c.uint16()
 		if err != nil {
-			return NASLTEWCDMANeighbors{}, err
+			return err
 		}
 		cellCount, err := c.uint8()
 		if err != nil {
-			return NASLTEWCDMANeighbors{}, err
+			return err
 		}
 		cells := make([]NASLTEWCDMACell, int(cellCount))
 		for cellIndex := range cells {
 			psc, err := c.uint16()
 			if err != nil {
-				return NASLTEWCDMANeighbors{}, err
+				return err
 			}
 			rscp, err := c.int16()
 			if err != nil {
-				return NASLTEWCDMANeighbors{}, err
+				return err
 			}
 			ecno, err := c.int16()
 			if err != nil {
-				return NASLTEWCDMANeighbors{}, err
+				return err
 			}
 			srxlev, err := c.int16()
 			if err != nil {
-				return NASLTEWCDMANeighbors{}, err
+				return err
 			}
 			cells[cellIndex] = NASLTEWCDMACell{PSC: psc, CPICHRSCP: rscp, CPICHECNO: ecno, SelectionRXLevel: srxlev}
 		}
@@ -845,46 +842,47 @@ func decodeNASLTEWCDMANeighbors(value []byte) (NASLTEWCDMANeighbors, error) {
 		}
 	}
 	if err := c.finish(); err != nil {
-		return NASLTEWCDMANeighbors{}, err
+		return err
 	}
-	return NASLTEWCDMANeighbors{UEInIdle: idle != 0, Frequencies: frequencies}, nil
+	*location = NASLTEWCDMANeighbors{UEInIdle: idle != 0, Frequencies: frequencies}
+	return nil
 }
 
-func decodeNASUMTSLTENeighbors(value []byte) (NASUMTSLTENeighbors, error) {
+func (location *NASUMTSLTENeighbors) UnmarshalBinary(value []byte) error {
 	c := nasLocationCursor{value: value}
 	rrc, err := c.uint32()
 	if err != nil {
-		return NASUMTSLTENeighbors{}, err
+		return err
 	}
 	count, err := c.uint8()
 	if err != nil {
-		return NASUMTSLTENeighbors{}, err
+		return err
 	}
 	cells := make([]NASUMTSLTENeighbor, int(count))
 	for index := range cells {
 		earfcn, err := c.uint16()
 		if err != nil {
-			return NASUMTSLTENeighbors{}, err
+			return err
 		}
 		pci, err := c.uint16()
 		if err != nil {
-			return NASUMTSLTENeighbors{}, err
+			return err
 		}
 		rsrp, err := c.float32()
 		if err != nil {
-			return NASUMTSLTENeighbors{}, err
+			return err
 		}
 		rsrq, err := c.float32()
 		if err != nil {
-			return NASUMTSLTENeighbors{}, err
+			return err
 		}
 		srxlev, err := c.int16()
 		if err != nil {
-			return NASUMTSLTENeighbors{}, err
+			return err
 		}
 		tdd, err := c.uint8()
 		if err != nil {
-			return NASUMTSLTENeighbors{}, err
+			return err
 		}
 		cells[index] = NASUMTSLTENeighbor{
 			EARFCN: earfcn, PhysicalCellID: pci, RSRP: rsrp, RSRQ: rsrq,
@@ -892,20 +890,21 @@ func decodeNASUMTSLTENeighbors(value []byte) (NASUMTSLTENeighbors, error) {
 		}
 	}
 	if err := c.finish(); err != nil {
-		return NASUMTSLTENeighbors{}, err
+		return err
 	}
-	return NASUMTSLTENeighbors{RRCState: NASWCDMARRCState(rrc), Cells: cells}, nil
+	*location = NASUMTSLTENeighbors{RRCState: NASWCDMARRCState(rrc), Cells: cells}
+	return nil
 }
 
-func decodeNASNR5GLocation(value []byte) (NASNR5GCellLocation, error) {
+func (location *NASNR5GCellLocation) UnmarshalBinary(value []byte) error {
 	if len(value) != 22 {
-		return NASNR5GCellLocation{}, fmt.Errorf("parsing QMI NAS NR5G cell information: TLV length %d, want 22", len(value))
+		return fmt.Errorf("parsing QMI NAS NR5G cell information: TLV length %d, want 22", len(value))
 	}
 	plmn, plmnKnown, err := decodeNASLocationPLMN(value[:3])
 	if err != nil {
-		return NASNR5GCellLocation{}, fmt.Errorf("parsing QMI NAS NR5G cell PLMN: %w", err)
+		return fmt.Errorf("parsing QMI NAS NR5G cell PLMN: %w", err)
 	}
-	return NASNR5GCellLocation{
+	*location = NASNR5GCellLocation{
 		PLMN: plmn, PLMNKnown: plmnKnown,
 		TrackingAreaCode: [3]byte(value[3:6]),
 		GlobalCellID:     binary.LittleEndian.Uint64(value[6:14]),
@@ -913,7 +912,8 @@ func decodeNASNR5GLocation(value []byte) (NASNR5GCellLocation, error) {
 		RSRQ:             int16(binary.LittleEndian.Uint16(value[16:18])),
 		RSRP:             int16(binary.LittleEndian.Uint16(value[18:20])),
 		SNR:              int16(binary.LittleEndian.Uint16(value[20:22])),
-	}, nil
+	}
+	return nil
 }
 
 func decodeNASLocationPLMN(value []byte) (NASPLMN, bool, error) {

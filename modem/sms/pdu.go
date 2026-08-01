@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode/utf16"
 
 	"github.com/damonto/wwan-go/modem/contract"
 )
@@ -44,7 +43,7 @@ type Part struct {
 
 func EncodePDUs(cfg MessageConfig) ([][]byte, error) {
 	if cfg.Text != "" {
-		if _, ok := EncodeGSM7(cfg.Text); ok {
+		if _, err := GSM7(cfg.Text).MarshalBinary(); err == nil {
 			return encodeGSM7PDUs(cfg)
 		}
 		return encodeUCS2PDUs(cfg)
@@ -53,7 +52,10 @@ func EncodePDUs(cfg MessageConfig) ([][]byte, error) {
 }
 
 func encodeGSM7PDUs(cfg MessageConfig) ([][]byte, error) {
-	septets, _ := EncodeGSM7(cfg.Text)
+	septets, err := GSM7(cfg.Text).MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
 	if len(septets) <= smsGSM7SingleSeptets {
 		return [][]byte{buildSubmitPDU(cfg, smsAlphabetGSM7, septets, nil)}, nil
 	}
@@ -65,14 +67,18 @@ func encodeGSM7PDUs(cfg MessageConfig) ([][]byte, error) {
 }
 
 func encodeUCS2PDUs(cfg MessageConfig) ([][]byte, error) {
-	units := utf16.Encode([]rune(cfg.Text))
-	if len(units) <= smsUCS2SingleUnits {
-		return [][]byte{buildSubmitPDU(cfg, smsAlphabetUCS2, UCS2Bytes(units), nil)}, nil
+	payload, err := UCS2(cfg.Text).MarshalBinary()
+	if err != nil {
+		return nil, err
 	}
-	unitChunks := splitUTF16(cfg.Text, smsUCS2PartUnits)
-	chunks := make([][]byte, len(unitChunks))
-	for i, chunk := range unitChunks {
-		chunks[i] = UCS2Bytes(chunk)
+	if len(payload)/2 <= smsUCS2SingleUnits {
+		return [][]byte{buildSubmitPDU(cfg, smsAlphabetUCS2, payload, nil)}, nil
+	}
+	chunks := make([][]byte, 0, (len(payload)+smsUCS2PartUnits*2-1)/(smsUCS2PartUnits*2))
+	for len(payload) > 0 {
+		length := min(len(payload), smsUCS2PartUnits*2)
+		chunks = append(chunks, slices.Clone(payload[:length]))
+		payload = payload[length:]
 	}
 	return buildMultipartPDUs(cfg, smsAlphabetUCS2, chunks), nil
 }
@@ -133,40 +139,46 @@ func buildSubmitPDU(cfg MessageConfig, alphabet smsAlphabet, data, header []byte
 	return append(pdu, userData...)
 }
 
-func DecodePDU(pdu []byte) (Part, error) {
+func (part *Part) UnmarshalBinary(pdu []byte) error {
 	if len(pdu) < 2 {
-		return Part{}, errors.New("decoding SMS PDU: PDU is truncated")
+		return errors.New("decoding SMS PDU: PDU is truncated")
 	}
 	offset := 0
 	smscLength := int(pdu[offset])
 	offset++
 	if smscLength > len(pdu)-offset {
-		return Part{}, errors.New("decoding SMS PDU: SMSC address is truncated")
+		return errors.New("decoding SMS PDU: SMSC address is truncated")
 	}
 	smsc := ""
 	if smscLength > 0 {
 		if smscLength < 1 {
-			return Part{}, errors.New("decoding SMS PDU: SMSC type is missing")
+			return errors.New("decoding SMS PDU: SMSC type is missing")
 		}
 		smsc = decodeBCDAddress(pdu[offset], pdu[offset+1:offset+smscLength], (smscLength-1)*2)
 	}
 	offset += smscLength
 	if offset >= len(pdu) {
-		return Part{}, errors.New("decoding SMS PDU: TPDU is missing")
+		return errors.New("decoding SMS PDU: TPDU is missing")
 	}
 	first := pdu[offset]
 	offset++
-	part := Part{Message: Message{SMSC: smsc, PDU: slices.Clone(pdu), PDUs: [][]byte{slices.Clone(pdu)}}}
+	decoded := Part{Message: Message{SMSC: smsc, PDU: slices.Clone(pdu), PDUs: [][]byte{slices.Clone(pdu)}}}
+	var err error
 	switch first & 0x03 {
 	case 0:
-		return decodeDeliverPDU(pdu, offset, first, part)
+		decoded, err = decodeDeliverPDU(pdu, offset, first, decoded)
 	case 1:
-		return decodeSubmitPDU(pdu, offset, first, part)
+		decoded, err = decodeSubmitPDU(pdu, offset, first, decoded)
 	case 2:
-		return decodeStatusReportPDU(pdu, offset, part)
+		decoded, err = decodeStatusReportPDU(pdu, offset, decoded)
 	default:
-		return Part{}, fmt.Errorf("decoding SMS PDU: message type %#x is reserved", first&0x03)
+		return fmt.Errorf("decoding SMS PDU: message type %#x is reserved", first&0x03)
 	}
+	if err != nil {
+		return err
+	}
+	*part = decoded
+	return nil
 }
 
 func decodeDeliverPDU(pdu []byte, offset int, first byte, part Part) (Part, error) {
@@ -265,11 +277,11 @@ func decodeUserData(pdu []byte, offset int, hasHeader bool, dcs byte, part Part)
 			return Part{}, errors.New("decoding SMS PDU: UDH exceeds GSM7 user data length")
 		}
 		septets := UnpackSeptets(data, headerSeptets*7, length-headerSeptets)
-		text, err := DecodeGSM7(septets)
-		if err != nil {
+		var text GSM7
+		if err := text.UnmarshalBinary(septets); err != nil {
 			return Part{}, err
 		}
-		part.Message.Text = text
+		part.Message.Text = text.String()
 		return part, nil
 	}
 	if length > len(pdu)-offset {
@@ -292,11 +304,11 @@ func decodeUserData(pdu []byte, offset int, hasHeader bool, dcs byte, part Part)
 	if len(payload)%2 != 0 {
 		return Part{}, errors.New("decoding SMS PDU: UCS-2 user data has odd length")
 	}
-	units := make([]uint16, len(payload)/2)
-	for i := range units {
-		units[i] = binary.BigEndian.Uint16(payload[i*2:])
+	var text UCS2
+	if err := text.UnmarshalBinary(payload); err != nil {
+		return Part{}, err
 	}
-	part.Message.Text = string(utf16.Decode(units))
+	part.Message.Text = text.String()
 	return part, nil
 }
 
@@ -377,11 +389,11 @@ func readAddress(pdu []byte, offset int) (string, int, error) {
 			return "", offset, errors.New("decoding SMS PDU: alphanumeric address is truncated")
 		}
 		septets := digitCount * 4 / 7
-		text, err := DecodeGSM7(UnpackSeptets(pdu[offset:offset+octets], 0, septets))
-		if err != nil {
+		var text GSM7
+		if err := text.UnmarshalBinary(UnpackSeptets(pdu[offset:offset+octets], 0, septets)); err != nil {
 			return "", offset, fmt.Errorf("decoding SMS PDU address: %w", err)
 		}
-		return text, offset + octets, nil
+		return text.String(), offset + octets, nil
 	}
 	octets := (digitCount + 1) / 2
 	if octets > len(pdu)-offset {
@@ -513,31 +525,6 @@ func splitGSM7(text string, capacity int) ([][]byte, error) {
 	return chunks, nil
 }
 
-func splitUTF16(text string, capacity int) [][]uint16 {
-	var chunks [][]uint16
-	current := make([]uint16, 0, capacity)
-	for _, r := range text {
-		units := utf16.Encode([]rune{r})
-		if len(current)+len(units) > capacity {
-			chunks = append(chunks, current)
-			current = make([]uint16, 0, capacity)
-		}
-		current = append(current, units...)
-	}
-	if len(current) > 0 {
-		chunks = append(chunks, current)
-	}
-	return chunks
-}
-
-func UCS2Bytes(units []uint16) []byte {
-	result := make([]byte, len(units)*2)
-	for i, unit := range units {
-		binary.BigEndian.PutUint16(result[i*2:], unit)
-	}
-	return result
-}
-
 func decodeSMSTimestamp(value []byte) time.Time {
 	if len(value) != 7 {
 		return time.Time{}
@@ -557,18 +544,6 @@ func decodeSMSTimestamp(value []byte) time.Time {
 	return time.Date(year, time.Month(fields[1]), fields[2], fields[3], fields[4], fields[5], 0, time.FixedZone("SMS", offset))
 }
 
-func EncodeGSM7(text string) ([]byte, bool) {
-	result := make([]byte, 0, len(text))
-	for _, r := range text {
-		encoded, ok := encodeGSM7Rune(r)
-		if !ok {
-			return nil, false
-		}
-		result = append(result, encoded...)
-	}
-	return result, true
-}
-
 func encodeGSM7Rune(r rune) ([]byte, bool) {
 	if value, ok := gsm7DefaultEncode[r]; ok {
 		return []byte{value}, true
@@ -577,27 +552,6 @@ func encodeGSM7Rune(r rune) ([]byte, bool) {
 		return []byte{0x1b, value}, true
 	}
 	return nil, false
-}
-
-func DecodeGSM7(septets []byte) (string, error) {
-	var result strings.Builder
-	for i := 0; i < len(septets); i++ {
-		value := septets[i]
-		if value == 0x1b {
-			i++
-			if i >= len(septets) {
-				return "", errors.New("decoding GSM7: trailing escape septet")
-			}
-			r, ok := gsm7ExtensionDecode[septets[i]]
-			if !ok {
-				return "", fmt.Errorf("decoding GSM7: unknown extension %#x", septets[i])
-			}
-			result.WriteRune(r)
-			continue
-		}
-		result.WriteRune(gsm7DefaultDecode[value&0x7f])
-	}
-	return result.String(), nil
 }
 
 var gsm7DefaultDecode = [128]rune{
@@ -705,16 +659,4 @@ func CloneMessage(message Message) Message {
 		message.PDUs[i] = slices.Clone(pdu)
 	}
 	return message
-}
-
-// DecodeUCS2 decodes a big-endian UCS-2 payload.
-func DecodeUCS2(data []byte) (string, error) {
-	if len(data)%2 != 0 {
-		return "", errors.New("UCS-2 payload has odd byte length")
-	}
-	units := make([]uint16, len(data)/2)
-	for i := range units {
-		units[i] = binary.BigEndian.Uint16(data[i*2:])
-	}
-	return string(utf16.Decode(units)), nil
 }

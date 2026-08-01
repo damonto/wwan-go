@@ -178,6 +178,26 @@ type LOCVector3 struct {
 	Up    float32
 }
 
+// MarshalBinary encodes an east, north, and up vector.
+func (vector LOCVector3) MarshalBinary() ([]byte, error) {
+	value := binary.LittleEndian.AppendUint32(nil, math.Float32bits(vector.East))
+	value = binary.LittleEndian.AppendUint32(value, math.Float32bits(vector.North))
+	return binary.LittleEndian.AppendUint32(value, math.Float32bits(vector.Up)), nil
+}
+
+// UnmarshalBinary decodes an east, north, and up vector.
+func (vector *LOCVector3) UnmarshalBinary(value []byte) error {
+	if len(value) != 12 {
+		return fmt.Errorf("LOC vector length %d, want 12", len(value))
+	}
+	*vector = LOCVector3{
+		East:  math.Float32frombits(binary.LittleEndian.Uint32(value[:4])),
+		North: math.Float32frombits(binary.LittleEndian.Uint32(value[4:8])),
+		Up:    math.Float32frombits(binary.LittleEndian.Uint32(value[8:12])),
+	}
+	return nil
+}
+
 // LOCInjectPositionConfig selects standard fields in Inject Position. Nil
 // pointers and a nil SatellitesUsed slice omit the corresponding TLVs.
 type LOCInjectPositionConfig struct {
@@ -287,10 +307,18 @@ func (r LOCInjectPositionRequest) Request() (Request, error) {
 		tlvs = append(tlvs, locFloat32TLV(0x23, *r.Config.TimeUncertaintyMilliseconds))
 	}
 	if r.Config.Speed != nil {
-		tlvs = append(tlvs, tlv.Bytes(0x24, encodeLOCVector3(*r.Config.Speed)))
+		value, err := r.Config.Speed.MarshalBinary()
+		if err != nil {
+			return Request{}, fmt.Errorf("encoding QMI LOC speed: %w", err)
+		}
+		tlvs = append(tlvs, tlv.Bytes(0x24, value))
 	}
 	if r.Config.SpeedUncertainty != nil {
-		tlvs = append(tlvs, tlv.Bytes(0x25, encodeLOCVector3(*r.Config.SpeedUncertainty)))
+		value, err := r.Config.SpeedUncertainty.MarshalBinary()
+		if err != nil {
+			return Request{}, fmt.Errorf("encoding QMI LOC speed uncertainty: %w", err)
+		}
+		tlvs = append(tlvs, tlv.Bytes(0x25, value))
 	}
 	if r.Config.SatellitesUsed != nil {
 		if len(r.Config.SatellitesUsed) > (locMaxTLVValueLength-4)/2 {
@@ -650,10 +678,4 @@ func locFloat32TLV(kind uint8, value float32) tlv.TLV {
 
 func locFloat64TLV(kind uint8, value float64) tlv.TLV {
 	return tlv.Bytes(kind, binary.LittleEndian.AppendUint64(nil, math.Float64bits(value)))
-}
-
-func encodeLOCVector3(vector LOCVector3) []byte {
-	value := binary.LittleEndian.AppendUint32(nil, math.Float32bits(vector.East))
-	value = binary.LittleEndian.AppendUint32(value, math.Float32bits(vector.North))
-	return binary.LittleEndian.AppendUint32(value, math.Float32bits(vector.Up))
 }

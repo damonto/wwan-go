@@ -166,10 +166,10 @@ func TestWDSEventReportRejectsMalformedTLVs(t *testing.T) {
 		{name: "counter length", tlvs: tlv.TLVs{tlv.Bytes(0x10, []byte{1})}, want: "TLV 0x10 length"},
 		{name: "bytes length", tlvs: tlv.TLVs{tlv.Bytes(0x19, []byte{1})}, want: "TLV 0x19 length"},
 		{name: "channel rates length", tlvs: tlv.TLVs{tlv.Bytes(0x16, []byte{1})}, want: "channel rates TLV length"},
-		{name: "current bearer length", tlvs: tlv.TLVs{tlv.Bytes(0x1D, []byte{1})}, want: "current data bearer TLV length"},
-		{name: "data systems length", tlvs: tlv.TLVs{tlv.Bytes(0x24, []byte{0, 1})}, want: "data systems TLV length"},
+		{name: "current bearer length", tlvs: tlv.TLVs{tlv.Bytes(0x1D, []byte{1})}, want: "current bearer length"},
+		{name: "data systems length", tlvs: tlv.TLVs{tlv.Bytes(0x24, []byte{0, 1})}, want: "data systems length"},
 		{name: "filter length", tlvs: tlv.TLVs{tlv.Bytes(0x29, []byte{1})}, want: "removed filter TLV length"},
-		{name: "extended bearer length", tlvs: tlv.TLVs{tlv.Bytes(0x2A, []byte{1})}, want: "extended data bearer TLV length"},
+		{name: "extended bearer length", tlvs: tlv.TLVs{tlv.Bytes(0x2A, []byte{1})}, want: "extended bearer length"},
 	}
 
 	for _, tt := range tests {

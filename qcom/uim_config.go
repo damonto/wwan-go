@@ -2,7 +2,6 @@ package qcom
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 
@@ -198,8 +197,10 @@ func (c *Client) RemoteUnlock(ctx context.Context, data []byte) error {
 	if len(data) > uimRemoteUnlockDataMax {
 		typ = 0x12
 	}
-	value := binary.LittleEndian.AppendUint16(nil, uint16(len(data)))
-	value = append(value, data...)
+	value, err := qmiLength16Bytes(data).MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("remotely unlocking QMI UIM: %w", err)
+	}
 	resp, err := c.request(ctx, MessageRemoteUnlock, tlv.TLVs{tlv.Bytes(typ, value)})
 	if err != nil {
 		return fmt.Errorf("remotely unlocking QMI UIM: %w", err)

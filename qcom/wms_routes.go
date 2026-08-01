@@ -54,6 +54,69 @@ type WMSRoute struct {
 	Action       WMSReceiptAction
 }
 
+// MarshalBinary encodes one incoming SMS routing rule.
+func (route WMSRoute) MarshalBinary() ([]byte, error) {
+	return []byte{
+		byte(route.MessageType),
+		byte(route.MessageClass),
+		byte(route.Storage),
+		byte(route.Action),
+	}, nil
+}
+
+// UnmarshalBinary decodes one incoming SMS routing rule.
+func (route *WMSRoute) UnmarshalBinary(value []byte) error {
+	if len(value) != 4 {
+		return fmt.Errorf("WMS route length %d, want 4", len(value))
+	}
+	*route = WMSRoute{
+		MessageType:  WMSMessageType(value[0]),
+		MessageClass: WMSMessageClass(value[1]),
+		Storage:      WMSStorage(value[2]),
+		Action:       WMSReceiptAction(value[3]),
+	}
+	return nil
+}
+
+type wmsRouteList []WMSRoute
+
+func (routes wmsRouteList) MarshalBinary() ([]byte, error) {
+	if len(routes) > wmsRouteMax {
+		return nil, fmt.Errorf("route count %d exceeds %d", len(routes), wmsRouteMax)
+	}
+	value := binary.LittleEndian.AppendUint16(nil, uint16(len(routes)))
+	for i, route := range routes {
+		encoded, err := route.MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("route %d: %w", i, err)
+		}
+		value = append(value, encoded...)
+	}
+	return value, nil
+}
+
+func (routes *wmsRouteList) UnmarshalBinary(value []byte) error {
+	if len(value) < 2 {
+		return errors.New("route count is truncated")
+	}
+	count := int(binary.LittleEndian.Uint16(value[:2]))
+	if count > wmsRouteMax {
+		return fmt.Errorf("route count %d exceeds %d", count, wmsRouteMax)
+	}
+	value = value[2:]
+	if len(value) != count*4 {
+		return fmt.Errorf("route list length %d, want %d", len(value), count*4)
+	}
+	decoded := make(wmsRouteList, count)
+	for i := range count {
+		if err := decoded[i].UnmarshalBinary(value[i*4 : (i+1)*4]); err != nil {
+			return fmt.Errorf("route %d: %w", i, err)
+		}
+	}
+	*routes = decoded
+	return nil
+}
+
 // WMSRoutes contains the modem's incoming SMS routing configuration.
 type WMSRoutes struct {
 	Routes               []WMSRoute
@@ -106,8 +169,10 @@ func (c *Client) WMSGetRoutes(ctx context.Context) (WMSRoutes, error) {
 
 // WMSSendFromStore sends an SMS already present in UIM or NV storage.
 func (c *Client) WMSSendFromStore(ctx context.Context, req WMSSendFromStoreRequest) (WMSSendResult, error) {
-	value := []byte{byte(req.Reference.Storage)}
-	value = binary.LittleEndian.AppendUint32(value, req.Reference.Index)
+	value, err := req.Reference.MarshalBinary()
+	if err != nil {
+		return WMSSendResult{}, fmt.Errorf("sending QMI WMS message from store: %w", err)
+	}
 	value = append(value, byte(req.MessageMode))
 	tlvs := tlv.TLVs{tlv.Bytes(0x01, value)}
 	if req.SMSOnIMS != nil {
@@ -115,7 +180,7 @@ func (c *Client) WMSSendFromStore(ctx context.Context, req WMSSendFromStoreReque
 	}
 
 	var parsed wmsSendFromStoreResponse
-	err := c.withServiceClient(ctx, ServiceWMS, func(clientID uint8) error {
+	err = c.withServiceClient(ctx, ServiceWMS, func(clientID uint8) error {
 		resp, err := c.requestService(ctx, ServiceWMS, clientID, MessageWMSSendFromMemoryStore, tlvs)
 		if err != nil {
 			return err
@@ -139,12 +204,9 @@ func (c *Client) WMSSendFromStore(ctx context.Context, req WMSSendFromStoreReque
 
 // MarshalTLVs encodes the WMS incoming-message routing configuration.
 func (r WMSRoutes) MarshalTLVs() (tlv.TLVs, error) {
-	if len(r.Routes) > wmsRouteMax {
-		return nil, fmt.Errorf("encoding QMI WMS routes: route count %d exceeds %d", len(r.Routes), wmsRouteMax)
-	}
-	value := binary.LittleEndian.AppendUint16(nil, uint16(len(r.Routes)))
-	for _, route := range r.Routes {
-		value = append(value, byte(route.MessageType), byte(route.MessageClass), byte(route.Storage), byte(route.Action))
+	value, err := wmsRouteList(r.Routes).MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("encoding QMI WMS routes: %w", err)
 	}
 	tlvs := tlv.TLVs{tlv.Bytes(0x01, value)}
 	if r.StatusReportKnown {
@@ -160,9 +222,9 @@ func (r *WMSRoutes) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	if !ok {
 		return errors.New("parsing QMI WMS routes: route list TLV missing")
 	}
-	routes, err := decodeWMSRoutes(value)
-	if err != nil {
-		return err
+	var routes wmsRouteList
+	if err := routes.UnmarshalBinary(value); err != nil {
+		return fmt.Errorf("parsing QMI WMS routes: %w", err)
 	}
 	r.Routes = routes
 	if value, ok := tlv.Value(tlvs, 0x10); ok {
@@ -173,31 +235,6 @@ func (r *WMSRoutes) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		r.StatusReportKnown = true
 	}
 	return nil
-}
-
-func decodeWMSRoutes(value []byte) ([]WMSRoute, error) {
-	if len(value) < 2 {
-		return nil, errors.New("parsing QMI WMS routes: count is truncated")
-	}
-	count := int(binary.LittleEndian.Uint16(value[:2]))
-	if count > wmsRouteMax {
-		return nil, fmt.Errorf("parsing QMI WMS routes: route count %d exceeds %d", count, wmsRouteMax)
-	}
-	value = value[2:]
-	if len(value) != count*4 {
-		return nil, fmt.Errorf("parsing QMI WMS routes: value length %d, want %d", len(value), count*4)
-	}
-	routes := make([]WMSRoute, 0, count)
-	for i := range count {
-		offset := i * 4
-		routes = append(routes, WMSRoute{
-			MessageType:  WMSMessageType(value[offset]),
-			MessageClass: WMSMessageClass(value[offset+1]),
-			Storage:      WMSStorage(value[offset+2]),
-			Action:       WMSReceiptAction(value[offset+3]),
-		})
-	}
-	return routes, nil
 }
 
 func (r *WMSSendResult) unmarshalSendFromStoreTLVs(tlvs tlv.TLVs) error {
@@ -224,10 +261,9 @@ func (r *WMSSendResult) unmarshalSendFromStoreTLVs(tlvs tlv.TLVs) error {
 		result.ErrorClassKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x13); ok {
-		if len(value) != 3 {
-			return fmt.Errorf("parsing QMI WMS send-from-store response: GSM cause TLV length %d, want 3", len(value))
+		if err := result.GSMCause.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing QMI WMS send-from-store response: %w", err)
 		}
-		result.GSMCause = WMSGSMCauseInfo{RPCause: binary.LittleEndian.Uint16(value[:2]), TPCause: value[2]}
 		result.GSMCauseKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x14); ok {
@@ -238,9 +274,10 @@ func (r *WMSSendResult) unmarshalSendFromStoreTLVs(tlvs tlv.TLVs) error {
 		result.DeliveryFailureKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x15); ok {
-		if err := decodeWMSRejectCause(&result, value); err != nil {
+		if err := result.RejectCause.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI WMS send-from-store response: %w", err)
 		}
+		result.RejectCauseKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x16); ok {
 		if err := decodeWMSDeliveryCause(&result, value); err != nil {

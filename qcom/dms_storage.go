@@ -2,7 +2,6 @@ package qcom
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
@@ -37,7 +36,10 @@ type DMSWriteUserDataRequest struct {
 
 // Request validates and converts the persistent payload into a QMI request.
 func (r DMSWriteUserDataRequest) Request() (Request, error) {
-	value, err := encodeDMSPersistentData(r.Data, dmsUserDataMax)
+	if len(r.Data) > dmsUserDataMax {
+		return Request{}, fmt.Errorf("encoding QMI DMS user data: data length %d exceeds maximum %d", len(r.Data), dmsUserDataMax)
+	}
+	value, err := qmiLength16Bytes(r.Data).MarshalBinary()
 	if err != nil {
 		return Request{}, fmt.Errorf("encoding QMI DMS user data: %w", err)
 	}
@@ -77,9 +79,12 @@ func (r *DMSPersistentDataResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	if !ok {
 		return errors.New("data TLV missing")
 	}
-	data, err := decodeDMSPersistentData(value, max)
-	if err != nil {
+	var data qmiLength16Bytes
+	if err := data.UnmarshalBinary(value); err != nil {
 		return err
+	}
+	if len(data) > max {
+		return fmt.Errorf("data length %d exceeds maximum %d", len(data), max)
 	}
 	r.Data = data
 	return nil
@@ -116,29 +121,4 @@ func (c *Client) DMSERIFile(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("reading QMI DMS ERI file: %w", err)
 	}
 	return result.Data, nil
-}
-
-func encodeDMSPersistentData(data []byte, max int) ([]byte, error) {
-	if len(data) > max {
-		return nil, fmt.Errorf("data length %d exceeds maximum %d", len(data), max)
-	}
-	value := binary.LittleEndian.AppendUint16(nil, uint16(len(data)))
-	return append(value, data...), nil
-}
-
-func decodeDMSPersistentData(value []byte, max int) ([]byte, error) {
-	if len(value) < 2 {
-		return nil, errors.New("data length is missing")
-	}
-	length := int(binary.LittleEndian.Uint16(value))
-	if length > max {
-		return nil, fmt.Errorf("data length %d exceeds maximum %d", length, max)
-	}
-	if len(value) != 2+length {
-		return nil, fmt.Errorf("TLV length %d, want %d", len(value), 2+length)
-	}
-	if length == 0 {
-		return []byte{}, nil
-	}
-	return append([]byte(nil), value[2:]...), nil
 }

@@ -151,11 +151,9 @@ func (r *NASSignalStrengthResult) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	if !ok {
 		return errors.New("parsing QMI NAS signal strength: current signal TLV missing")
 	}
-	current, err := parseNASSignalStrength(value)
-	if err != nil {
+	if err := r.Current.UnmarshalBinary(value); err != nil {
 		return fmt.Errorf("parsing QMI NAS current signal strength: %w", err)
 	}
-	r.Current = current
 
 	if value, ok := tlv.Value(tlvs, 0x10); ok {
 		count, err := parseNASLegacyArray(value, 2, nasMaxLegacySignalStrengths)
@@ -260,11 +258,16 @@ func (c *Client) SignalStrength(ctx context.Context, mask NASSignalStrengthReque
 	return result, nil
 }
 
-func parseNASSignalStrength(value []byte) (NASSignalStrength, error) {
+func (strength NASSignalStrength) MarshalBinary() ([]byte, error) {
+	return []byte{byte(strength.Strength), byte(strength.RadioInterface)}, nil
+}
+
+func (strength *NASSignalStrength) UnmarshalBinary(value []byte) error {
 	if len(value) != 2 {
-		return NASSignalStrength{}, fmt.Errorf("TLV length %d, want 2", len(value))
+		return fmt.Errorf("signal strength length %d, want 2", len(value))
 	}
-	return NASSignalStrength{Strength: int8(value[0]), RadioInterface: NASRadioInterface(value[1])}, nil
+	*strength = NASSignalStrength{Strength: int8(value[0]), RadioInterface: NASRadioInterface(value[1])}
+	return nil
 }
 
 func parseNASLegacyArray(value []byte, entryLength, maximum int) (int, error) {

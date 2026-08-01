@@ -125,19 +125,15 @@ func (e *DMSEvent) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		e.PowerStateKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, dmsTLVEventPIN1Status); ok {
-		state, err := decodeDMSPINState(value)
-		if err != nil {
+		if err := e.PIN1.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI DMS event PIN1 status: %w", err)
 		}
-		e.PIN1 = state
 		e.PIN1Known = true
 	}
 	if value, ok := tlv.Value(tlvs, dmsTLVEventPIN2Status); ok {
-		state, err := decodeDMSPINState(value)
-		if err != nil {
+		if err := e.PIN2.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI DMS event PIN2 status: %w", err)
 		}
-		e.PIN2 = state
 		e.PIN2Known = true
 	}
 	if value, ok := tlv.Value(tlvs, dmsTLVEventActivation); ok {
@@ -282,15 +278,20 @@ func dmsEventReportTLVs(config DMSEventReportConfig) tlv.TLVs {
 	return tlvs
 }
 
-func decodeDMSPINState(value []byte) (DMSPINState, error) {
+func (state DMSPINState) MarshalBinary() ([]byte, error) {
+	return []byte{byte(state.Status), state.VerifyRetries, state.UnblockRetries}, nil
+}
+
+func (state *DMSPINState) UnmarshalBinary(value []byte) error {
 	if err := requireDMSEventLength(value, 3); err != nil {
-		return DMSPINState{}, err
+		return err
 	}
-	return DMSPINState{
+	*state = DMSPINState{
 		Status:         DMSPINStatus(value[0]),
 		VerifyRetries:  value[1],
 		UnblockRetries: value[2],
-	}, nil
+	}
+	return nil
 }
 
 func requireDMSEventLength(value []byte, want int) error {

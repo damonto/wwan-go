@@ -74,7 +74,11 @@ func (c *Client) Authenticate(ctx context.Context, req AuthenticateRequest) ([]b
 	if !ok {
 		return nil, errors.New("authenticating QMI UIM: authenticate result TLV missing")
 	}
-	return decodeLengthPrefixedBytes(value)
+	var result qmiLength16Bytes
+	if err := result.UnmarshalBinary(value); err != nil {
+		return nil, fmt.Errorf("authenticating QMI UIM: %w", err)
+	}
+	return result, nil
 }
 
 func (c *Client) authenticateResponse(

@@ -64,16 +64,49 @@ func cardResultOK(resp Response) error {
 	return cardError(resp.TLVs)
 }
 
-func decodeLengthPrefixedBytes(data []byte) ([]byte, error) {
-	if len(data) < 2 {
-		return nil, errors.New("parsing QMI payload: length prefix is truncated")
-	}
+type qmiLength8Bytes []byte
 
+func (value qmiLength8Bytes) MarshalBinary() ([]byte, error) {
+	if len(value) > 0xff {
+		return nil, fmt.Errorf("value length %d exceeds 255", len(value))
+	}
+	data := make([]byte, 1, 1+len(value))
+	data[0] = byte(len(value))
+	return append(data, value...), nil
+}
+
+func (value *qmiLength8Bytes) UnmarshalBinary(data []byte) error {
+	if len(data) < 1 {
+		return errors.New("length prefix is truncated")
+	}
+	length := int(data[0])
+	if len(data) != 1+length {
+		return fmt.Errorf("value length %d, want %d", len(data), 1+length)
+	}
+	*value = slices.Clone(data[1:])
+	return nil
+}
+
+type qmiLength16Bytes []byte
+
+func (value qmiLength16Bytes) MarshalBinary() ([]byte, error) {
+	if len(value) > 0xffff {
+		return nil, fmt.Errorf("value length %d exceeds 65535", len(value))
+	}
+	data := binary.LittleEndian.AppendUint16(nil, uint16(len(value)))
+	return append(data, value...), nil
+}
+
+func (value *qmiLength16Bytes) UnmarshalBinary(data []byte) error {
+	if len(data) < 2 {
+		return errors.New("length prefix is truncated")
+	}
 	length := int(binary.LittleEndian.Uint16(data[:2]))
 	if len(data) != 2+length {
-		return nil, fmt.Errorf("parsing QMI payload: value length %d, want %d", len(data), 2+length)
+		return fmt.Errorf("value length %d, want %d", len(data), 2+length)
 	}
-	return slices.Clone(data[2 : 2+length]), nil
+	*value = slices.Clone(data[2:])
+	return nil
 }
 
 func putSessionValue(session Session, aid []byte) ([]byte, error) {

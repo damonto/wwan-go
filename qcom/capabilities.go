@@ -2,7 +2,6 @@ package qcom
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
@@ -48,8 +47,8 @@ func (c *Client) ServiceSupportedMessages(ctx context.Context, service ServiceTy
 		if !ok {
 			return errors.New("parsing QMI supported messages: message mask TLV missing")
 		}
-		mask, err := decodeQMILength16Bytes(value)
-		if err != nil {
+		var mask qmiLength16Bytes
+		if err := mask.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI supported messages: %w", err)
 		}
 		supported.mask = mask
@@ -59,26 +58,4 @@ func (c *Client) ServiceSupportedMessages(ctx context.Context, service ServiceTy
 		return SupportedMessages{}, fmt.Errorf("reading QMI service 0x%02X supported messages: %w", service, err)
 	}
 	return supported, nil
-}
-
-func decodeQMILength8Bytes(value []byte) ([]byte, error) {
-	if len(value) < 1 {
-		return nil, errors.New("length is truncated")
-	}
-	length := int(value[0])
-	if len(value) != 1+length {
-		return nil, fmt.Errorf("value length %d, want %d", len(value), 1+length)
-	}
-	return slices.Clone(value[1 : 1+length]), nil
-}
-
-func decodeQMILength16Bytes(value []byte) ([]byte, error) {
-	if len(value) < 2 {
-		return nil, errors.New("length is truncated")
-	}
-	length := int(binary.LittleEndian.Uint16(value[:2]))
-	if len(value) != 2+length {
-		return nil, fmt.Errorf("value length %d, want %d", len(value), 2+length)
-	}
-	return slices.Clone(value[2 : 2+length]), nil
 }

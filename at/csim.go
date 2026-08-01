@@ -4,31 +4,80 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
 
 type CSIMCommand []byte
 
+func (c CSIMCommand) String() string {
+	text, err := c.MarshalText()
+	if err != nil {
+		return ""
+	}
+	return string(text)
+}
+
+func (c CSIMCommand) MarshalBinary() ([]byte, error) {
+	if c == nil {
+		return nil, errors.New("encoding CSIM command: request is nil")
+	}
+	return slices.Clone(c), nil
+}
+
+func (c *CSIMCommand) UnmarshalBinary(data []byte) error {
+	if data == nil {
+		return errors.New("decoding CSIM command: request is nil")
+	}
+	*c = slices.Clone(data)
+	return nil
+}
+
 func (c CSIMCommand) MarshalText() ([]byte, error) {
-	hexData := strings.ToUpper(hex.EncodeToString(c))
-	return fmt.Appendf(nil, "AT+CSIM=%d,%q", len(hexData), hexData), nil
+	if c == nil {
+		return nil, errors.New("encoding CSIM command: request is nil")
+	}
+	body, err := csimData(c).MarshalText()
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte("AT+CSIM="), body...), nil
+}
+
+func (c *CSIMCommand) UnmarshalText(text []byte) error {
+	body, ok := strings.CutPrefix(strings.TrimSpace(string(text)), "AT+CSIM=")
+	if !ok {
+		return fmt.Errorf("invalid CSIM command: %q", text)
+	}
+	if !strings.Contains(body, ",") {
+		return errors.New("invalid CSIM command: length separator is missing")
+	}
+	var data csimData
+	if err := data.UnmarshalText([]byte(body)); err != nil {
+		return fmt.Errorf("invalid CSIM command: %w", err)
+	}
+	*c = CSIMCommand(data)
+	return nil
 }
 
 type CSIMResponse []byte
 
+func (r CSIMResponse) String() string {
+	return csimData(r).String()
+}
+
 func (r CSIMResponse) MarshalBinary() ([]byte, error) {
-	return append([]byte(nil), r...), nil
+	return slices.Clone(r), nil
 }
 
 func (r *CSIMResponse) UnmarshalBinary(data []byte) error {
-	*r = append((*r)[:0], data...)
+	*r = slices.Clone(data)
 	return nil
 }
 
 func (r CSIMResponse) MarshalText() ([]byte, error) {
-	hexData := strings.ToUpper(hex.EncodeToString(r))
-	return fmt.Appendf(nil, "%d,%q", len(hexData), hexData), nil
+	return csimData(r).MarshalText()
 }
 
 func (r *CSIMResponse) UnmarshalText(text []byte) error {
@@ -60,6 +109,36 @@ func (r *CSIMResponse) UnmarshalText(text []byte) error {
 }
 
 func (r *CSIMResponse) unmarshalBody(body string, requireKnownStatusWord bool) error {
+	var response csimData
+	if err := response.UnmarshalText([]byte(body)); err != nil {
+		return err
+	}
+	if requireKnownStatusWord {
+		if len(response) < 2 {
+			return errors.New("missing response status word")
+		}
+		if !hasKnownStatusWord(response) {
+			return fmt.Errorf("unrecognized APDU status word: %X", response[len(response)-2:])
+		}
+	}
+	*r = CSIMResponse(response)
+	return nil
+}
+
+type csimData []byte
+
+func (data csimData) String() string {
+	text, _ := data.MarshalText()
+	return string(text)
+}
+
+func (data csimData) MarshalText() ([]byte, error) {
+	hexData := strings.ToUpper(hex.EncodeToString(data))
+	return fmt.Appendf(nil, "%d,%q", len(hexData), hexData), nil
+}
+
+func (data *csimData) UnmarshalText(text []byte) error {
+	body := string(text)
 	hexData := body
 	wantLen := -1
 	lengthField, dataField, ok := strings.Cut(body, ",")
@@ -67,7 +146,7 @@ func (r *CSIMResponse) unmarshalBody(body string, requireKnownStatusWord bool) e
 		lengthField = strings.TrimSpace(lengthField)
 		n, err := strconv.Atoi(lengthField)
 		if err != nil || n < 0 {
-			return fmt.Errorf("invalid CSIM response length %q", lengthField)
+			return fmt.Errorf("invalid CSIM length %q", lengthField)
 		}
 		wantLen = n
 		hexData = dataField
@@ -78,28 +157,20 @@ func (r *CSIMResponse) unmarshalBody(body string, requireKnownStatusWord bool) e
 		var err error
 		hexData, err = strconv.Unquote(hexData)
 		if err != nil {
-			return fmt.Errorf("invalid CSIM response data: %w", err)
+			return fmt.Errorf("invalid CSIM data: %w", err)
 		}
 	}
 	if wantLen >= 0 {
 		if len(hexData) != wantLen {
-			return fmt.Errorf("CSIM response length mismatch: got %d, want %d", len(hexData), wantLen)
+			return fmt.Errorf("CSIM length mismatch: got %d, want %d", len(hexData), wantLen)
 		}
 	}
 
-	response, err := hex.DecodeString(hexData)
+	decoded, err := hex.DecodeString(hexData)
 	if err != nil {
-		return fmt.Errorf("invalid CSIM response data: %w", err)
+		return fmt.Errorf("invalid CSIM data: %w", err)
 	}
-	if requireKnownStatusWord {
-		if len(response) < 2 {
-			return errors.New("missing response status word")
-		}
-		if !hasKnownStatusWord(response) {
-			return fmt.Errorf("unrecognized APDU status word: %X", response[len(response)-2:])
-		}
-	}
-	*r = response
+	*data = csimData(decoded)
 	return nil
 }
 

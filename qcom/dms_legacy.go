@@ -197,19 +197,15 @@ type DMSPINStatusResponse struct {
 func (r *DMSPINStatusResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	*r = DMSPINStatusResponse{}
 	if value, ok := tlv.Value(tlvs, dmsTLVPIN1Status); ok {
-		state, err := decodeDMSPINState(value)
-		if err != nil {
+		if err := r.PIN1.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI DMS PIN1 status: %w", err)
 		}
-		r.PIN1 = state
 		r.PIN1Known = true
 	}
 	if value, ok := tlv.Value(tlvs, dmsTLVPIN2Status); ok {
-		state, err := decodeDMSPINState(value)
-		if err != nil {
+		if err := r.PIN2.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI DMS PIN2 status: %w", err)
 		}
-		r.PIN2 = state
 		r.PIN2Known = true
 	}
 	return nil

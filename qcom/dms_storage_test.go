@@ -108,11 +108,11 @@ func TestDMSPersistentDataResponseUnmarshalTLVs(t *testing.T) {
 		},
 		{
 			name: "truncated", max: dmsUserDataMax, kind: "user data",
-			tlvs: tlv.TLVs{tlv.Bytes(0x01, []byte{3, 0, 1})}, wantErr: "TLV length",
+			tlvs: tlv.TLVs{tlv.Bytes(0x01, []byte{3, 0, 1})}, wantErr: "value length",
 		},
 		{
 			name: "trailing data", max: dmsUserDataMax, kind: "user data",
-			tlvs: tlv.TLVs{tlv.Bytes(0x01, []byte{1, 0, 1, 2})}, wantErr: "TLV length",
+			tlvs: tlv.TLVs{tlv.Bytes(0x01, []byte{1, 0, 1, 2})}, wantErr: "value length",
 		},
 	}
 

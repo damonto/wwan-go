@@ -85,8 +85,10 @@ func (c *Client) WMSReset(ctx context.Context) error {
 
 // WMSModifyTag changes the read or delivery tag on a stored SMS.
 func (c *Client) WMSModifyTag(ctx context.Context, req WMSModifyTagRequest) error {
-	value := []byte{byte(req.Reference.Storage)}
-	value = binary.LittleEndian.AppendUint32(value, req.Reference.Index)
+	value, err := req.Reference.MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("modifying QMI WMS message tag: %w", err)
+	}
 	value = append(value, byte(req.Tag))
 	tlvs := tlv.TLVs{tlv.Bytes(0x01, value)}
 	if req.MessageMode != nil {

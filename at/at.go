@@ -52,13 +52,6 @@ func newReader(port io.ReadWriteCloser) *Reader {
 	}
 }
 
-func newCSIMCommand(req []byte) (CSIMCommand, error) {
-	if req == nil {
-		return nil, errors.New("building AT+CSIM command: request is nil")
-	}
-	return CSIMCommand(req), nil
-}
-
 func baudRateOrDefault(baudRate int) int {
 	if baudRate == 0 {
 		return defaultBaudRate
@@ -67,8 +60,8 @@ func baudRateOrDefault(baudRate int) int {
 }
 
 func (d *Reader) Transmit(ctx context.Context, req []byte) ([]byte, error) {
-	command, err := newCSIMCommand(req)
-	if err != nil {
+	var command CSIMCommand
+	if err := command.UnmarshalBinary(req); err != nil {
 		return nil, fmt.Errorf("transmitting APDU: %w", err)
 	}
 

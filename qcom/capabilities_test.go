@@ -108,8 +108,9 @@ func TestDecodeSupportedMessageMaskRejectsTruncation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := decodeQMILength16Bytes(tt.value); err == nil {
-				t.Fatal("decodeQMILength16Bytes() error = nil, want error")
+			var mask qmiLength16Bytes
+			if err := mask.UnmarshalBinary(tt.value); err == nil {
+				t.Fatal("UnmarshalBinary() error = nil, want error")
 			}
 		})
 	}

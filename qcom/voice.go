@@ -1519,11 +1519,9 @@ func (r *VoiceUSSDResult) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		result.FailureCauseKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x11); ok {
-		alpha, err := decodeVoiceAlphaIdentifier(value)
-		if err != nil {
+		if err := result.Alpha.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI Voice USSD response: %w", err)
 		}
-		result.Alpha = alpha
 		result.AlphaKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x12); ok {
@@ -1638,19 +1636,30 @@ func decodeVoiceUint16Array(value []byte, length16 bool) ([]uint16, error) {
 	return out, nil
 }
 
-func decodeVoiceAlphaIdentifier(value []byte) (VoiceAlphaIdentifier, error) {
+func (alpha VoiceAlphaIdentifier) MarshalBinary() ([]byte, error) {
+	if alpha.Encoding != VoiceAlphaEncodingGSM && alpha.Encoding != VoiceAlphaEncodingUCS2 {
+		return nil, fmt.Errorf("alpha identifier encoding %d is unsupported", alpha.Encoding)
+	}
+	if len(alpha.Data) > 0xff {
+		return nil, fmt.Errorf("alpha identifier length %d exceeds 255", len(alpha.Data))
+	}
+	return append([]byte{byte(alpha.Encoding), byte(len(alpha.Data))}, alpha.Data...), nil
+}
+
+func (alpha *VoiceAlphaIdentifier) UnmarshalBinary(value []byte) error {
 	if len(value) < 2 {
-		return VoiceAlphaIdentifier{}, errors.New("parsing QMI Voice alpha identifier: header is truncated")
+		return errors.New("alpha identifier header is truncated")
 	}
 	encoding := VoiceAlphaEncoding(value[0])
 	if encoding != VoiceAlphaEncodingGSM && encoding != VoiceAlphaEncodingUCS2 {
-		return VoiceAlphaIdentifier{}, fmt.Errorf("parsing QMI Voice alpha identifier: encoding %d is unsupported", encoding)
+		return fmt.Errorf("alpha identifier encoding %d is unsupported", encoding)
 	}
 	length := int(value[1])
 	if len(value) != 2+length {
-		return VoiceAlphaIdentifier{}, fmt.Errorf("parsing QMI Voice alpha identifier: value length %d, want %d", len(value), 2+length)
+		return fmt.Errorf("alpha identifier length %d, want %d", len(value), 2+length)
 	}
-	return VoiceAlphaIdentifier{Encoding: encoding, Data: slices.Clone(value[2:])}, nil
+	*alpha = VoiceAlphaIdentifier{Encoding: encoding, Data: slices.Clone(value[2:])}
+	return nil
 }
 
 func voiceUint64TLV(kind byte, value uint64) tlv.TLV {

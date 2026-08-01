@@ -369,19 +369,15 @@ func (c *PBMCapabilities) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		c.HiddenRecordsKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x16); ok {
-		capability, err := decodePBMAlphaStringCapability(value)
-		if err != nil {
+		if err := c.GAS.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI PBM GAS capability: %w", err)
 		}
-		c.GAS = capability
 		c.GASKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x17); ok {
-		capability, err := decodePBMAlphaStringCapability(value)
-		if err != nil {
+		if err := c.AAS.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI PBM AAS capability: %w", err)
 		}
-		c.AAS = capability
 		c.AASKnown = true
 	}
 	return nil
@@ -640,15 +636,20 @@ func decodePBMPhonebookCapability(r *pbmValueReader) PBMPhonebookCapability {
 	}
 }
 
-func decodePBMAlphaStringCapability(value []byte) (PBMAlphaStringCapability, error) {
+func (capability PBMAlphaStringCapability) MarshalBinary() ([]byte, error) {
+	return []byte{capability.MaximumRecords, capability.UsedRecords, capability.MaximumStringLength}, nil
+}
+
+func (capability *PBMAlphaStringCapability) UnmarshalBinary(value []byte) error {
 	if len(value) != 3 {
-		return PBMAlphaStringCapability{}, fmt.Errorf("capability TLV length %d, want 3", len(value))
+		return fmt.Errorf("alpha string capability length %d, want 3", len(value))
 	}
-	return PBMAlphaStringCapability{
+	*capability = PBMAlphaStringCapability{
 		MaximumRecords:      value[0],
 		UsedRecords:         value[1],
 		MaximumStringLength: value[2],
-	}, nil
+	}
+	return nil
 }
 
 func decodePBMSessionAlphaStringArray(value []byte) ([]PBMSessionAlphaStringCapability, error) {

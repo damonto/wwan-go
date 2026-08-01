@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"strconv"
 
 	"github.com/damonto/wwan-go/qcom/tlv"
 )
@@ -437,41 +436,20 @@ func parseNASSystemInfo(value []byte, want int, threeGPP, trackingArea bool, dst
 }
 
 func parseNASSystemPLMN(value []byte) (NASPLMN, error) {
+	// System Info reserves six bytes and pads a two-digit MNC with 0xFF before
+	// delegating the canonical decimal representation to NASPLMN.UnmarshalText.
 	if len(value) != 6 {
 		return NASPLMN{}, fmt.Errorf("PLMN length %d, want 6", len(value))
 	}
-	mcc, err := parseNASASCIIDigits(value[:3])
-	if err != nil {
-		return NASPLMN{}, fmt.Errorf("MCC: %w", err)
+	text := value
+	if value[5] == 0xFF {
+		text = value[:5]
 	}
-	mncDigits := value[3:]
-	threeDigits := mncDigits[2] != 0xFF
-	if !threeDigits {
-		mncDigits = mncDigits[:2]
+	var plmn NASPLMN
+	if err := plmn.UnmarshalText(text); err != nil {
+		return NASPLMN{}, err
 	}
-	mnc, err := parseNASASCIIDigits(mncDigits)
-	if err != nil {
-		return NASPLMN{}, fmt.Errorf("MNC: %w", err)
-	}
-	return NASPLMN{
-		MCC:                 uint16(mcc),
-		MNC:                 uint16(mnc),
-		MNCThreeDigits:      threeDigits,
-		MNCThreeDigitsKnown: true,
-	}, nil
-}
-
-func parseNASASCIIDigits(value []byte) (int, error) {
-	for i, digit := range value {
-		if digit < '0' || digit > '9' {
-			return 0, fmt.Errorf("byte %d is not an ASCII digit", i)
-		}
-	}
-	parsed, err := strconv.Atoi(string(value))
-	if err != nil {
-		return 0, fmt.Errorf("converting digits: %w", err)
-	}
-	return parsed, nil
+	return plmn, nil
 }
 
 func parseNASBool(value []byte) (bool, error) {

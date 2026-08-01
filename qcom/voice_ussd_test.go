@@ -162,8 +162,7 @@ func TestVoiceUSSDDecodersRejectMalformedValues(t *testing.T) {
 		{
 			name: "alpha trailing data",
 			fn: func() error {
-				_, err := decodeVoiceAlphaIdentifier([]byte{byte(VoiceAlphaEncodingGSM), 1, 'x', 'y'})
-				return err
+				return new(VoiceAlphaIdentifier).UnmarshalBinary([]byte{byte(VoiceAlphaEncodingGSM), 1, 'x', 'y'})
 			},
 		},
 		{

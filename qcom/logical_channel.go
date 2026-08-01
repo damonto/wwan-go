@@ -2,7 +2,6 @@ package qcom
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
@@ -95,18 +94,20 @@ func (c *Client) OpenLogicalChannelWithConfig(ctx context.Context, config UIMOpe
 		return OpenLogicalChannelResponse{}, fmt.Errorf("opening QMI UIM logical channel: %w", err)
 	}
 	if value, ok := tlv.Value(resp.TLVs, 0x12); ok {
-		response.SelectResponse, err = decodeQMILength8Bytes(value)
-		if err != nil {
+		var selectResponse qmiLength8Bytes
+		if err := selectResponse.UnmarshalBinary(value); err != nil {
 			return OpenLogicalChannelResponse{}, fmt.Errorf("opening QMI UIM logical channel: select response: %w", err)
 		}
+		response.SelectResponse = selectResponse
 	} else if value, ok := tlv.Value(resp.TLVs, 0x13); ok {
-		response.SelectResponse, err = decodeLengthPrefixedBytes(value)
-		if err != nil {
+		var selectResponse qmiLength16Bytes
+		if err := selectResponse.UnmarshalBinary(value); err != nil {
 			return OpenLogicalChannelResponse{}, fmt.Errorf("opening QMI UIM logical channel: long select response: %w", err)
 		}
-		if len(response.SelectResponse) > maxLogicalChannelSelectResponseLength {
-			return OpenLogicalChannelResponse{}, fmt.Errorf("opening QMI UIM logical channel: long select response length %d exceeds %d", len(response.SelectResponse), maxLogicalChannelSelectResponseLength)
+		if len(selectResponse) > maxLogicalChannelSelectResponseLength {
+			return OpenLogicalChannelResponse{}, fmt.Errorf("opening QMI UIM logical channel: long select response length %d exceeds %d", len(selectResponse), maxLogicalChannelSelectResponseLength)
 		}
+		response.SelectResponse = selectResponse
 	}
 	return response, nil
 }
@@ -190,25 +191,18 @@ func (r OpenLogicalChannelRequest) MarshalBinary() ([]byte, error) {
 		return nil, fmt.Errorf("marshaling QMI UIM open logical channel request: %w", err)
 	}
 
-	data := make([]byte, 0, 1+len(r.AID))
-	data = append(data, byte(len(r.AID)))
-	data = append(data, r.AID...)
-	return data, nil
+	return qmiLength8Bytes(r.AID).MarshalBinary()
 }
 
 func (r *OpenLogicalChannelRequest) UnmarshalBinary(data []byte) error {
-	if len(data) == 0 {
-		return errors.New("unmarshaling QMI UIM open logical channel request: AID length is missing")
+	var aid qmiLength8Bytes
+	if err := aid.UnmarshalBinary(data); err != nil {
+		return fmt.Errorf("unmarshaling QMI UIM open logical channel request: %w", err)
 	}
-
-	length := int(data[0])
-	if len(data) != 1+length {
-		return fmt.Errorf("unmarshaling QMI UIM open logical channel request: AID length %d does not match actual length %d", length, len(data)-1)
+	if len(aid) > maxLogicalChannelAIDLength {
+		return fmt.Errorf("unmarshaling QMI UIM open logical channel request: AID length %d exceeds %d", len(aid), maxLogicalChannelAIDLength)
 	}
-	if length > maxLogicalChannelAIDLength {
-		return fmt.Errorf("unmarshaling QMI UIM open logical channel request: AID length %d exceeds %d", length, maxLogicalChannelAIDLength)
-	}
-	r.AID = slices.Clone(data[1:])
+	r.AID = aid
 	return nil
 }
 
@@ -244,14 +238,12 @@ func (r SendAPDURequest) MarshalBinary() ([]byte, error) {
 		return nil, fmt.Errorf("marshaling QMI UIM APDU request: command length %d exceeds %d", len(r.Command), maxAPDUDataLength)
 	}
 
-	data := binary.LittleEndian.AppendUint16(nil, uint16(len(r.Command)))
-	data = append(data, r.Command...)
-	return data, nil
+	return qmiLength16Bytes(r.Command).MarshalBinary()
 }
 
 func (r *SendAPDURequest) UnmarshalBinary(data []byte) error {
-	command, err := decodeLengthPrefixedBytes(data)
-	if err != nil {
+	var command qmiLength16Bytes
+	if err := command.UnmarshalBinary(data); err != nil {
 		return fmt.Errorf("unmarshaling QMI UIM APDU request: %w", err)
 	}
 	if len(command) > maxAPDUDataLength {
@@ -262,8 +254,8 @@ func (r *SendAPDURequest) UnmarshalBinary(data []byte) error {
 }
 
 func (r *SendAPDUResponse) UnmarshalBinary(data []byte) error {
-	response, err := decodeLengthPrefixedBytes(data)
-	if err != nil {
+	var response qmiLength16Bytes
+	if err := response.UnmarshalBinary(data); err != nil {
 		return fmt.Errorf("unmarshaling QMI UIM APDU response: %w", err)
 	}
 	if len(response) > maxAPDUDataLength {

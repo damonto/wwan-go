@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/damonto/wwan-go/qcom/tlv"
@@ -34,8 +33,10 @@ func (r SSCControlRequest) Request() (Request, error) {
 	if len(r.Data) > maximumDataLength {
 		return Request{}, fmt.Errorf("SSC control data length %d exceeds maximum %d", len(r.Data), maximumDataLength)
 	}
-	value := binary.LittleEndian.AppendUint16(nil, uint16(len(r.Data)))
-	value = append(value, r.Data...)
+	value, err := qmiLength16Bytes(r.Data).MarshalBinary()
+	if err != nil {
+		return Request{}, fmt.Errorf("encoding SSC control data: %w", err)
+	}
 	tlvs := tlv.TLVs{tlv.Bytes(0x01, value)}
 	if r.ReportType != nil {
 		if *r.ReportType > SSCReportLarge {
@@ -102,12 +103,12 @@ func (r *SSCReport) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	if !ok {
 		return errors.New("parsing QMI SSC report: data TLV missing")
 	}
-	decoded, err := decodeLengthPrefixedBytes(data)
-	if err != nil {
+	var decoded qmiLength16Bytes
+	if err := decoded.UnmarshalBinary(data); err != nil {
 		return fmt.Errorf("parsing QMI SSC report data: %w", err)
 	}
 	r.ClientID = binary.LittleEndian.Uint64(clientID)
-	r.Data = slices.Clone(decoded)
+	r.Data = decoded
 	return nil
 }
 

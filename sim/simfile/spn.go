@@ -12,6 +12,15 @@ func (name ServiceProviderName) String() string {
 	return string(name)
 }
 
+func (name ServiceProviderName) MarshalText() ([]byte, error) {
+	return []byte(name), nil
+}
+
+func (name *ServiceProviderName) UnmarshalText(text []byte) error {
+	*name = ServiceProviderName(string(text))
+	return nil
+}
+
 func (name *ServiceProviderName) UnmarshalBinary(data []byte) error {
 	if len(data) < 2 {
 		return errors.New("parsing EF_SPN: payload is too short")

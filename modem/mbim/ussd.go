@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"unicode/utf16"
 
 	mbimproto "github.com/damonto/wwan-go/mbim"
 	"github.com/damonto/wwan-go/modem/sms"
@@ -92,7 +91,8 @@ func (b *Backend) WatchUSSD(ctx context.Context) (<-chan Result[USSDMessage], er
 }
 
 func encodeMBIMUSSD(text string) (uint32, []byte, error) {
-	if septets, ok := sms.EncodeGSM7(text); ok {
+	septets, gsm7Err := sms.GSM7(text).MarshalBinary()
+	if gsm7Err == nil {
 		// Seven septets occupy seven octets and otherwise leave an ambiguous
 		// all-zero eighth septet. TS 23.038 uses CR as padding in this case.
 		if len(septets)%8 == 7 {
@@ -104,7 +104,10 @@ func encodeMBIMUSSD(text string) (uint32, []byte, error) {
 		}
 		return ussdDCSGSM7, packed, nil
 	}
-	payload := sms.UCS2Bytes(utf16.Encode([]rune(text)))
+	payload, err := sms.UCS2(text).MarshalBinary()
+	if err != nil {
+		return 0, nil, fmt.Errorf("encoding MBIM USSD: %w", err)
+	}
 	if len(payload) > 160 {
 		return 0, nil, fmt.Errorf("encoding MBIM USSD: payload length %d exceeds 160", len(payload))
 	}
@@ -119,17 +122,17 @@ func mbimUSSDMessage(info mbimproto.USSDInfo) (USSDMessage, error) {
 		if len(info.Payload)%7 == 0 && len(septets) > 0 && septets[len(septets)-1] == 0x0d {
 			septets = septets[:len(septets)-1]
 		}
-		text, err := sms.DecodeGSM7(septets)
-		if err != nil {
+		var text sms.GSM7
+		if err := text.UnmarshalBinary(septets); err != nil {
 			return USSDMessage{}, fmt.Errorf("decoding MBIM USSD: %w", err)
 		}
-		message.Text = text
+		message.Text = text.String()
 	case ussdDCSUCS2:
-		text, err := sms.DecodeUCS2(info.Payload)
-		if err != nil {
+		var text sms.UCS2
+		if err := text.UnmarshalBinary(info.Payload); err != nil {
 			return USSDMessage{}, fmt.Errorf("decoding MBIM USSD: %w", err)
 		}
-		message.Text = text
+		message.Text = text.String()
 	default:
 		if len(info.Payload) != 0 {
 			return USSDMessage{}, fmt.Errorf("decoding MBIM USSD: data coding scheme %#x is not supported", info.DataCodingScheme)

@@ -432,11 +432,9 @@ func (e *VoiceSupplementaryResultEvent) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		return err
 	}
 	if value, ok := tlv.Value(tlvs, 0x16); ok {
-		alpha, err := decodeVoiceAlphaIdentifier(value)
-		if err != nil {
-			return err
+		if err := event.Alpha.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing QMI Voice supplementary result alpha identifier: %w", err)
 		}
-		event.Alpha = alpha
 		event.AlphaKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x17); ok {

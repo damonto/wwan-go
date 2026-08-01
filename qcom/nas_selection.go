@@ -402,8 +402,8 @@ func (r *NASSystemSelectionPreference) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		r.ManualPLMNKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVSelectionGetAcquisitionOrder); ok {
-		order, err := parseNASAcquisitionOrder(value)
-		if err != nil {
+		var order nasAcquisitionOrder
+		if err := order.UnmarshalBinary(value); err != nil {
 			return err
 		}
 		r.AcquisitionOrder = order
@@ -548,13 +548,9 @@ func (config NASSystemSelectionConfig) MarshalTLVs() (tlv.TLVs, error) {
 		tlvs = append(tlvs, nasUint64TLV(nasTLVSelectionSetTDSCDMABands, uint64(*config.TDSCDMABandPreference)))
 	}
 	if config.AcquisitionOrder != nil {
-		if len(config.AcquisitionOrder) > nasMaxAcquisitionOrder {
-			return nil, fmt.Errorf("encoding QMI NAS acquisition order: count %d exceeds maximum %d", len(config.AcquisitionOrder), nasMaxAcquisitionOrder)
-		}
-		value := make([]byte, 1, 1+len(config.AcquisitionOrder))
-		value[0] = byte(len(config.AcquisitionOrder))
-		for _, radio := range config.AcquisitionOrder {
-			value = append(value, byte(radio))
+		value, err := nasAcquisitionOrder(config.AcquisitionOrder).MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("encoding QMI NAS acquisition order: %w", err)
 		}
 		tlvs = append(tlvs, tlv.Bytes(nasTLVSelectionSetAcquisitionOrder, value))
 	}
@@ -622,22 +618,37 @@ func (selection NASNetworkSelection) MarshalTLVs() (tlv.TLVs, error) {
 	return tlvs, nil
 }
 
-func parseNASAcquisitionOrder(value []byte) ([]NASRadioInterface, error) {
+type nasAcquisitionOrder []NASRadioInterface
+
+func (order nasAcquisitionOrder) MarshalBinary() ([]byte, error) {
+	if len(order) > nasMaxAcquisitionOrder {
+		return nil, fmt.Errorf("acquisition order count %d exceeds maximum %d", len(order), nasMaxAcquisitionOrder)
+	}
+	value := make([]byte, 1, 1+len(order))
+	value[0] = byte(len(order))
+	for _, radio := range order {
+		value = append(value, byte(radio))
+	}
+	return value, nil
+}
+
+func (order *nasAcquisitionOrder) UnmarshalBinary(value []byte) error {
 	if len(value) < 1 {
-		return nil, errors.New("parsing QMI NAS system selection: acquisition order count is truncated")
+		return errors.New("acquisition order count is truncated")
 	}
 	count := int(value[0])
 	if count > nasMaxAcquisitionOrder {
-		return nil, fmt.Errorf("parsing QMI NAS system selection: acquisition order count %d exceeds maximum %d", count, nasMaxAcquisitionOrder)
+		return fmt.Errorf("acquisition order count %d exceeds maximum %d", count, nasMaxAcquisitionOrder)
 	}
 	if len(value) != 1+count {
-		return nil, fmt.Errorf("parsing QMI NAS system selection: acquisition order TLV length %d, want %d", len(value), 1+count)
+		return fmt.Errorf("acquisition order length %d, want %d", len(value), 1+count)
 	}
-	order := make([]NASRadioInterface, count)
+	decoded := make(nasAcquisitionOrder, count)
 	for i, radio := range value[1:] {
-		order[i] = NASRadioInterface(radio)
+		decoded[i] = NASRadioInterface(radio)
 	}
-	return order, nil
+	*order = decoded
+	return nil
 }
 
 func nasSelectionLengthError(kind byte, got, want int) error {

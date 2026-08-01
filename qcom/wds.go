@@ -301,19 +301,15 @@ func (r *WDSGetRuntimeSettingsResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		}
 	}
 	if value, ok := tlv.Value(tlvs, 0x17); ok {
-		qos, err := parseWDSUMTSGrantedQoS(value)
-		if err != nil {
-			return err
+		if err := r.Settings.UMTSGrantedQoS.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing WDS runtime UMTS granted QoS: %w", err)
 		}
-		r.Settings.UMTSGrantedQoS = qos
 		r.Settings.UMTSGrantedQoSKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x19); ok {
-		qos, err := parseWDSGPRSGrantedQoS(value)
-		if err != nil {
-			return err
+		if err := r.Settings.GPRSGrantedQoS.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing WDS runtime GPRS granted QoS: %w", err)
 		}
-		r.Settings.GPRSGrantedQoS = qos
 		r.Settings.GPRSGrantedQoSKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x1B); ok {
@@ -432,31 +428,13 @@ func (r *WDSGetRuntimeSettingsResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		r.Settings.ExtendedTechnologyKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x2F); ok {
-		pco, err := parseWDSOperatorReservedPCO(value)
-		if err != nil {
-			return err
+		if err := r.Settings.OperatorReservedPCO.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing WDS runtime operator reserved PCO: %w", err)
 		}
-		r.Settings.OperatorReservedPCO = pco
 		r.Settings.OperatorReservedPCOKnown = true
 	}
 	r.Settings.PCSCFIPs = uniqueWDSIPs(r.Settings.PCSCFIPs)
 	return nil
-}
-
-func parseWDSUMTSGrantedQoS(value []byte) (WDSUMTSGrantedQoS, error) {
-	var qos WDSUMTSGrantedQoS
-	if err := qos.UnmarshalBinary(value); err != nil {
-		return WDSUMTSGrantedQoS{}, fmt.Errorf("parsing WDS runtime UMTS granted QoS: %w", err)
-	}
-	return qos, nil
-}
-
-func parseWDSGPRSGrantedQoS(value []byte) (WDSGPRSGrantedQoS, error) {
-	var qos WDSGPRSGrantedQoS
-	if err := qos.UnmarshalBinary(value); err != nil {
-		return WDSGPRSGrantedQoS{}, fmt.Errorf("parsing WDS runtime GPRS granted QoS: %w", err)
-	}
-	return qos, nil
 }
 
 func parseWDSDomainList(value []byte) ([]string, error) {
@@ -484,22 +462,34 @@ func parseWDSDomainList(value []byte) ([]string, error) {
 	return domains, nil
 }
 
-func parseWDSOperatorReservedPCO(value []byte) (WDSOperatorReservedPCO, error) {
+func (pco WDSOperatorReservedPCO) MarshalBinary() ([]byte, error) {
+	if len(pco.AppSpecificInfo) > 0xff {
+		return nil, fmt.Errorf("operator reserved PCO application information length %d exceeds 255", len(pco.AppSpecificInfo))
+	}
+	value := binary.LittleEndian.AppendUint16(nil, pco.MCC)
+	value = binary.LittleEndian.AppendUint16(value, pco.MNC)
+	value = append(value, boolByte(pco.MNCIncludesPCSDigit), byte(len(pco.AppSpecificInfo)))
+	value = append(value, pco.AppSpecificInfo...)
+	return binary.LittleEndian.AppendUint16(value, pco.ContainerID), nil
+}
+
+func (pco *WDSOperatorReservedPCO) UnmarshalBinary(value []byte) error {
 	if len(value) < 8 {
-		return WDSOperatorReservedPCO{}, errors.New("parsing WDS runtime settings: operator reserved PCO is truncated")
+		return errors.New("operator reserved PCO is truncated")
 	}
 	infoLength := int(value[5])
 	want := 8 + infoLength
 	if len(value) != want {
-		return WDSOperatorReservedPCO{}, fmt.Errorf("parsing WDS runtime settings: operator reserved PCO TLV length %d, want %d", len(value), want)
+		return fmt.Errorf("operator reserved PCO length %d, want %d", len(value), want)
 	}
-	return WDSOperatorReservedPCO{
+	*pco = WDSOperatorReservedPCO{
 		MCC:                 binary.LittleEndian.Uint16(value[:2]),
 		MNC:                 binary.LittleEndian.Uint16(value[2:4]),
 		MNCIncludesPCSDigit: value[4] != 0,
 		AppSpecificInfo:     slices.Clone(value[6 : 6+infoLength]),
 		ContainerID:         binary.LittleEndian.Uint16(value[6+infoLength:]),
-	}, nil
+	}
+	return nil
 }
 
 func parseWDSIPv4List(value []byte) ([]net.IP, error) {

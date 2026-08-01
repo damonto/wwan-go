@@ -1,15 +1,18 @@
 package qmi
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"math"
 	"slices"
-	"strconv"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/damonto/wwan-go/modem/sms"
 	"github.com/damonto/wwan-go/qcom"
 	wwansim "github.com/damonto/wwan-go/sim"
 	simcard "github.com/damonto/wwan-go/sim/card"
@@ -425,8 +428,8 @@ func (b *Backend) PreferredNetworks(ctx context.Context) ([]PreferredNetwork, er
 func (b *Backend) SetPreferredNetworks(ctx context.Context, networks []PreferredNetwork) error {
 	values := make([]qcom.NASPreferredNetwork, len(networks))
 	for i, network := range networks {
-		plmn, err := parsePLMN(network.OperatorID)
-		if err != nil {
+		var plmn qcom.NASPLMN
+		if err := plmn.UnmarshalText([]byte(network.OperatorID)); err != nil {
 			return fmt.Errorf("setting QMI preferred network %d: %w", i, err)
 		}
 		values[i] = qcom.NASPreferredNetwork{PLMN: plmn, AccessTechnology: technologyToQMIAccess(network.Technology)}
@@ -458,7 +461,7 @@ func networkStatusFromServing(serving qcom.NASServingSystem) NetworkStatus {
 	}
 	if serving.PLMNKnown {
 		result.OperatorID = serving.PLMN.String()
-		result.OperatorName = serving.PLMN.Description
+		result.OperatorName = decodeQMINetworkDescription(serving.PLMN.Description)
 	}
 	if serving.RoamingIndicatorKnown && serving.RoamingIndicator == qcom.NASRoamingIndicatorRoaming {
 		result.RoamingText = "roaming"
@@ -466,11 +469,58 @@ func networkStatusFromServing(serving qcom.NASServingSystem) NetworkStatus {
 	return result
 }
 
+func decodeQMINetworkDescription(value string) string {
+	raw := []byte(value)
+	if decoded, ok := printableQMIString(raw); ok {
+		return decoded
+	}
+
+	// Some Qualcomm firmware returns this nominally textual field as packed
+	// GSM 7-bit. Keep the same best-effort fallback used by libqmi.
+	septets := sms.UnpackSeptets(raw, 0, len(raw)*8/7)
+	for len(septets) > 0 && septets[len(septets)-1] == 0 {
+		septets = septets[:len(septets)-1]
+	}
+	var gsm7 sms.GSM7
+	if err := gsm7.UnmarshalBinary(septets); err == nil {
+		if decoded, ok := printableQMIString([]byte(gsm7.String())); ok {
+			return decoded
+		}
+	}
+
+	for len(raw) >= 2 && raw[len(raw)-2] == 0 && raw[len(raw)-1] == 0 {
+		raw = raw[:len(raw)-2]
+	}
+	var ucs2 sms.UCS2LE
+	if err := ucs2.UnmarshalBinary(raw); err == nil {
+		if decoded, ok := printableQMIString([]byte(ucs2.String())); ok {
+			return decoded
+		}
+	}
+	return ""
+}
+
+func printableQMIString(value []byte) (string, bool) {
+	value = bytes.TrimRight(value, "\x00")
+	if !utf8.Valid(value) {
+		return "", false
+	}
+	for _, r := range string(value) {
+		if r == '\r' || r == '\n' || r == '\t' {
+			continue
+		}
+		if !unicode.IsPrint(r) {
+			return "", false
+		}
+	}
+	return string(value), true
+}
+
 func (b *Backend) Register(ctx context.Context, cfg RegisterConfig) error {
 	registration := qcom.NASNetworkRegistration{Action: qcom.NASRegisterAutomatically}
 	if cfg.OperatorID != "" {
-		plmn, err := parsePLMN(cfg.OperatorID)
-		if err != nil {
+		var plmn qcom.NASPLMN
+		if err := plmn.UnmarshalText([]byte(cfg.OperatorID)); err != nil {
 			return fmt.Errorf("registering QMI network: %w", err)
 		}
 		radio := technologyToQMINASRadio(cfg.Technology)
@@ -492,7 +542,7 @@ func (b *Backend) ScanNetworks(ctx context.Context) ([]Operator, error) {
 	for i, network := range scan.Networks {
 		operators[i] = Operator{
 			ID:         network.PLMN.String(),
-			Name:       network.PLMN.Description,
+			Name:       decodeQMINetworkDescription(network.PLMN.Description),
 			Technology: qmiNASRadios(network.RadioInterfaces),
 			Available:  network.Status.InUse() == qcom.NASNetworkInUseAvailable,
 			Current:    network.Status.InUse() == qcom.NASNetworkInUseCurrent,
@@ -1078,20 +1128,6 @@ func qmiPacketService(state qcom.NASAttachState) PacketServiceState {
 	default:
 		return PacketServiceUnknown
 	}
-}
-
-func parsePLMN(operatorID string) (qcom.NASPLMN, error) {
-	if len(operatorID) != 5 && len(operatorID) != 6 {
-		return qcom.NASPLMN{}, fmt.Errorf("operator ID %q must contain 5 or 6 digits", operatorID)
-	}
-	for _, digit := range operatorID {
-		if digit < '0' || digit > '9' {
-			return qcom.NASPLMN{}, fmt.Errorf("operator ID %q contains a non-decimal character", operatorID)
-		}
-	}
-	mcc, _ := strconv.ParseUint(operatorID[:3], 10, 16)
-	mnc, _ := strconv.ParseUint(operatorID[3:], 10, 16)
-	return qcom.NASPLMN{MCC: uint16(mcc), MNC: uint16(mnc), MNCThreeDigits: len(operatorID) == 6, MNCThreeDigitsKnown: true}, nil
 }
 
 func qmiAccessTechnology(access qcom.NASPLMNAccessTechnology) Technology {

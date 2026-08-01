@@ -91,7 +91,7 @@ type WDSSetLTEAttachPDNListRequest struct {
 
 // Request validates and encodes the ordered profile list.
 func (r WDSSetLTEAttachPDNListRequest) Request() (Request, error) {
-	list, err := encodeWDSAttachPDNList(r.Profiles)
+	list, err := wdsAttachPDNList(r.Profiles).MarshalBinary()
 	if err != nil {
 		return Request{}, err
 	}
@@ -168,15 +168,15 @@ type WDSGetLTEAttachPDNListResponse struct {
 func (r *WDSGetLTEAttachPDNListResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	*r = WDSGetLTEAttachPDNListResponse{}
 	if value, ok := tlv.Value(tlvs, 0x10); ok {
-		profiles, err := decodeWDSAttachPDNList(value)
-		if err != nil {
+		var profiles wdsAttachPDNList
+		if err := profiles.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI WDS current LTE attach PDN list: %w", err)
 		}
 		r.List.Current, r.List.CurrentKnown = profiles, true
 	}
 	if value, ok := tlv.Value(tlvs, 0x11); ok {
-		profiles, err := decodeWDSAttachPDNList(value)
-		if err != nil {
+		var profiles wdsAttachPDNList
+		if err := profiles.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI WDS pending LTE attach PDN list: %w", err)
 		}
 		r.List.Pending, r.List.PendingKnown = profiles, true
@@ -268,9 +268,11 @@ func (c *Client) WDSSetLTEAttachPDNList(ctx context.Context, profiles []uint16, 
 	return nil
 }
 
-func encodeWDSAttachPDNList(profiles []uint16) ([]byte, error) {
+type wdsAttachPDNList []uint16
+
+func (profiles wdsAttachPDNList) MarshalBinary() ([]byte, error) {
 	if len(profiles) > wdsMaxLTEAttachPDNs {
-		return nil, fmt.Errorf("encoding QMI WDS LTE attach PDN list: %d profiles exceeds maximum %d", len(profiles), wdsMaxLTEAttachPDNs)
+		return nil, fmt.Errorf("LTE attach PDN list length %d exceeds maximum %d", len(profiles), wdsMaxLTEAttachPDNs)
 	}
 	encoded := make([]byte, 1, 1+len(profiles)*2)
 	encoded[0] = byte(len(profiles))
@@ -280,22 +282,23 @@ func encodeWDSAttachPDNList(profiles []uint16) ([]byte, error) {
 	return encoded, nil
 }
 
-func decodeWDSAttachPDNList(value []byte) ([]uint16, error) {
+func (profiles *wdsAttachPDNList) UnmarshalBinary(value []byte) error {
 	if len(value) == 0 {
-		return nil, errors.New("count is missing")
+		return errors.New("LTE attach PDN count is missing")
 	}
 	count := int(value[0])
 	if count > wdsMaxLTEAttachPDNs {
-		return nil, fmt.Errorf("count %d exceeds maximum %d", count, wdsMaxLTEAttachPDNs)
+		return fmt.Errorf("LTE attach PDN count %d exceeds maximum %d", count, wdsMaxLTEAttachPDNs)
 	}
 	want := 1 + count*2
 	if len(value) != want {
-		return nil, fmt.Errorf("TLV length %d, want %d", len(value), want)
+		return fmt.Errorf("LTE attach PDN list length %d, want %d", len(value), want)
 	}
-	profiles := make([]uint16, count)
-	for index := range profiles {
+	decoded := make(wdsAttachPDNList, count)
+	for index := range decoded {
 		offset := 1 + index*2
-		profiles[index] = binary.LittleEndian.Uint16(value[offset : offset+2])
+		decoded[index] = binary.LittleEndian.Uint16(value[offset : offset+2])
 	}
-	return profiles, nil
+	*profiles = decoded
+	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/damonto/wwan-go/qcom/tlv"
 )
@@ -330,17 +331,23 @@ func (i *PDCGetSelectedConfigIndication) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		return err
 	}
 	if value, ok := tlv.Value(tlvs, 0x11); ok {
-		id, err := decodePDCID(value)
-		if err != nil {
+		var id qmiLength8Bytes
+		if err := id.UnmarshalBinary(value); err != nil {
 			return err
+		}
+		if len(id) > pdcConfigIDMax {
+			return fmt.Errorf("ID length %d exceeds %d", len(id), pdcConfigIDMax)
 		}
 		i.Selected.Active = id
 		i.Selected.ActiveKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x12); ok {
-		id, err := decodePDCID(value)
-		if err != nil {
+		var id qmiLength8Bytes
+		if err := id.UnmarshalBinary(value); err != nil {
 			return err
+		}
+		if len(id) > pdcConfigIDMax {
+			return fmt.Errorf("ID length %d exceeds %d", len(id), pdcConfigIDMax)
 		}
 		i.Selected.Pending = id
 		i.Selected.PendingKnown = true
@@ -419,9 +426,12 @@ func (i *PDCGetConfigInfoIndication) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		i.Info.Size, i.Info.SizeKnown = parsed, true
 	}
 	if value, ok := tlv.Value(tlvs, 0x12); ok {
-		parsed, err := decodePDCBytes(value, pdcConfigDescriptionMax)
-		if err != nil {
+		var parsed qmiLength8Bytes
+		if err := parsed.UnmarshalBinary(value); err != nil {
 			return err
+		}
+		if len(parsed) > pdcConfigDescriptionMax {
+			return fmt.Errorf("value length %d exceeds %d", len(parsed), pdcConfigDescriptionMax)
 		}
 		i.Info.Description, i.Info.DescriptionKnown = string(parsed), true
 	}
@@ -440,11 +450,11 @@ func (i *PDCGetConfigInfoIndication) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		i.Info.Storage, i.Info.StorageKnown = PDCStorage(parsed), true
 	}
 	if value, ok := tlv.Value(tlvs, 0x15); ok {
-		path, err := decodePDCUTF16(value)
-		if err != nil {
+		var path pdcUTF16
+		if err := path.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI PDC configuration path: %w", err)
 		}
-		i.Info.Path, i.Info.PathKnown = path, true
+		i.Info.Path, i.Info.PathKnown = path.String(), true
 	}
 	if value, ok := tlv.Value(tlvs, 0x16); ok {
 		parsed, err := decodePDCUint32(value)
@@ -454,9 +464,12 @@ func (i *PDCGetConfigInfoIndication) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		i.Info.BaseVersion, i.Info.BaseVersionKnown = parsed, true
 	}
 	if value, ok := tlv.Value(tlvs, 0x17); ok {
-		parsed, err := decodePDCBytes(value, pdcConfigHeaderMax)
-		if err != nil {
+		var parsed qmiLength8Bytes
+		if err := parsed.UnmarshalBinary(value); err != nil {
 			return err
+		}
+		if len(parsed) > pdcConfigHeaderMax {
+			return fmt.Errorf("value length %d exceeds %d", len(parsed), pdcConfigHeaderMax)
 		}
 		i.Info.Header, i.Info.HeaderKnown = parsed, true
 	}
@@ -1017,20 +1030,6 @@ func decodePDCConfigList(value []byte) ([]PDCConfig, error) {
 	return configs, nil
 }
 
-func decodePDCID(value []byte) ([]byte, error) {
-	if len(value) == 0 {
-		return nil, errors.New("ID length is missing")
-	}
-	length := int(value[0])
-	if length > pdcConfigIDMax {
-		return nil, fmt.Errorf("ID length %d exceeds %d", length, pdcConfigIDMax)
-	}
-	if len(value) != 1+length {
-		return nil, fmt.Errorf("ID TLV length %d, want %d", len(value), 1+length)
-	}
-	return slices.Clone(value[1:]), nil
-}
-
 // UnmarshalTLVs parses the common QMI PDC indication result and token.
 func (result *PDCIndicationResult) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	*result = PDCIndicationResult{}
@@ -1061,20 +1060,6 @@ func decodePDCIndicationToken(tlvs tlv.TLVs) (uint32, bool, error) {
 	return binary.LittleEndian.Uint32(value), true, nil
 }
 
-func decodePDCBytes(value []byte, maximum int) ([]byte, error) {
-	if len(value) == 0 {
-		return nil, errors.New("value length is missing")
-	}
-	length := int(value[0])
-	if length > maximum {
-		return nil, fmt.Errorf("value length %d exceeds %d", length, maximum)
-	}
-	if len(value) != 1+length {
-		return nil, fmt.Errorf("value TLV length %d, want %d", len(value), 1+length)
-	}
-	return slices.Clone(value[1:]), nil
-}
-
 func decodePDCUint32(value []byte) (uint32, error) {
 	if len(value) != 4 {
 		return 0, fmt.Errorf("uint32 TLV length %d, want 4", len(value))
@@ -1082,13 +1067,39 @@ func decodePDCUint32(value []byte) (uint32, error) {
 	return binary.LittleEndian.Uint32(value), nil
 }
 
-func decodePDCUTF16(value []byte) (string, error) {
+type pdcUTF16 string
+
+func (text pdcUTF16) String() string {
+	return string(text)
+}
+
+func (text pdcUTF16) MarshalBinary() ([]byte, error) {
+	if !utf8.ValidString(string(text)) {
+		return nil, errors.New("UTF-16 value is not valid UTF-8")
+	}
+	for _, r := range text {
+		if r == 0 {
+			return nil, errors.New("UTF-16 value contains a NUL character")
+		}
+	}
+	codeUnits := utf16.Encode([]rune(text))
+	if len(codeUnits) > pdcConfigPathMax {
+		return nil, fmt.Errorf("UTF-16 value length %d exceeds %d", len(codeUnits), pdcConfigPathMax)
+	}
+	value := make([]byte, 0, len(codeUnits)*2)
+	for _, codeUnit := range codeUnits {
+		value = binary.LittleEndian.AppendUint16(value, codeUnit)
+	}
+	return value, nil
+}
+
+func (text *pdcUTF16) UnmarshalBinary(value []byte) error {
 	if len(value)%2 != 0 {
-		return "", fmt.Errorf("UTF-16 value has odd byte length %d", len(value))
+		return fmt.Errorf("UTF-16 value has odd byte length %d", len(value))
 	}
 	count := len(value) / 2
 	if count > pdcConfigPathMax {
-		return "", fmt.Errorf("UTF-16 value length %d exceeds %d", count, pdcConfigPathMax)
+		return fmt.Errorf("UTF-16 value length %d exceeds %d", count, pdcConfigPathMax)
 	}
 	codeUnits := make([]uint16, count)
 	for index := range count {
@@ -1097,5 +1108,40 @@ func decodePDCUTF16(value []byte) (string, error) {
 	if len(codeUnits) > 0 && codeUnits[len(codeUnits)-1] == 0 {
 		codeUnits = codeUnits[:len(codeUnits)-1]
 	}
-	return string(utf16.Decode(codeUnits)), nil
+	for index := 0; index < len(codeUnits); index++ {
+		codeUnit := codeUnits[index]
+		if codeUnit == 0 {
+			return errors.New("UTF-16 value contains an embedded NUL character")
+		}
+		switch {
+		case codeUnit >= 0xd800 && codeUnit <= 0xdbff:
+			if index+1 >= len(codeUnits) || codeUnits[index+1] < 0xdc00 || codeUnits[index+1] > 0xdfff {
+				return fmt.Errorf("UTF-16 value contains an unpaired high surrogate at code unit %d", index)
+			}
+			index++
+		case codeUnit >= 0xdc00 && codeUnit <= 0xdfff:
+			return fmt.Errorf("UTF-16 value contains an unpaired low surrogate at code unit %d", index)
+		}
+	}
+	*text = pdcUTF16(string(utf16.Decode(codeUnits)))
+	return nil
+}
+
+func (text pdcUTF16) MarshalText() ([]byte, error) {
+	if _, err := text.MarshalBinary(); err != nil {
+		return nil, err
+	}
+	return []byte(text), nil
+}
+
+func (text *pdcUTF16) UnmarshalText(value []byte) error {
+	if !utf8.Valid(value) {
+		return errors.New("decoding UTF-16 text: value is not valid UTF-8")
+	}
+	decoded := pdcUTF16(string(value))
+	if _, err := decoded.MarshalBinary(); err != nil {
+		return err
+	}
+	*text = decoded
+	return nil
 }

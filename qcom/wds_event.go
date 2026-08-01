@@ -303,14 +303,9 @@ func (e *WDSEventReport) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		e.MIPStatusKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, wdsTLVEventCurrentDataBearer); ok {
-		if len(value) != 9 {
-			return fmt.Errorf("parsing QMI WDS event report: current data bearer TLV length %d, want 9", len(value))
+		if err := e.CurrentDataBearer.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing QMI WDS event report current data bearer: %w", err)
 		}
-		bearer, err := decodeWDSCurrentBearerTechnology(value)
-		if err != nil {
-			return err
-		}
-		e.CurrentDataBearer = bearer
 		e.CurrentDataBearerKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, wdsTLVEventDataCallStatus); ok {
@@ -342,11 +337,9 @@ func (e *WDSEventReport) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		e.EVDOPageMonitorKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, wdsTLVEventDataSystems); ok {
-		dataSystems, err := decodeWDSEventDataSystems(value)
-		if err != nil {
-			return err
+		if err := e.DataSystems.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing QMI WDS event report data systems: %w", err)
 		}
-		e.DataSystems = dataSystems
 		e.DataSystemsKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, wdsTLVEventUplinkFlowControl); ok {
@@ -372,14 +365,9 @@ func (e *WDSEventReport) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		e.RemovedFilterHandlesKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, wdsTLVEventExtendedDataBearer); ok {
-		if len(value) != 16 {
-			return fmt.Errorf("parsing QMI WDS event report: extended data bearer TLV length %d, want 16", len(value))
+		if err := e.ExtendedDataBearer.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing QMI WDS event report extended data bearer: %w", err)
 		}
-		bearer, err := decodeWDSBearerTechnology(value)
-		if err != nil {
-			return err
-		}
-		e.ExtendedDataBearer = bearer
 		e.ExtendedDataBearerKnown = true
 	}
 	return nil
@@ -443,17 +431,30 @@ func (config WDSSetEventReportConfig) MarshalTLVs() (tlv.TLVs, error) {
 	return tlvs, nil
 }
 
-func decodeWDSEventDataSystems(value []byte) (WDSDataSystems, error) {
+func (systems WDSDataSystems) MarshalBinary() ([]byte, error) {
+	if len(systems.Networks) > wdsMaxEventDataSystems {
+		return nil, fmt.Errorf("data systems count %d exceeds maximum %d", len(systems.Networks), wdsMaxEventDataSystems)
+	}
+	value := []byte{byte(systems.Preferred), byte(len(systems.Networks))}
+	for _, network := range systems.Networks {
+		value = append(value, byte(network.Type))
+		value = binary.LittleEndian.AppendUint32(value, network.RATMask)
+		value = binary.LittleEndian.AppendUint32(value, network.ServiceOptionMask)
+	}
+	return value, nil
+}
+
+func (systems *WDSDataSystems) UnmarshalBinary(value []byte) error {
 	if len(value) < 2 {
-		return WDSDataSystems{}, errors.New("parsing QMI WDS event report: data systems header is truncated")
+		return errors.New("data systems header is truncated")
 	}
 	count := int(value[1])
 	if count > wdsMaxEventDataSystems {
-		return WDSDataSystems{}, fmt.Errorf("parsing QMI WDS event report: data systems count %d exceeds maximum %d", count, wdsMaxEventDataSystems)
+		return fmt.Errorf("data systems count %d exceeds maximum %d", count, wdsMaxEventDataSystems)
 	}
 	want := 2 + count*9
 	if len(value) != want {
-		return WDSDataSystems{}, fmt.Errorf("parsing QMI WDS event report: data systems TLV length %d, want %d", len(value), want)
+		return fmt.Errorf("data systems length %d, want %d", len(value), want)
 	}
 	result := WDSDataSystems{
 		Preferred: WDSDataSystemNetworkType(value[0]),
@@ -467,7 +468,8 @@ func decodeWDSEventDataSystems(value []byte) (WDSDataSystems, error) {
 			ServiceOptionMask: binary.LittleEndian.Uint32(value[offset+5 : offset+9]),
 		}
 	}
-	return result, nil
+	*systems = result
+	return nil
 }
 
 func decodeWDSRemovedFilterHandles(value []byte) ([]uint32, error) {

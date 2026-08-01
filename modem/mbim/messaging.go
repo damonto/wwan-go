@@ -20,8 +20,8 @@ func (b *Backend) ListMessages(ctx context.Context) ([]Message, error) {
 	}
 	parts := make([]sms.Part, 0, len(read.PDURecords))
 	for _, record := range read.PDURecords {
-		part, err := sms.DecodePDU(record.PDU)
-		if err != nil {
+		var part sms.Part
+		if err := part.UnmarshalBinary(record.PDU); err != nil {
 			return nil, fmt.Errorf("decoding MBIM message %d: %w", record.MessageIndex, err)
 		}
 		part.Message.ID = record.MessageIndex
@@ -49,8 +49,8 @@ func (b *Backend) ReadMessage(ctx context.Context, id uint32) (Message, error) {
 		return Message{}, fmt.Errorf("reading MBIM message %d: modem returned %d records", id, len(read.PDURecords))
 	}
 	record := read.PDURecords[0]
-	part, err := sms.DecodePDU(record.PDU)
-	if err != nil {
+	var part sms.Part
+	if err := part.UnmarshalBinary(record.PDU); err != nil {
 		return Message{}, fmt.Errorf("decoding MBIM message %d: %w", id, err)
 	}
 	part.Message.ID = record.MessageIndex
@@ -72,7 +72,10 @@ func (b *Backend) SendMessage(ctx context.Context, cfg MessageConfig) (SendResul
 			return SendResult{}, fmt.Errorf("sending MBIM message part %d: %w", len(result.References)+1, err)
 		}
 		result.References = append(result.References, sent.MessageReference)
-		part, _ := sms.DecodePDU(pdu)
+		var part sms.Part
+		if err := part.UnmarshalBinary(pdu); err != nil {
+			return SendResult{}, fmt.Errorf("decoding sent MBIM message part %d: %w", len(result.References), err)
+		}
 		part.Message.MessageReference = sent.MessageReference
 		part.Message.State = MessageStateStoredSent
 		result.Messages = append(result.Messages, sms.CloneMessage(part.Message))
@@ -165,8 +168,8 @@ func (b *Backend) WatchMessages(ctx context.Context) (<-chan Result[Message], er
 					sendError(err)
 					return
 				}
-				part, err := sms.DecodePDU(message.PDU)
-				if err != nil {
+				var part sms.Part
+				if err := part.UnmarshalBinary(message.PDU); err != nil {
 					sendError(fmt.Errorf("decoding MBIM message %d: %w", status.MessageIndex, err))
 					return
 				}
@@ -210,8 +213,8 @@ func flashMessageParts(read mbimproto.SMSReadInfo) ([]sms.Part, error) {
 	}
 	parts := make([]sms.Part, 0, len(read.PDURecords))
 	for i, record := range read.PDURecords {
-		part, err := sms.DecodePDU(record.PDU)
-		if err != nil {
+		var part sms.Part
+		if err := part.UnmarshalBinary(record.PDU); err != nil {
 			return nil, fmt.Errorf("decoding MBIM flash message %d: %w", i+1, err)
 		}
 		part.Message.State = mbimMessageState(record.MessageStatus)

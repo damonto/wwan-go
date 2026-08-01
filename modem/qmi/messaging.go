@@ -33,8 +33,8 @@ func (b *Backend) ListMessages(ctx context.Context) ([]Message, error) {
 			if raw.Format != qcom.WMSMessageFormatGWPointToPoint {
 				continue
 			}
-			part, err := sms.DecodePDU(raw.Data)
-			if err != nil {
+			var part sms.Part
+			if err := part.UnmarshalBinary(raw.Data); err != nil {
 				return nil, fmt.Errorf("decoding QMI message %d: %w", entry.Reference.Index, err)
 			}
 			part.Message.ID = qmiMessageID(entry.Reference)
@@ -68,8 +68,8 @@ func (b *Backend) readStoredMessage(ctx context.Context, reference qcom.WMSMessa
 	if raw.Format != qcom.WMSMessageFormatGWPointToPoint {
 		return Message{}, ErrNotSupported
 	}
-	part, err := sms.DecodePDU(raw.Data)
-	if err != nil {
+	var part sms.Part
+	if err := part.UnmarshalBinary(raw.Data); err != nil {
 		return Message{}, fmt.Errorf("decoding QMI message %d: %w", reference.Index, err)
 	}
 	part.Message.ID = qmiMessageID(reference)
@@ -92,7 +92,10 @@ func (b *Backend) SendMessage(ctx context.Context, cfg MessageConfig) (SendResul
 		}
 		reference := uint32(sent.MessageID)
 		result.References = append(result.References, reference)
-		part, _ := sms.DecodePDU(pdu)
+		var part sms.Part
+		if err := part.UnmarshalBinary(pdu); err != nil {
+			return SendResult{}, fmt.Errorf("decoding sent QMI message part %d: %w", len(result.References), err)
+		}
 		part.Message.MessageReference = reference
 		part.Message.State = MessageStateStoredSent
 		result.Messages = append(result.Messages, sms.CloneMessage(part.Message))
@@ -116,7 +119,10 @@ func (b *Backend) StoreMessage(ctx context.Context, cfg MessageConfig) ([]Messag
 		if err != nil {
 			return nil, fmt.Errorf("storing QMI message part %d: %w", len(result)+1, err)
 		}
-		part, _ := sms.DecodePDU(pdu)
+		var part sms.Part
+		if err := part.UnmarshalBinary(pdu); err != nil {
+			return nil, fmt.Errorf("decoding stored QMI message part %d: %w", len(result)+1, err)
+		}
 		part.Message.ID = qmiMessageID(reference)
 		part.Message.Storage = qmiMessageStorage(reference.Storage)
 		part.Message.Refs = []MessageRef{qmiStoredMessageRef(reference)}
@@ -171,12 +177,12 @@ func (b *Backend) WatchMessages(ctx context.Context) (<-chan Result[Message], er
 			if raw.Format != qcom.WMSMessageFormatGWPointToPoint {
 				continue
 			}
-			part, decodeErr := sms.DecodePDU(raw.Data)
-			if decodeErr != nil {
+			var part sms.Part
+			if err := part.UnmarshalBinary(raw.Data); err != nil {
 				if raw.AckIndicator == qcom.WMSAckRequired {
 					_ = b.client.WMSAcknowledge(ctx, qcom.WMSAckRequest{TransactionID: raw.TransactionID, Protocol: qcom.WMSMessageProtocolWCDMA, Success: false})
 				}
-				sendStreamResult(ctx, out, Result[Message]{Err: decodeErr})
+				sendStreamResult(ctx, out, Result[Message]{Err: err})
 				return
 			}
 			if raw.Stored {

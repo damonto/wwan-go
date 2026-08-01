@@ -1,6 +1,16 @@
 package simfile
 
-import "testing"
+import (
+	"encoding"
+	"fmt"
+	"testing"
+)
+
+var (
+	_ encoding.TextMarshaler   = ServiceProviderName("")
+	_ encoding.TextUnmarshaler = (*ServiceProviderName)(nil)
+	_ fmt.Stringer             = ServiceProviderName("")
+)
 
 func TestServiceProviderNameUnmarshalBinary(t *testing.T) {
 	tests := []struct {

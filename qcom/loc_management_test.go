@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"math"
-	"reflect"
 	"testing"
 	"time"
 
@@ -58,6 +56,14 @@ func TestLOCManagementRequestEncoding(t *testing.T) {
 	deleteSatellitesValue = binary.LittleEndian.AppendUint16(deleteSatellitesValue, 12)
 	deleteSatellitesValue = binary.LittleEndian.AppendUint32(deleteSatellitesValue, uint32(LOCSystemGPS))
 	deleteSatellitesValue = append(deleteSatellitesValue, byte(LOCDeleteSatelliteEphemeris|LOCDeleteSatelliteAlmanac))
+	speedValue, err := speed.MarshalBinary()
+	if err != nil {
+		t.Fatalf("speed MarshalBinary() error = %v", err)
+	}
+	speedUncertaintyValue, err := speedUncertainty.MarshalBinary()
+	if err != nil {
+		t.Fatalf("speed uncertainty MarshalBinary() error = %v", err)
+	}
 
 	tests := []struct {
 		name        string
@@ -142,8 +148,8 @@ func TestLOCManagementRequestEncoding(t *testing.T) {
 				0x21: binary.LittleEndian.AppendUint32(nil, uint32(provider)),
 				0x22: gpsDateTimeValue,
 				0x23: locFloat32Bytes(timeUncertainty),
-				0x24: encodeLOCVector3(speed),
-				0x25: encodeLOCVector3(speedUncertainty),
+				0x24: speedValue,
+				0x25: speedUncertaintyValue,
 				0x26: satellitesUsedValue,
 				0x27: {numberSatellites},
 			},
@@ -429,25 +435,26 @@ func TestLOCManagementClientOperations(t *testing.T) {
 	}
 }
 
-func TestLOCVectorEncoding(t *testing.T) {
+func TestLOCVectorBinaryCodec(t *testing.T) {
 	tests := []struct {
-		name   string
-		vector LOCVector3
-		want   []float32
+		name string
+		want LOCVector3
 	}{
-		{name: "signed components", vector: LOCVector3{East: 1.5, North: -2.25, Up: 0.75}, want: []float32{1.5, -2.25, 0.75}},
+		{name: "signed components", want: LOCVector3{East: 1.5, North: -2.25, Up: 0.75}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			encoded := encodeLOCVector3(tt.vector)
-			got := []float32{
-				math.Float32frombits(binary.LittleEndian.Uint32(encoded[0:4])),
-				math.Float32frombits(binary.LittleEndian.Uint32(encoded[4:8])),
-				math.Float32frombits(binary.LittleEndian.Uint32(encoded[8:12])),
+			encoded, err := tt.want.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
 			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("vector = %v, want %v", got, tt.want)
+			var got LOCVector3
+			if err := got.UnmarshalBinary(encoded); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("vector = %+v, want %+v", got, tt.want)
 			}
 		})
 	}

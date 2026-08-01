@@ -312,12 +312,12 @@ func TestOpenLogicalChannelRequestUnmarshalBinary(t *testing.T) {
 		{
 			name:    "missing length",
 			data:    nil,
-			wantErr: "missing",
+			wantErr: "truncated",
 		},
 		{
 			name:    "truncated aid",
 			data:    []byte{0x02, 0xA0},
-			wantErr: "does not match",
+			wantErr: "value length",
 		},
 		{
 			name:    "aid too long",

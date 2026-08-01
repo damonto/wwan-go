@@ -66,7 +66,7 @@ type DMSSetFirmwarePreferenceRequest struct {
 
 // Request converts the request into a QMI DMS request.
 func (r DMSSetFirmwarePreferenceRequest) Request() (Request, error) {
-	list, err := encodeDMSFirmwareImageList(r.Info.Images)
+	list, err := dmsFirmwareImages(r.Info.Images).MarshalBinary()
 	if err != nil {
 		return Request{}, err
 	}
@@ -111,8 +111,8 @@ func (r *DMSGetFirmwarePreferenceResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	if !ok {
 		return errors.New("parsing QMI DMS firmware preference: image list TLV missing")
 	}
-	images, err := decodeDMSFirmwareImageList(value)
-	if err != nil {
+	var images dmsFirmwareImages
+	if err := images.UnmarshalBinary(value); err != nil {
 		return err
 	}
 	r.Images = images
@@ -511,7 +511,9 @@ func (c *Client) SetFirmwareID(ctx context.Context) error {
 	return nil
 }
 
-func encodeDMSFirmwareImageList(images []DMSFirmwareImage) ([]byte, error) {
+type dmsFirmwareImages []DMSFirmwareImage
+
+func (images dmsFirmwareImages) MarshalBinary() ([]byte, error) {
 	if len(images) > dmsFirmwareImageCountMax {
 		return nil, fmt.Errorf("firmware image count %d exceeds %d", len(images), dmsFirmwareImageCountMax)
 	}
@@ -554,28 +556,29 @@ func (image *DMSFirmwareImage) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
-func decodeDMSFirmwareImageList(value []byte) ([]DMSFirmwareImage, error) {
+func (images *dmsFirmwareImages) UnmarshalBinary(value []byte) error {
 	if len(value) < 1 {
-		return nil, errors.New("parsing QMI DMS firmware image list: image count is missing")
+		return errors.New("firmware image count is missing")
 	}
 	count := int(value[0])
 	if count > dmsFirmwareImageCountMax {
-		return nil, fmt.Errorf("parsing QMI DMS firmware image list: image count %d exceeds %d", count, dmsFirmwareImageCountMax)
+		return fmt.Errorf("firmware image count %d exceeds %d", count, dmsFirmwareImageCountMax)
 	}
 	value = value[1:]
-	images := make([]DMSFirmwareImage, 0, count)
+	decoded := make(dmsFirmwareImages, 0, count)
 	for i := range count {
 		image, rest, err := decodeDMSFirmwareImage(value)
 		if err != nil {
-			return nil, fmt.Errorf("parsing QMI DMS firmware image %d: %w", i, err)
+			return fmt.Errorf("firmware image %d: %w", i, err)
 		}
-		images = append(images, image)
+		decoded = append(decoded, image)
 		value = rest
 	}
 	if len(value) != 0 {
-		return nil, fmt.Errorf("parsing QMI DMS firmware image list: %d trailing bytes", len(value))
+		return fmt.Errorf("firmware image list has %d trailing bytes", len(value))
 	}
-	return images, nil
+	*images = decoded
+	return nil
 }
 
 func decodeDMSFirmwareImage(value []byte) (DMSFirmwareImage, []byte, error) {

@@ -2,7 +2,17 @@ package simfile
 
 import (
 	"bytes"
+	"encoding"
+	"fmt"
 	"testing"
+)
+
+var (
+	_ encoding.BinaryMarshaler   = BCD(nil)
+	_ encoding.BinaryUnmarshaler = (*BCD)(nil)
+	_ encoding.TextMarshaler     = BCD(nil)
+	_ encoding.TextUnmarshaler   = (*BCD)(nil)
+	_ fmt.Stringer               = BCD(nil)
 )
 
 func TestBCD(t *testing.T) {
@@ -40,12 +50,12 @@ func TestBCD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewBCD(tt.text)
-			if err != nil {
-				t.Fatalf("NewBCD() error = %v", err)
+			var got BCD
+			if err := got.UnmarshalText([]byte(tt.text)); err != nil {
+				t.Fatalf("UnmarshalText() error = %v", err)
 			}
 			if !bytes.Equal(got, tt.want) {
-				t.Fatalf("NewBCD() = % X, want % X", got, tt.want)
+				t.Fatalf("UnmarshalText() = % X, want % X", got, tt.want)
 			}
 			if got := got.String(); got != tt.wantText {
 				t.Fatalf("String() = %q, want %q", got, tt.wantText)
@@ -54,7 +64,7 @@ func TestBCD(t *testing.T) {
 	}
 }
 
-func TestNewBCDError(t *testing.T) {
+func TestBCDUnmarshalTextError(t *testing.T) {
 	tests := []struct {
 		name string
 		text string
@@ -64,8 +74,39 @@ func TestNewBCDError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := NewBCD(tt.text); err == nil {
-				t.Fatal("NewBCD() error = nil")
+			var got BCD
+			if err := got.UnmarshalText([]byte(tt.text)); err == nil {
+				t.Fatal("UnmarshalText() error = nil")
+			}
+		})
+	}
+}
+
+func TestBCDBinaryRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "empty", data: []byte{}},
+		{name: "digits", data: []byte{0x21, 0x43, 0xF5}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := bytes.Clone(tt.data)
+			var bcd BCD
+			if err := bcd.UnmarshalBinary(data); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if len(data) != 0 {
+				data[0] ^= 0xFF
+			}
+			got, err := bcd.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(got, tt.data) {
+				t.Fatalf("MarshalBinary() = % X, want % X", got, tt.data)
 			}
 		})
 	}

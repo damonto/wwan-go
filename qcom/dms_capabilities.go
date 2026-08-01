@@ -117,6 +117,24 @@ type DMSSubscriptionVoiceData struct {
 	Concurrent bool
 }
 
+// MarshalBinary encodes one subscription voice/data capability.
+func (capability DMSSubscriptionVoiceData) MarshalBinary() ([]byte, error) {
+	value := binary.LittleEndian.AppendUint32(nil, uint32(capability.Capability))
+	return append(value, boolByte(capability.Concurrent)), nil
+}
+
+// UnmarshalBinary decodes one subscription voice/data capability.
+func (capability *DMSSubscriptionVoiceData) UnmarshalBinary(value []byte) error {
+	if len(value) != 5 {
+		return fmt.Errorf("subscription voice/data capability length %d, want 5", len(value))
+	}
+	*capability = DMSSubscriptionVoiceData{
+		Capability: DMSSubscriptionVoiceDataCapability(binary.LittleEndian.Uint32(value[:4])),
+		Concurrent: value[4] != 0,
+	}
+	return nil
+}
+
 // DMSSubscriptionFeatureMode identifies a modem subscription feature mode.
 type DMSSubscriptionFeatureMode uint32
 
@@ -138,6 +156,24 @@ type DMSMultiSIMCapability struct {
 type DMSIMSCapability struct {
 	Subscription DMSSubscription
 	Enabled      bool
+}
+
+// MarshalBinary encodes one subscription IMS capability.
+func (capability DMSIMSCapability) MarshalBinary() ([]byte, error) {
+	value := binary.LittleEndian.AppendUint32(nil, uint32(capability.Subscription))
+	return append(value, boolByte(capability.Enabled)), nil
+}
+
+// UnmarshalBinary decodes one subscription IMS capability.
+func (capability *DMSIMSCapability) UnmarshalBinary(value []byte) error {
+	if len(value) != 5 {
+		return fmt.Errorf("IMS capability length %d, want 5", len(value))
+	}
+	*capability = DMSIMSCapability{
+		Subscription: DMSSubscription(binary.LittleEndian.Uint32(value[:4])),
+		Enabled:      value[4] != 0,
+	}
+	return nil
 }
 
 // DMSDeviceCapabilities contains the commonly useful QMI DMS device capabilities.
@@ -345,9 +381,8 @@ func parseDMSSubscriptionVoiceData(value []byte) ([]DMSSubscriptionVoiceData, er
 	capabilities := make([]DMSSubscriptionVoiceData, count)
 	for i := range count {
 		offset := 1 + i*5
-		capabilities[i] = DMSSubscriptionVoiceData{
-			Capability: DMSSubscriptionVoiceDataCapability(binary.LittleEndian.Uint32(value[offset : offset+4])),
-			Concurrent: value[offset+4] != 0,
+		if err := capabilities[i].UnmarshalBinary(value[offset : offset+5]); err != nil {
+			return nil, fmt.Errorf("parsing QMI DMS subscription voice/data capability %d: %w", i, err)
 		}
 	}
 	return capabilities, nil
@@ -388,9 +423,8 @@ func parseDMSIMSCapabilities(value []byte) ([]DMSIMSCapability, error) {
 	capabilities := make([]DMSIMSCapability, count)
 	for i := range count {
 		offset := 1 + i*5
-		capabilities[i] = DMSIMSCapability{
-			Subscription: DMSSubscription(binary.LittleEndian.Uint32(value[offset : offset+4])),
-			Enabled:      value[offset+4] != 0,
+		if err := capabilities[i].UnmarshalBinary(value[offset : offset+5]); err != nil {
+			return nil, fmt.Errorf("parsing QMI DMS IMS capability %d: %w", i, err)
 		}
 	}
 	return capabilities, nil

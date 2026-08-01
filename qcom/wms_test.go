@@ -290,15 +290,13 @@ func TestWMSResponseDecoding(t *testing.T) {
 		{
 			name: "SMSC digits truncated",
 			fn: func() error {
-				_, err := decodeWMSSMSCAddress([]byte{'1', '4', '5', 4, '+', '8'})
-				return err
+				return new(WMSSMSCAddress).UnmarshalBinary([]byte{'1', '4', '5', 4, '+', '8'})
 			},
 		},
 		{
 			name: "SMSC trailing data",
 			fn: func() error {
-				_, err := decodeWMSSMSCAddress([]byte{'1', '4', '5', 1, '+', '8'})
-				return err
+				return new(WMSSMSCAddress).UnmarshalBinary([]byte{'1', '4', '5', 1, '+', '8'})
 			},
 		},
 		{
@@ -431,7 +429,7 @@ func TestWMSSendResultDecodingRejectsMalformedOptionalFields(t *testing.T) {
 				return result.unmarshalRawSendTLVs(tlvs)
 			},
 			tlvs:    tlv.TLVs{tlv.Bytes(0x16, []byte{1, 0, 0, 0})},
-			wantErr: "reject cause TLV length 4, want 5",
+			wantErr: "reject cause length 4, want 5",
 		},
 		{
 			name: "send-from-store reject cause",
@@ -440,7 +438,7 @@ func TestWMSSendResultDecodingRejectsMalformedOptionalFields(t *testing.T) {
 				return result.unmarshalSendFromStoreTLVs(tlvs)
 			},
 			tlvs:    tlv.TLVs{tlv.Bytes(0x15, []byte{1, 0, 0, 0})},
-			wantErr: "reject cause TLV length 4, want 5",
+			wantErr: "reject cause length 4, want 5",
 		},
 		{
 			name: "send-from-store delivery cause",

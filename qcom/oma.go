@@ -280,11 +280,9 @@ func (r OMASetFeatureSettingsRequest) Request() Request {
 func (e *OMAEvent) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	*e = OMAEvent{}
 	if value, ok := tlv.Value(tlvs, 0x10); ok {
-		alert, err := decodeOMANetworkInitiatedAlert(value)
-		if err != nil {
+		if err := e.NetworkInitiatedAlert.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI OMA event network-initiated alert: %w", err)
 		}
-		e.NetworkInitiatedAlert = alert
 		e.NetworkInitiatedAlertKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x11); ok {
@@ -336,11 +334,9 @@ func (i *OMASessionInfo) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		i.RetryKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x13); ok {
-		alert, err := decodeOMANetworkInitiatedAlert(value)
-		if err != nil {
+		if err := i.NetworkInitiatedAlert.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI OMA session information network-initiated alert: %w", err)
 		}
-		i.NetworkInitiatedAlert = alert
 		i.NetworkInitiatedAlertKnown = true
 	}
 	return nil
@@ -572,12 +568,18 @@ func validateOMASessionType(sessionType OMASessionType) error {
 	return nil
 }
 
-func decodeOMANetworkInitiatedAlert(value []byte) (OMANetworkInitiatedAlert, error) {
+func (alert OMANetworkInitiatedAlert) MarshalBinary() ([]byte, error) {
+	value := []byte{byte(alert.SessionType)}
+	return binary.LittleEndian.AppendUint16(value, alert.SessionID), nil
+}
+
+func (alert *OMANetworkInitiatedAlert) UnmarshalBinary(value []byte) error {
 	if len(value) != 3 {
-		return OMANetworkInitiatedAlert{}, fmt.Errorf("network-initiated alert TLV length %d, want 3", len(value))
+		return fmt.Errorf("network-initiated alert length %d, want 3", len(value))
 	}
-	return OMANetworkInitiatedAlert{
+	*alert = OMANetworkInitiatedAlert{
 		SessionType: OMASessionType(value[0]),
 		SessionID:   binary.LittleEndian.Uint16(value[1:3]),
-	}, nil
+	}
+	return nil
 }

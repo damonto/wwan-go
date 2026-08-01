@@ -515,17 +515,13 @@ func (r *WDSGetCurrentDataBearerTechnologyResponse) UnmarshalTLVs(tlvs tlv.TLVs)
 	if !ok {
 		return errors.New("parsing QMI WDS current bearer technology: current bearer TLV missing")
 	}
-	current, err := decodeWDSCurrentBearerTechnology(value)
-	if err != nil {
-		return err
+	if err := r.Technology.Current.UnmarshalBinary(value); err != nil {
+		return fmt.Errorf("parsing QMI WDS current bearer technology: %w", err)
 	}
-	r.Technology.Current = current
 	if value, ok := tlv.Value(tlvs, 0x10); ok {
-		last, err := decodeWDSCurrentBearerTechnology(value)
-		if err != nil {
+		if err := r.Technology.Last.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI WDS last bearer technology: %w", err)
 		}
-		r.Technology.Last = last
 		r.Technology.LastKnown = true
 	}
 	return nil
@@ -553,19 +549,15 @@ type WDSGetDataBearerTechnologyExResponse struct {
 func (r *WDSGetDataBearerTechnologyExResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	*r = WDSGetDataBearerTechnologyExResponse{}
 	if value, ok := tlv.Value(tlvs, 0x10); ok {
-		current, err := decodeWDSBearerTechnology(value)
-		if err != nil {
-			return err
+		if err := r.Technology.Current.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing QMI WDS current extended bearer technology: %w", err)
 		}
-		r.Technology.Current = current
 		r.Technology.CurrentKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x11); ok {
-		last, err := decodeWDSBearerTechnology(value)
-		if err != nil {
+		if err := r.Technology.Last.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI WDS last extended bearer technology: %w", err)
 		}
-		r.Technology.Last = last
 		r.Technology.LastKnown = true
 	}
 	return nil
@@ -898,26 +890,40 @@ func (s *PDNSession) wdsControlRequest(ctx context.Context, id MessageID, reques
 	return resp, nil
 }
 
-func decodeWDSCurrentBearerTechnology(value []byte) (WDSCurrentBearerTechnology, error) {
+func (technology WDSCurrentBearerTechnology) MarshalBinary() ([]byte, error) {
+	value := []byte{byte(technology.Network)}
+	value = binary.LittleEndian.AppendUint32(value, technology.RATMask)
+	return binary.LittleEndian.AppendUint32(value, technology.ServiceOptionMask), nil
+}
+
+func (technology *WDSCurrentBearerTechnology) UnmarshalBinary(value []byte) error {
 	if len(value) != 9 {
-		return WDSCurrentBearerTechnology{}, fmt.Errorf("current bearer TLV length %d, want 9", len(value))
+		return fmt.Errorf("current bearer length %d, want 9", len(value))
 	}
-	return WDSCurrentBearerTechnology{
+	*technology = WDSCurrentBearerTechnology{
 		Network:           WDSCurrentBearerNetwork(value[0]),
 		RATMask:           binary.LittleEndian.Uint32(value[1:5]),
 		ServiceOptionMask: binary.LittleEndian.Uint32(value[5:9]),
-	}, nil
+	}
+	return nil
 }
 
-func decodeWDSBearerTechnology(value []byte) (WDSBearerTechnology, error) {
+func (technology WDSBearerTechnology) MarshalBinary() ([]byte, error) {
+	value := binary.LittleEndian.AppendUint32(nil, uint32(technology.Network))
+	value = binary.LittleEndian.AppendUint32(value, uint32(technology.RAT))
+	return binary.LittleEndian.AppendUint64(value, uint64(technology.ServiceOptions)), nil
+}
+
+func (technology *WDSBearerTechnology) UnmarshalBinary(value []byte) error {
 	if len(value) != 16 {
-		return WDSBearerTechnology{}, fmt.Errorf("parsing QMI WDS extended bearer technology: bearer TLV length %d, want 16", len(value))
+		return fmt.Errorf("extended bearer length %d, want 16", len(value))
 	}
-	return WDSBearerTechnology{
+	*technology = WDSBearerTechnology{
 		Network:        WDSBearerNetwork(binary.LittleEndian.Uint32(value[:4])),
 		RAT:            WDSBearerRAT(binary.LittleEndian.Uint32(value[4:8])),
 		ServiceOptions: WDSBearerServiceOptionMask(binary.LittleEndian.Uint64(value[8:16])),
-	}, nil
+	}
+	return nil
 }
 
 func validateWDSSubscription(subscription WDSSubscription) error {

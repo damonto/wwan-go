@@ -142,6 +142,43 @@ func (p NASPLMN) String() string {
 	return fmt.Sprintf("%03d%02d", p.MCC, p.MNC)
 }
 
+// MarshalText encodes the PLMN as five or six decimal digits.
+func (p NASPLMN) MarshalText() ([]byte, error) {
+	if p.MCC > 999 || p.MNC > 999 {
+		return nil, fmt.Errorf("encoding PLMN: MCC %d or MNC %d is out of range", p.MCC, p.MNC)
+	}
+	if p.MNCThreeDigitsKnown && !p.MNCThreeDigits && p.MNC > 99 {
+		return nil, fmt.Errorf("encoding PLMN: two-digit MNC %d is out of range", p.MNC)
+	}
+	return []byte(p.String()), nil
+}
+
+// UnmarshalText decodes a five- or six-digit decimal PLMN.
+func (p *NASPLMN) UnmarshalText(text []byte) error {
+	if len(text) != 5 && len(text) != 6 {
+		return fmt.Errorf("decoding PLMN: value %q must contain 5 or 6 digits", text)
+	}
+	for _, digit := range text {
+		if digit < '0' || digit > '9' {
+			return fmt.Errorf("decoding PLMN: value %q contains a non-decimal character", text)
+		}
+	}
+	decimal := func(digits []byte) uint16 {
+		var value uint16
+		for _, digit := range digits {
+			value = value*10 + uint16(digit-'0')
+		}
+		return value
+	}
+	*p = NASPLMN{
+		MCC:                 decimal(text[:3]),
+		MNC:                 decimal(text[3:]),
+		MNCThreeDigits:      len(text) == 6,
+		MNCThreeDigitsKnown: true,
+	}
+	return nil
+}
+
 // NASCommonSignalInfo contains RSSI and raw ECIO half-dB units.
 type NASCommonSignalInfo struct {
 	RSSI int8
@@ -209,11 +246,9 @@ type NASSignalInfo struct {
 func (r *NASSignalInfo) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	*r = NASSignalInfo{}
 	if value, ok := tlv.Value(tlvs, nasTLVSignalCDMA); ok {
-		common, err := parseNASCommonSignal(value)
-		if err != nil {
+		if err := r.CDMA.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI NAS CDMA signal: %w", err)
 		}
-		r.CDMA = common
 		r.CDMAKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVSignalHDR); ok {
@@ -238,11 +273,9 @@ func (r *NASSignalInfo) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		r.GSMKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVSignalWCDMA); ok {
-		common, err := parseNASCommonSignal(value)
-		if err != nil {
+		if err := r.WCDMA.UnmarshalBinary(value); err != nil {
 			return fmt.Errorf("parsing QMI NAS WCDMA signal: %w", err)
 		}
-		r.WCDMA = common
 		r.WCDMAKnown = true
 	}
 	if value, ok := tlv.Value(tlvs, nasTLVSignalLTE); ok {
@@ -401,9 +434,9 @@ func (r *NASRFBandInfo) UnmarshalIndicationTLVs(tlvs tlv.TLVs) error {
 	}
 	r.Bands = []NASRFBand{band}
 	if value, ok := tlv.Value(tlvs, 0x10); ok {
-		dedicated, err := parseNASRFDedicatedBand(value)
-		if err != nil {
-			return err
+		var dedicated NASRFDedicatedBand
+		if err := dedicated.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing QMI NAS dedicated RF band indication: %w", err)
 		}
 		r.DedicatedBands = []NASRFDedicatedBand{dedicated}
 		r.DedicatedBandsKnown = true
@@ -417,9 +450,9 @@ func (r *NASRFBandInfo) UnmarshalIndicationTLVs(tlvs tlv.TLVs) error {
 		r.Extended = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x12); ok {
-		bandwidth, err := parseNASRFBandwidth(value)
-		if err != nil {
-			return err
+		var bandwidth NASRFBandwidth
+		if err := bandwidth.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing QMI NAS RF bandwidth indication: %w", err)
 		}
 		r.Bandwidths = []NASRFBandwidth{bandwidth}
 		r.BandwidthsKnown = true
@@ -653,14 +686,20 @@ func nasEmptyRequest(clientID uint8, transactionID uint16, timeout time.Duration
 	}
 }
 
-func parseNASCommonSignal(value []byte) (NASCommonSignalInfo, error) {
+func (signal NASCommonSignalInfo) MarshalBinary() ([]byte, error) {
+	value := []byte{byte(signal.RSSI)}
+	return binary.LittleEndian.AppendUint16(value, uint16(signal.ECIO)), nil
+}
+
+func (signal *NASCommonSignalInfo) UnmarshalBinary(value []byte) error {
 	if len(value) != 3 {
-		return NASCommonSignalInfo{}, fmt.Errorf("TLV length %d, want 3", len(value))
+		return fmt.Errorf("common signal length %d, want 3", len(value))
 	}
-	return NASCommonSignalInfo{
+	*signal = NASCommonSignalInfo{
 		RSSI: int8(value[0]),
 		ECIO: int16(binary.LittleEndian.Uint16(value[1:3])),
-	}, nil
+	}
+	return nil
 }
 
 func parseNASRFBands(value []byte, extended bool) ([]NASRFBand, error) {
@@ -692,6 +731,8 @@ func parseNASRFBands(value []byte, extended bool) ([]NASRFBand, error) {
 }
 
 func parseNASRFBand(value []byte, extended bool) (NASRFBand, error) {
+	// The legacy and extended TLVs encode the same semantic value with
+	// different field widths, so NASRFBand has no single binary representation.
 	want := 5
 	if extended {
 		want = 7
@@ -727,23 +768,27 @@ func parseNASRFDedicatedBands(value []byte) ([]NASRFDedicatedBand, error) {
 	bands := make([]NASRFDedicatedBand, count)
 	for i := range count {
 		offset := 1 + i*entryLength
-		band, err := parseNASRFDedicatedBand(value[offset : offset+entryLength])
-		if err != nil {
-			return nil, err
+		if err := bands[i].UnmarshalBinary(value[offset : offset+entryLength]); err != nil {
+			return nil, fmt.Errorf("parsing QMI NAS dedicated RF band %d: %w", i, err)
 		}
-		bands[i] = band
 	}
 	return bands, nil
 }
 
-func parseNASRFDedicatedBand(value []byte) (NASRFDedicatedBand, error) {
+func (band NASRFDedicatedBand) MarshalBinary() ([]byte, error) {
+	value := []byte{byte(band.RadioInterface)}
+	return binary.LittleEndian.AppendUint16(value, uint16(band.Band)), nil
+}
+
+func (band *NASRFDedicatedBand) UnmarshalBinary(value []byte) error {
 	if len(value) != 3 {
-		return NASRFDedicatedBand{}, fmt.Errorf("parsing QMI NAS dedicated RF band aggregate: length %d, want 3", len(value))
+		return fmt.Errorf("dedicated RF band length %d, want 3", len(value))
 	}
-	return NASRFDedicatedBand{
+	*band = NASRFDedicatedBand{
 		RadioInterface: NASRadioInterface(value[0]),
 		Band:           NASActiveBand(binary.LittleEndian.Uint16(value[1:3])),
-	}, nil
+	}
+	return nil
 }
 
 func parseNASRFBandwidths(value []byte) ([]NASRFBandwidth, error) {
@@ -761,26 +806,32 @@ func parseNASRFBandwidths(value []byte) ([]NASRFBandwidth, error) {
 	bandwidths := make([]NASRFBandwidth, count)
 	for i := range count {
 		offset := 1 + i*5
-		bandwidth, err := parseNASRFBandwidth(value[offset : offset+5])
-		if err != nil {
-			return nil, err
+		if err := bandwidths[i].UnmarshalBinary(value[offset : offset+5]); err != nil {
+			return nil, fmt.Errorf("parsing QMI NAS RF bandwidth %d: %w", i, err)
 		}
-		bandwidths[i] = bandwidth
 	}
 	return bandwidths, nil
 }
 
-func parseNASRFBandwidth(value []byte) (NASRFBandwidth, error) {
+func (bandwidth NASRFBandwidth) MarshalBinary() ([]byte, error) {
+	value := []byte{byte(bandwidth.RadioInterface)}
+	return binary.LittleEndian.AppendUint32(value, uint32(bandwidth.Bandwidth)), nil
+}
+
+func (bandwidth *NASRFBandwidth) UnmarshalBinary(value []byte) error {
 	if len(value) != 5 {
-		return NASRFBandwidth{}, fmt.Errorf("parsing QMI NAS RF bandwidth aggregate: length %d, want 5", len(value))
+		return fmt.Errorf("RF bandwidth length %d, want 5", len(value))
 	}
-	return NASRFBandwidth{
+	*bandwidth = NASRFBandwidth{
 		RadioInterface: NASRadioInterface(value[0]),
 		Bandwidth:      NASBandwidth(binary.LittleEndian.Uint32(value[1:5])),
-	}, nil
+	}
+	return nil
 }
 
 func parseNASPLMN(value []byte) (NASPLMN, error) {
+	// This QMI aggregate also carries a description and omits the MNC digit
+	// width, unlike the canonical decimal text form implemented by NASPLMN.
 	if len(value) < 5 {
 		return NASPLMN{}, fmt.Errorf("PLMN aggregate length %d, want at least 5", len(value))
 	}
@@ -797,6 +848,8 @@ func parseNASPLMN(value []byte) (NASPLMN, error) {
 }
 
 func parseNASNetworkTime(value []byte) (NASNetworkTime, error) {
+	// Get Network Time uses this 11-byte aggregate; the indication splits the
+	// same semantic timestamp across a shorter core value and optional TLVs.
 	if len(value) != 11 {
 		return NASNetworkTime{}, fmt.Errorf("TLV length %d, want 11", len(value))
 	}

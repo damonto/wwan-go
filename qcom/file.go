@@ -63,36 +63,86 @@ type RawFileAttributes struct {
 	Raw                []byte
 }
 
+// MarshalBinary encodes raw QMI UIM file attributes.
+func (r RawFileAttributes) MarshalBinary() ([]byte, error) {
+	if len(r.Raw) > 0xffff {
+		return nil, fmt.Errorf("file attributes raw length %d exceeds 65535", len(r.Raw))
+	}
+	value := binary.LittleEndian.AppendUint16(nil, r.FileSize)
+	value = binary.LittleEndian.AppendUint16(value, r.FileID)
+	value = append(value, byte(r.FileType))
+	value = binary.LittleEndian.AppendUint16(value, r.RecordSize)
+	value = binary.LittleEndian.AppendUint16(value, r.RecordCount)
+	for _, security := range []UIMFileSecurity{
+		r.ReadSecurity,
+		r.WriteSecurity,
+		r.IncreaseSecurity,
+		r.DeactivateSecurity,
+		r.ActivateSecurity,
+	} {
+		encoded, err := security.MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("encoding file attributes security: %w", err)
+		}
+		value = append(value, encoded...)
+	}
+	value = binary.LittleEndian.AppendUint16(value, uint16(len(r.Raw)))
+	return append(value, r.Raw...), nil
+}
+
+// UnmarshalBinary decodes raw QMI UIM file attributes.
 func (r *RawFileAttributes) UnmarshalBinary(data []byte) error {
 	if len(data) < 26 {
 		return errors.New("reading file attributes: attributes payload is truncated")
 	}
 
-	r.FileSize = binary.LittleEndian.Uint16(data[:2])
-	r.FileID = binary.LittleEndian.Uint16(data[2:4])
-	r.FileType = QMIFileType(data[4])
-	r.RecordSize = binary.LittleEndian.Uint16(data[5:7])
-	r.RecordCount = binary.LittleEndian.Uint16(data[7:9])
-	r.ReadSecurity = decodeUIMFileSecurity(data[9:12])
-	r.WriteSecurity = decodeUIMFileSecurity(data[12:15])
-	r.IncreaseSecurity = decodeUIMFileSecurity(data[15:18])
-	r.DeactivateSecurity = decodeUIMFileSecurity(data[18:21])
-	r.ActivateSecurity = decodeUIMFileSecurity(data[21:24])
+	parsed := RawFileAttributes{
+		FileSize:    binary.LittleEndian.Uint16(data[:2]),
+		FileID:      binary.LittleEndian.Uint16(data[2:4]),
+		FileType:    QMIFileType(data[4]),
+		RecordSize:  binary.LittleEndian.Uint16(data[5:7]),
+		RecordCount: binary.LittleEndian.Uint16(data[7:9]),
+	}
+	security := []struct {
+		value []byte
+		dst   *UIMFileSecurity
+	}{
+		{data[9:12], &parsed.ReadSecurity},
+		{data[12:15], &parsed.WriteSecurity},
+		{data[15:18], &parsed.IncreaseSecurity},
+		{data[18:21], &parsed.DeactivateSecurity},
+		{data[21:24], &parsed.ActivateSecurity},
+	}
+	for _, field := range security {
+		if err := field.dst.UnmarshalBinary(field.value); err != nil {
+			return fmt.Errorf("reading file attributes security: %w", err)
+		}
+	}
 
 	rawLength := int(binary.LittleEndian.Uint16(data[24:26]))
 	if len(data) != 26+rawLength {
 		return fmt.Errorf("reading file attributes: payload length %d, want %d", len(data), 26+rawLength)
 	}
 
-	r.Raw = slices.Clone(data[26 : 26+rawLength])
+	parsed.Raw = slices.Clone(data[26 : 26+rawLength])
+	*r = parsed
 	return nil
 }
 
-func decodeUIMFileSecurity(data []byte) UIMFileSecurity {
-	return UIMFileSecurity{
+func (security UIMFileSecurity) MarshalBinary() ([]byte, error) {
+	value := []byte{byte(security.Logic)}
+	return binary.LittleEndian.AppendUint16(value, uint16(security.Attributes)), nil
+}
+
+func (security *UIMFileSecurity) UnmarshalBinary(data []byte) error {
+	if len(data) != 3 {
+		return fmt.Errorf("file security length %d, want 3", len(data))
+	}
+	*security = UIMFileSecurity{
 		Logic:      UIMSecurityAttributeLogic(data[0]),
 		Attributes: UIMSecurityAttribute(binary.LittleEndian.Uint16(data[1:])),
 	}
+	return nil
 }
 
 func (c *Client) FileAttributes(ctx context.Context, file File) (FileAttributes, error) {
@@ -145,9 +195,9 @@ func (c *Client) ReadTransparentResult(ctx context.Context, req TransparentRead)
 	if !ok {
 		return UIMTransparentReadResult{}, errors.New("reading transparent file: read result TLV missing")
 	}
-	data, err := decodeLengthPrefixedBytes(value)
-	if err != nil {
-		return UIMTransparentReadResult{}, err
+	var data qmiLength16Bytes
+	if err := data.UnmarshalBinary(value); err != nil {
+		return UIMTransparentReadResult{}, fmt.Errorf("reading transparent file: %w", err)
 	}
 	result := UIMTransparentReadResult{Data: data}
 	if value, ok := tlv.Value(response.TLVs, 0x13); ok {
@@ -199,9 +249,9 @@ func (c *Client) ReadRecords(ctx context.Context, req RecordRead) ([][]byte, err
 	if !ok {
 		return nil, errors.New("reading record file: read result TLV missing")
 	}
-	first, err := decodeLengthPrefixedBytes(value)
-	if err != nil {
-		return nil, err
+	var first qmiLength16Bytes
+	if err := first.UnmarshalBinary(value); err != nil {
+		return nil, fmt.Errorf("reading record file: %w", err)
 	}
 	records := [][]byte{first}
 	additionalValue, ok := tlv.Value(response.TLVs, 0x12)
@@ -211,8 +261,8 @@ func (c *Client) ReadRecords(ctx context.Context, req RecordRead) ([][]byte, err
 		}
 		return records, nil
 	}
-	additional, err := decodeLengthPrefixedBytes(additionalValue)
-	if err != nil {
+	var additional qmiLength16Bytes
+	if err := additional.UnmarshalBinary(additionalValue); err != nil {
 		return nil, fmt.Errorf("reading record file: additional records: %w", err)
 	}
 	if len(first) == 0 || len(additional)%len(first) != 0 {

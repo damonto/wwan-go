@@ -288,7 +288,10 @@ func (r PDSSetAGPSConfigRequest) Request() (Request, error) {
 		if len(*r.Config.URL) > pdsURLMaxLength {
 			return Request{}, fmt.Errorf("encoding QMI PDS A-GPS configuration: URL length %d exceeds %d", len(*r.Config.URL), pdsURLMaxLength)
 		}
-		value := append([]byte{byte(len(*r.Config.URL))}, *r.Config.URL...)
+		value, err := qmiLength8Bytes(*r.Config.URL).MarshalBinary()
+		if err != nil {
+			return Request{}, fmt.Errorf("encoding QMI PDS A-GPS configuration: %w", err)
+		}
 		tlvs = append(tlvs, tlv.Bytes(0x11, value))
 	}
 	if r.Config.NetworkMode != nil {
@@ -439,11 +442,12 @@ func (r *PDSGetAGPSConfigResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		r.Config.Server = &server
 	}
 	if value, ok := tlv.Value(tlvs, 0x11); ok {
-		url, err := decodePDSURL(value)
-		if err != nil {
+		var url qmiLength8Bytes
+		if err := url.UnmarshalBinary(value); err != nil {
 			return err
 		}
-		r.Config.URL = &url
+		decoded := string(url)
+		r.Config.URL = &decoded
 	}
 	return nil
 }
@@ -790,15 +794,4 @@ func (server *PDSAGPSServer) UnmarshalBinary(value []byte) error {
 		Port:    binary.LittleEndian.Uint32(value[4:8]),
 	}
 	return nil
-}
-
-func decodePDSURL(value []byte) (string, error) {
-	if len(value) < 1 {
-		return "", errors.New("parsing QMI PDS A-GPS configuration: URL length is missing")
-	}
-	length := int(value[0])
-	if len(value) != 1+length {
-		return "", fmt.Errorf("parsing QMI PDS A-GPS configuration: URL TLV length %d, want %d", len(value), 1+length)
-	}
-	return string(value[1:]), nil
 }

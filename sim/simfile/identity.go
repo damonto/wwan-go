@@ -16,8 +16,8 @@ func (id ICCID) MarshalBinary() ([]byte, error) {
 	if id == "" {
 		return nil, errors.New("marshaling ICCID: value is too short")
 	}
-	bcd, err := NewBCD(string(id))
-	if err != nil {
+	var bcd BCD
+	if err := bcd.UnmarshalText([]byte(id)); err != nil {
 		return nil, fmt.Errorf("marshaling ICCID: %w", err)
 	}
 	return bcd, nil
@@ -37,8 +37,8 @@ func (id ICCID) MarshalText() ([]byte, error) {
 	if id == "" {
 		return nil, errors.New("marshaling ICCID: value is too short")
 	}
-	bcd, err := NewBCD(string(id))
-	if err != nil {
+	var bcd BCD
+	if err := bcd.UnmarshalText([]byte(id)); err != nil {
 		return nil, fmt.Errorf("marshaling ICCID: %w", err)
 	}
 	return []byte(bcd.String()), nil
@@ -48,8 +48,8 @@ func (id *ICCID) UnmarshalText(text []byte) error {
 	if len(text) == 0 {
 		return errors.New("parsing ICCID: value is too short")
 	}
-	bcd, err := NewBCD(string(text))
-	if err != nil {
+	var bcd BCD
+	if err := bcd.UnmarshalText(text); err != nil {
 		return fmt.Errorf("parsing ICCID: %w", err)
 	}
 
@@ -71,8 +71,8 @@ func (imsi IMSI) MarshalBinary() ([]byte, error) {
 		return nil, fmt.Errorf("marshaling IMSI: %w", err)
 	}
 
-	body, err := NewBCD("9" + imsi.Digits)
-	if err != nil {
+	var body BCD
+	if err := body.UnmarshalText([]byte("9" + imsi.Digits)); err != nil {
 		return nil, fmt.Errorf("marshaling IMSI: %w", err)
 	}
 	if len(body) > 0xFF {
