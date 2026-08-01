@@ -5,15 +5,11 @@ package modem
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
-	"reflect"
+	"path/filepath"
 	"testing"
 	"time"
-
-	mbimproto "github.com/damonto/wwan-go/mbim"
-	qmiproto "github.com/damonto/wwan-go/qcom/qmi"
 )
 
 type testFileInfo struct{}
@@ -27,90 +23,75 @@ func (testFileInfo) Sys() any           { return nil }
 
 type testBackend struct {
 	unsupportedBackend
-	closed bool
 }
 
-func TestOpenProbeSelection(t *testing.T) {
-	probeErr := errors.New("probe rejected")
+func TestOpenUsesDeclaredPortProtocol(t *testing.T) {
+	openErr := errors.New("open rejected")
 	tests := []struct {
 		name          string
-		hint          Protocol
+		portType      PortType
 		requested     Access
+		selected      Access
 		qmiErr        error
 		mbimErr       error
-		wantProtocol  Protocol
-		wantAccess    Access
-		wantAttempts  []Protocol
-		wantOpenError bool
+		wantQMICalls  int
+		wantMBIMCalls int
+		wantErr       bool
 	}{
-		{name: "explicit QMI direct", hint: ProtocolQMI, requested: AccessDirect, wantProtocol: ProtocolQMI, wantAccess: AccessDirect, wantAttempts: []Protocol{ProtocolQMI}},
-		{name: "explicit MBIM proxy", hint: ProtocolMBIM, requested: AccessProxy, wantProtocol: ProtocolMBIM, wantAccess: AccessProxy, wantAttempts: []Protocol{ProtocolMBIM}},
-		{name: "QMI driver auto selects proxy", hint: ProtocolQMI, requested: AccessAuto, wantProtocol: ProtocolQMI, wantAccess: AccessProxy, wantAttempts: []Protocol{ProtocolQMI}},
-		{name: "MBIM driver auto selects direct", hint: ProtocolMBIM, requested: AccessAuto, wantProtocol: ProtocolMBIM, wantAccess: AccessDirect, wantAttempts: []Protocol{ProtocolMBIM}},
-		{name: "unknown falls through to MBIM", hint: ProtocolUnknown, requested: AccessDirect, qmiErr: probeErr, wantProtocol: ProtocolMBIM, wantAccess: AccessDirect, wantAttempts: []Protocol{ProtocolQMI, ProtocolMBIM}},
-		{name: "unknown continues after QMI probe timeout", hint: ProtocolUnknown, requested: AccessDirect, qmiErr: context.DeadlineExceeded, wantProtocol: ProtocolMBIM, wantAccess: AccessDirect, wantAttempts: []Protocol{ProtocolQMI, ProtocolMBIM}},
-		{name: "QMI hint falls back to MBIM", hint: ProtocolQMI, requested: AccessAuto, qmiErr: probeErr, wantProtocol: ProtocolMBIM, wantAccess: AccessProxy, wantAttempts: []Protocol{ProtocolQMI, ProtocolMBIM}},
-		{name: "MBIM hint falls back to QMI", hint: ProtocolMBIM, requested: AccessDirect, mbimErr: probeErr, wantProtocol: ProtocolQMI, wantAccess: AccessDirect, wantAttempts: []Protocol{ProtocolMBIM, ProtocolQMI}},
-		{name: "known hint retains both failures", hint: ProtocolQMI, requested: AccessDirect, qmiErr: probeErr, mbimErr: probeErr, wantAttempts: []Protocol{ProtocolQMI, ProtocolMBIM}, wantOpenError: true},
-		{name: "unknown retains both failures", hint: ProtocolUnknown, requested: AccessDirect, qmiErr: probeErr, mbimErr: probeErr, wantAttempts: []Protocol{ProtocolQMI, ProtocolMBIM}, wantOpenError: true},
+		{name: "QMI direct", portType: PortQMI, requested: AccessDirect, selected: AccessDirect, wantQMICalls: 1},
+		{name: "MBIM proxy", portType: PortMBIM, requested: AccessProxy, selected: AccessProxy, wantMBIMCalls: 1},
+		{name: "QMI auto resolves proxy", portType: PortQMI, requested: AccessAuto, selected: AccessProxy, wantQMICalls: 1},
+		{name: "MBIM auto resolves direct", portType: PortMBIM, requested: AccessAuto, selected: AccessDirect, wantMBIMCalls: 1},
+		{name: "QMI error does not probe MBIM", portType: PortQMI, requested: AccessDirect, selected: AccessDirect, qmiErr: openErr, wantQMICalls: 1, wantErr: true},
+		{name: "MBIM error does not probe QMI", portType: PortMBIM, requested: AccessDirect, selected: AccessDirect, mbimErr: openErr, wantMBIMCalls: 1, wantErr: true},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			oldStat, oldProtocol := statDevice, protocolForNode
+			oldStat := statDevice
 			oldQMI, oldMBIM := openQMIBackend, openMBIMBackend
 			t.Cleanup(func() {
-				statDevice, protocolForNode = oldStat, oldProtocol
+				statDevice = oldStat
 				openQMIBackend, openMBIMBackend = oldQMI, oldMBIM
 			})
 
 			statDevice = func(string) (os.FileInfo, error) { return testFileInfo{}, nil }
-			protocolForNode = func(string) Protocol { return tt.hint }
-			var attempts []Protocol
-			var accesses []Access
-			openQMIBackend = func(_ context.Context, _ string, access Access) (backend, Access, error) {
-				attempts = append(attempts, ProtocolQMI)
-				accesses = append(accesses, access)
-				if tt.qmiErr != nil {
-					return nil, access, tt.qmiErr
+			qmiCalls := 0
+			mbimCalls := 0
+			openQMIBackend = func(_ context.Context, device string, access Access) (backend, Access, error) {
+				qmiCalls++
+				if device != "/dev/cdc-wdm0" || access != tt.requested {
+					t.Errorf("QMI endpoint = (%q, %s), want (/dev/cdc-wdm0, %s)", device, access, tt.requested)
 				}
-				return &testBackend{}, tt.wantAccess, nil
+				return &testBackend{}, tt.selected, tt.qmiErr
 			}
-			openMBIMBackend = func(_ context.Context, _ string, access Access) (backend, Access, error) {
-				attempts = append(attempts, ProtocolMBIM)
-				accesses = append(accesses, access)
-				if tt.mbimErr != nil {
-					return nil, access, tt.mbimErr
+			openMBIMBackend = func(_ context.Context, device string, access Access) (backend, Access, error) {
+				mbimCalls++
+				if device != "/dev/cdc-wdm0" || access != tt.requested {
+					t.Errorf("MBIM endpoint = (%q, %s), want (/dev/cdc-wdm0, %s)", device, access, tt.requested)
 				}
-				return &testBackend{}, tt.wantAccess, nil
+				return &testBackend{}, tt.selected, tt.mbimErr
 			}
 
-			got, err := Open(context.Background(), "/dev/cdc-wdm0", tt.requested)
-			if tt.wantOpenError {
-				var openErr *OpenError
-				if !errors.As(err, &openErr) {
-					t.Fatalf("Open() error = %v, want *OpenError", err)
-				}
-				if !errors.Is(err, probeErr) {
-					t.Errorf("errors.Is(Open(), probeErr) = false")
+			port := Port{Type: tt.portType, Name: "cdc-wdm0", Path: "/dev/cdc-wdm0"}
+			got, err := Open(context.Background(), port, tt.requested)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Open() error = %v, wantErr %t", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if !errors.Is(err, openErr) {
+					t.Fatalf("Open() error = %v, want %v", err, openErr)
 				}
 			} else {
-				if err != nil {
-					t.Fatalf("Open() error = %v", err)
-				}
-				if got.Protocol() != tt.wantProtocol || got.Access() != tt.wantAccess {
-					t.Errorf("Open() = (%s, %s), want (%s, %s)", got.Protocol(), got.Access(), tt.wantProtocol, tt.wantAccess)
+				if got.Port() != port || got.Protocol() != port.Protocol() || got.Access() != tt.selected {
+					t.Errorf("Open() = (%+v, %s, %s), want (%+v, %s, %s)", got.Port(), got.Protocol(), got.Access(), port, port.Protocol(), tt.selected)
 				}
 				if err := got.Close(); err != nil {
 					t.Errorf("Close() error = %v", err)
 				}
 			}
-			if !reflect.DeepEqual(attempts, tt.wantAttempts) {
-				t.Errorf("probe attempts = %v, want %v", attempts, tt.wantAttempts)
-			}
-			for _, access := range accesses {
-				if access != tt.requested {
-					t.Errorf("driver access = %s, want %s", access, tt.requested)
-				}
+			if qmiCalls != tt.wantQMICalls || mbimCalls != tt.wantMBIMCalls {
+				t.Errorf("open calls = (QMI %d, MBIM %d), want (QMI %d, MBIM %d)", qmiCalls, mbimCalls, tt.wantQMICalls, tt.wantMBIMCalls)
 			}
 		})
 	}
@@ -130,64 +111,145 @@ func TestOpenInputValidation(t *testing.T) {
 	tests := []struct {
 		name   string
 		ctx    context.Context
-		device string
+		port   Port
 		access Access
+		wantIs error
 	}{
-		{name: "canceled", ctx: canceled, device: "/dev/null", access: AccessDirect},
-		{name: "empty device", ctx: context.Background(), access: AccessDirect},
-		{name: "invalid access", ctx: context.Background(), device: "/dev/null", access: Access(99)},
-		{name: "regular file", ctx: context.Background(), device: regular.Name(), access: AccessDirect},
-		{name: "missing file", ctx: context.Background(), device: regular.Name() + "-missing", access: AccessDirect},
+		{name: "canceled", ctx: canceled, port: Port{Type: PortQMI, Path: "/dev/null"}, access: AccessDirect, wantIs: context.Canceled},
+		{name: "empty path", ctx: context.Background(), port: Port{Type: PortQMI}, access: AccessDirect},
+		{name: "unknown protocol", ctx: context.Background(), port: Port{Type: PortUnknown, Path: "/dev/null"}, access: AccessDirect, wantIs: ErrProtocolUnknown},
+		{name: "AT port", ctx: context.Background(), port: Port{Type: PortAT, Path: "/dev/null"}, access: AccessDirect, wantIs: ErrProtocolUnknown},
+		{name: "network port", ctx: context.Background(), port: Port{Type: PortNetwork, Path: "/dev/null"}, access: AccessDirect, wantIs: ErrProtocolUnknown},
+		{name: "invalid access", ctx: context.Background(), port: Port{Type: PortQMI, Path: "/dev/null"}, access: Access(99)},
+		{name: "regular file", ctx: context.Background(), port: Port{Type: PortQMI, Path: regular.Name()}, access: AccessDirect},
+		{name: "missing file", ctx: context.Background(), port: Port{Type: PortQMI, Path: regular.Name() + "-missing"}, access: AccessDirect},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := Open(tt.ctx, tt.device, tt.access); err == nil {
+			_, err := Open(tt.ctx, tt.port, tt.access)
+			if err == nil {
 				t.Fatal("Open() error = nil, want non-nil")
+			}
+			if tt.wantIs != nil && !errors.Is(err, tt.wantIs) {
+				t.Errorf("Open() error = %v, want errors.Is(%v)", err, tt.wantIs)
 			}
 		})
 	}
 }
 
-func TestAccessFromDriverOpenError(t *testing.T) {
-	probeErr := errors.New("probe rejected")
+func TestOpenValidatesPortMetadata(t *testing.T) {
 	tests := []struct {
-		name      string
-		requested Access
-		err       error
-		access    func(Access, error) Access
-		want      Access
+		name             string
+		manual           bool
+		createMetadata   bool
+		discoveredDriver string
+		currentProtocol  string
+		currentDriver    string
+		wantErr          bool
+		wantCalls        int
 	}{
 		{
-			name:   "QMI auto proxy",
-			err:    &qmiproto.OpenError{Proxy: true, Err: probeErr},
-			access: qmiAccessFromError,
-			want:   AccessProxy,
+			name:             "metadata matches",
+			createMetadata:   true,
+			discoveredDriver: "qmi_wwan",
+			currentProtocol:  "QMI",
+			currentDriver:    "qmi_wwan",
+			wantCalls:        1,
 		},
 		{
-			name:   "QMI auto direct",
-			err:    fmt.Errorf("wrapped: %w", &qmiproto.OpenError{Err: probeErr}),
-			access: qmiAccessFromError,
-			want:   AccessDirect,
+			name:             "protocol changed",
+			createMetadata:   true,
+			discoveredDriver: "qmi_wwan",
+			currentProtocol:  "MBIM",
+			currentDriver:    "cdc_mbim",
+			wantErr:          true,
 		},
 		{
-			name:   "MBIM auto proxy",
-			err:    &mbimproto.OpenError{Proxy: true, Err: probeErr},
-			access: mbimAccessFromError,
-			want:   AccessProxy,
+			name:             "driver changed",
+			createMetadata:   true,
+			discoveredDriver: "qmi_wwan",
+			currentProtocol:  "QMI",
+			currentDriver:    "cdc_mbim",
+			wantErr:          true,
 		},
 		{
-			name:      "explicit access is preserved",
-			requested: AccessDirect,
-			err:       &mbimproto.OpenError{Proxy: true, Err: probeErr},
-			access:    mbimAccessFromError,
-			want:      AccessDirect,
+			name:             "metadata disappeared",
+			discoveredDriver: "qmi_wwan",
+			wantErr:          true,
+		},
+		{
+			name:             "explicit port skips kernel metadata",
+			manual:           true,
+			discoveredDriver: "qmi_wwan",
+			wantCalls:        1,
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.access(tt.requested, tt.err); got != tt.want {
-				t.Errorf("accessFromError() = %s, want %s", got, tt.want)
+			entryPath := filepath.Join(t.TempDir(), "sys", "class", "usbmisc", "cdc-wdm0")
+			if tt.createMetadata {
+				writePortMetadata(t, entryPath, tt.currentProtocol, tt.currentDriver)
+			}
+			port := Port{
+				Type:   PortQMI,
+				Name:   "cdc-wdm0",
+				Path:   "/dev/cdc-wdm0",
+				Driver: tt.discoveredDriver,
+			}
+			if !tt.manual {
+				port.SysPath = entryPath
+			}
+
+			oldStat, oldQMI := statDevice, openQMIBackend
+			t.Cleanup(func() {
+				statDevice, openQMIBackend = oldStat, oldQMI
+			})
+			statDevice = func(string) (os.FileInfo, error) { return testFileInfo{}, nil }
+			calls := 0
+			openQMIBackend = func(context.Context, string, Access) (backend, Access, error) {
+				calls++
+				return &testBackend{}, AccessDirect, nil
+			}
+
+			got, err := Open(context.Background(), port, AccessDirect)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Open() error = %v, wantErr %t", err, tt.wantErr)
+			}
+			if tt.wantErr && !errors.Is(err, ErrPortChanged) {
+				t.Errorf("Open() error = %v, want errors.Is(ErrPortChanged)", err)
+			}
+			if calls != tt.wantCalls {
+				t.Errorf("QMI open calls = %d, want %d", calls, tt.wantCalls)
+			}
+			if got != nil {
+				if err := got.Close(); err != nil {
+					t.Errorf("Close() error = %v", err)
+				}
 			}
 		})
+	}
+}
+
+func writePortMetadata(t *testing.T, entryPath, protocol, driver string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(entryPath, "device"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if protocol != "" {
+		if err := os.WriteFile(filepath.Join(entryPath, "type"), []byte(protocol+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if driver == "" {
+		return
+	}
+	driverPath := filepath.Join(t.TempDir(), driver)
+	if err := os.MkdirAll(driverPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(driverPath, filepath.Join(entryPath, "device", "driver")); err != nil {
+		t.Fatal(err)
 	}
 }

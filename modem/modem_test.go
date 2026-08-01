@@ -152,7 +152,7 @@ func TestModemPowerState(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := &connectBackend{power: tt.power}
-			modem := newModem("/dev/test", ProtocolQMI, AccessDirect, backend)
+			modem := newModem(Port{Type: PortQMI, Path: "/dev/test"}, AccessDirect, backend)
 			if tt.closed {
 				if err := modem.Close(); err != nil {
 					t.Fatalf("Close() error = %v", err)
@@ -179,7 +179,7 @@ func TestModemClose(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := &lifecycleBackend{}
 			session := &lifecycleSession{value: BearerInfo{Connected: true}}
-			m := newModem("/dev/test", ProtocolQMI, AccessDirect, backend)
+			m := newModem(Port{Type: PortQMI, Path: "/dev/test"}, AccessDirect, backend)
 			bearer := &Bearer{id: 1, modem: m, session: session, done: make(chan struct{})}
 			m.bearers[1] = bearer
 
@@ -208,7 +208,7 @@ func TestBearerCloseStopsWatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := &lifecycleBackend{}
-			m := newModem("/dev/test", ProtocolMBIM, AccessDirect, backend)
+			m := newModem(Port{Type: PortMBIM, Path: "/dev/test"}, AccessDirect, backend)
 			bearer := &Bearer{id: 1, modem: m, session: &lifecycleSession{}, done: make(chan struct{})}
 			m.bearers[1] = bearer
 			stream, err := bearer.Watch(context.Background())
@@ -264,7 +264,7 @@ func TestWatchStatusIncludesOwnedBearers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := &statusWatchBackend{stream: make(chan Result[Status], 1)}
-			m := newModem("/dev/test", ProtocolQMI, AccessDirect, backend)
+			m := newModem(Port{Type: PortQMI, Path: "/dev/test"}, AccessDirect, backend)
 			for id := range tt.bearerCount {
 				bearerID := uint64(id + 1)
 				m.bearers[bearerID] = &Bearer{id: bearerID}
@@ -303,7 +303,7 @@ func TestWatchStatusTracksBearerChanges(t *testing.T) {
 				session:      &lifecycleSession{value: BearerInfo{Connected: true}},
 				statusStream: make(chan Result[Status], 1),
 			}
-			m := newModem("/dev/test", ProtocolQMI, AccessDirect, backend)
+			m := newModem(Port{Type: PortQMI, Path: "/dev/test"}, AccessDirect, backend)
 			stream, err := m.WatchStatus(t.Context())
 			if err != nil {
 				t.Fatalf("WatchStatus() error = %v", err)
@@ -446,7 +446,7 @@ func TestConnectOrchestration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := tt.backend
 			backend.session = &lifecycleSession{value: BearerInfo{Connected: true}}
-			m := newModem("/dev/test", ProtocolQMI, AccessDirect, &backend)
+			m := newModem(Port{Type: PortQMI, Path: "/dev/test"}, AccessDirect, &backend)
 			bearer, err := m.Connect(context.Background(), tt.cfg)
 			if err != nil {
 				t.Fatalf("Connect() error = %v", err)
@@ -474,7 +474,7 @@ func TestSetCapabilitiesUsesCapabilityPrimitive(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := &connectBackend{}
-			m := newModem("/dev/test", ProtocolQMI, AccessDirect, backend)
+			m := newModem(Port{Type: PortQMI, Path: "/dev/test"}, AccessDirect, backend)
 			if err := m.SetCapabilities(context.Background(), tt.want); err != nil {
 				t.Fatalf("SetCapabilities() error = %v", err)
 			}

@@ -50,14 +50,16 @@ func discover(ctx context.Context, sysRoot, devRoot string, requireNode bool) ([
 	for _, device := range devices {
 		result = append(result, cloneDevice(device))
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Path < result[j].Path })
+	sort.Slice(result, func(i, j int) bool {
+		return physicalDeviceKey(result[i]) < physicalDeviceKey(result[j])
+	})
 	return result, nil
 }
 
 func inspectDevice(classPath, devRoot, name string, requireNode bool) (Device, bool, error) {
 	entryPath := filepath.Join(classPath, name)
-	protocol := protocolHint(entryPath, name)
-	if protocol == ProtocolUnknown && !controlNodeName(name) {
+	protocol := kernelProtocol(entryPath)
+	if protocol == ProtocolUnknown {
 		return Device{}, false, nil
 	}
 
@@ -82,12 +84,8 @@ func inspectDevice(classPath, devRoot, name string, requireNode bool) (Device, b
 		return Device{}, false, fmt.Errorf("inspecting modem %s network interfaces: %w", name, err)
 	}
 	return Device{
-		Path:              devicePath,
-		Protocol:          protocol,
-		Driver:            driver,
-		PhysicalPath:      physicalPath,
-		NetworkInterfaces: interfaces,
-		Ports:             devicePorts(name, devicePath, entryPath, driver, protocol, interfaces),
+		PhysicalPath: physicalPath,
+		Ports:        devicePorts(name, devicePath, entryPath, driver, protocol, interfaces),
 	}, true, nil
 }
 
@@ -101,7 +99,7 @@ func devicePorts(name, devicePath, entryPath, driver string, protocol Protocol, 
 	}
 	ports := []Port{{Type: portType, Name: name, Path: devicePath, SysPath: entryPath, Driver: driver}}
 	for _, interfaceName := range interfaces {
-		ports = append(ports, Port{Type: PortNetwork, Name: interfaceName, Driver: driver})
+		ports = append(ports, Port{Type: PortNetwork, Name: interfaceName, Driver: driver, ControlPath: devicePath})
 	}
 	return ports
 }
@@ -165,7 +163,15 @@ func physicalDeviceKey(device Device) string {
 	if device.PhysicalPath != "" {
 		return device.PhysicalPath
 	}
-	return device.Path
+	for _, port := range device.Ports {
+		if port.SysPath != "" {
+			return port.SysPath
+		}
+		if port.Path != "" {
+			return port.Path
+		}
+	}
+	return ""
 }
 
 // physicalDevicePath folds the separate USB interfaces of one modem into the
@@ -195,11 +201,10 @@ func regularFile(path string) bool {
 }
 
 func mergeDevice(current, next Device) Device {
-	if current.Path == "" {
+	if len(current.Ports) == 0 {
 		return normalizeDevice(next)
 	}
 	current.Ports = append(current.Ports, next.Ports...)
-	current.NetworkInterfaces = append(current.NetworkInterfaces, next.NetworkInterfaces...)
 	return normalizeDevice(current)
 }
 
@@ -208,30 +213,27 @@ func normalizeDevice(device Device) Device {
 		if device.Ports[i].Type != device.Ports[j].Type {
 			return device.Ports[i].Type < device.Ports[j].Type
 		}
-		return device.Ports[i].Path < device.Ports[j].Path
+		if device.Ports[i].Path != device.Ports[j].Path {
+			return device.Ports[i].Path < device.Ports[j].Path
+		}
+		if device.Ports[i].Name != device.Ports[j].Name {
+			return device.Ports[i].Name < device.Ports[j].Name
+		}
+		if device.Ports[i].ControlPath != device.Ports[j].ControlPath {
+			return device.Ports[i].ControlPath < device.Ports[j].ControlPath
+		}
+		if device.Ports[i].Driver != device.Ports[j].Driver {
+			return device.Ports[i].Driver < device.Ports[j].Driver
+		}
+		return device.Ports[i].SysPath < device.Ports[j].SysPath
 	})
 	device.Ports = slices.CompactFunc(device.Ports, func(a, b Port) bool {
-		return a.Type == b.Type && a.Name == b.Name && a.Path == b.Path
+		return a.Type == b.Type && a.Name == b.Name && a.Path == b.Path && a.ControlPath == b.ControlPath
 	})
-	sort.Strings(device.NetworkInterfaces)
-	device.NetworkInterfaces = slices.Compact(device.NetworkInterfaces)
-	for _, port := range device.Ports {
-		if port.Type != PortQMI && port.Type != PortMBIM {
-			continue
-		}
-		device.Path = port.Path
-		device.Driver = port.Driver
-		if port.Type == PortQMI {
-			device.Protocol = ProtocolQMI
-		} else {
-			device.Protocol = ProtocolMBIM
-		}
-		break
-	}
 	return device
 }
 
-func protocolHint(entryPath, name string) Protocol {
+func kernelProtocol(entryPath string) Protocol {
 	if value, err := os.ReadFile(filepath.Join(entryPath, "type")); err == nil {
 		switch strings.ToUpper(strings.TrimSpace(string(value))) {
 		case "QMI":
@@ -246,20 +248,7 @@ func protocolHint(entryPath, name string) Protocol {
 	case "cdc_mbim":
 		return ProtocolMBIM
 	}
-	upper := strings.ToUpper(name)
-	switch {
-	case strings.HasSuffix(upper, "QMI"):
-		return ProtocolQMI
-	case strings.HasSuffix(upper, "MBIM"):
-		return ProtocolMBIM
-	default:
-		return ProtocolUnknown
-	}
-}
-
-func controlNodeName(name string) bool {
-	lower := strings.ToLower(name)
-	return strings.HasPrefix(lower, "cdc-wdm") || strings.Contains(lower, "qmi") || strings.Contains(lower, "mbim")
+	return ProtocolUnknown
 }
 
 func symlinkBase(path string) string {
@@ -297,12 +286,11 @@ func networkInterfaces(entryPath string) ([]string, error) {
 }
 
 func cloneDevice(device Device) Device {
-	device.NetworkInterfaces = slices.Clone(device.NetworkInterfaces)
 	device.Ports = slices.Clone(device.Ports)
 	return device
 }
 
-func devicesByPath(devices []Device) map[string]Device {
+func devicesByKey(devices []Device) map[string]Device {
 	result := make(map[string]Device, len(devices))
 	for _, device := range devices {
 		result[physicalDeviceKey(device)] = cloneDevice(device)
@@ -311,7 +299,5 @@ func devicesByPath(devices []Device) map[string]Device {
 }
 
 func sameDevice(a, b Device) bool {
-	return a.Path == b.Path && a.Protocol == b.Protocol && a.Driver == b.Driver &&
-		a.PhysicalPath == b.PhysicalPath && slices.Equal(a.NetworkInterfaces, b.NetworkInterfaces) &&
-		slices.Equal(a.Ports, b.Ports)
+	return a.PhysicalPath == b.PhysicalPath && slices.Equal(a.Ports, b.Ports)
 }

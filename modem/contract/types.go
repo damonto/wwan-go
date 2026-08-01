@@ -200,6 +200,7 @@ const (
 	USSDStateTerminated
 )
 
+// PortType identifies the role of one modem port.
 type PortType uint8
 
 const (
@@ -210,21 +211,33 @@ const (
 	PortNetwork
 )
 
+// Port describes one endpoint exposed by a physical modem.
 type Port struct {
 	Type    PortType
 	Name    string
 	Path    string
 	SysPath string
 	Driver  string
+	// ControlPath identifies the QMI or MBIM device node owning a network port.
+	ControlPath string
 }
 
+// Protocol returns the control protocol carried by the port.
+func (p Port) Protocol() Protocol {
+	switch p.Type {
+	case PortQMI:
+		return ProtocolQMI
+	case PortMBIM:
+		return ProtocolMBIM
+	default:
+		return ProtocolUnknown
+	}
+}
+
+// Device groups all ports exposed by one physical modem.
 type Device struct {
-	Path              string
-	Protocol          Protocol
-	Driver            string
-	PhysicalPath      string
-	NetworkInterfaces []string
-	Ports             []Port
+	PhysicalPath string
+	Ports        []Port
 }
 
 type DeviceEventType uint8

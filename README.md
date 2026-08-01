@@ -48,6 +48,7 @@ at                           AT +CSIM APDU reader
 ccid                         PC/SC CCID APDU reader
 cdcwdm                       Linux cdc-wdm connection primitive
 mbim                         MBIM protocol, proxy/direct dialers, UICC access
+modem                        Linux modem discovery and unified QMI/MBIM operations
 qcom                         QCOM client, QMI service primitives, constants, and transport contracts
 qcom/qmi                     QMI/QMUX transport, proxy/direct dialers
 qcom/qrtr                    QRTR transport for QMI services
@@ -82,6 +83,62 @@ QRTR is a Linux QRTR socket transport:
 
 ```go
 transport, err := qrtr.Open(ctx)
+```
+
+## Modem Discovery
+
+The `modem` package models one physical modem as a collection of ports. QMI
+and MBIM are properties of individual control ports; a physical device does
+not have one implicit protocol or preferred control node.
+
+Linux discovery trusts the WWAN port type or the bound `qmi_wwan`/`cdc_mbim`
+driver. It does not infer protocols from device names and does not send both
+protocols to an unknown control node. `modem.Open` opens and validates only the
+protocol declared by the selected port. Ports returned by `modem.Discover`
+include their sysfs path; before opening, `modem.Open` checks that the kernel
+still reports the same protocol and driver, and returns `modem.ErrPortChanged`
+when a device node has been replaced. Explicitly constructed ports with an empty
+`SysPath` skip this discovery-snapshot check.
+
+Each network port records its owning QMI or MBIM device node in `ControlPath`.
+This keeps data-interface selection unambiguous when one physical modem exposes
+multiple control protocols.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	"github.com/damonto/wwan-go/modem"
+)
+
+func main() {
+	ctx := context.Background()
+
+	devices, err := modem.Discover(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, device := range devices {
+		for _, port := range device.Ports {
+			if port.Protocol() == modem.ProtocolUnknown {
+				continue
+			}
+			opened, err := modem.Open(ctx, port, modem.AccessAuto)
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Printf("opened %s modem on %s", opened.Protocol(), opened.Port().Path)
+			if err := opened.Close(); err != nil {
+				log.Fatal(err)
+			}
+			return
+		}
+	}
+	log.Fatal("no QMI or MBIM control port found")
+}
 ```
 
 ## APDU Readers

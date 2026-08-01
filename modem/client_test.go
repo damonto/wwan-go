@@ -12,17 +12,17 @@ import (
 func TestModemQMIClientUsesResolvedEndpoint(t *testing.T) {
 	tests := []struct {
 		name     string
-		protocol Protocol
+		portType PortType
 		access   Access
 		closed   bool
 		wantErr  bool
 	}{
-		{name: "direct", protocol: ProtocolQMI, access: AccessDirect},
-		{name: "proxy", protocol: ProtocolQMI, access: AccessProxy},
-		{name: "wrong protocol", protocol: ProtocolMBIM, access: AccessDirect, wantErr: true},
-		{name: "unresolved access", protocol: ProtocolQMI, access: AccessAuto, wantErr: true},
-		{name: "invalid access", protocol: ProtocolQMI, access: Access(99), wantErr: true},
-		{name: "closed", protocol: ProtocolQMI, access: AccessDirect, closed: true, wantErr: true},
+		{name: "direct", portType: PortQMI, access: AccessDirect},
+		{name: "proxy", portType: PortQMI, access: AccessProxy},
+		{name: "wrong protocol", portType: PortMBIM, access: AccessDirect, wantErr: true},
+		{name: "unresolved access", portType: PortQMI, access: AccessAuto, wantErr: true},
+		{name: "invalid access", portType: PortQMI, access: Access(99), wantErr: true},
+		{name: "closed", portType: PortQMI, access: AccessDirect, closed: true, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -40,7 +40,7 @@ func TestModemQMIClientUsesResolvedEndpoint(t *testing.T) {
 				return wantClient, nil
 			}
 
-			m := newModem("/dev/cdc-wdm0", tt.protocol, tt.access, unsupportedBackend{})
+			m := newModem(Port{Type: tt.portType, Path: "/dev/cdc-wdm0"}, tt.access, unsupportedBackend{})
 			if tt.closed {
 				if err := m.Close(); err != nil {
 					t.Fatalf("Close() error = %v", err)
@@ -66,17 +66,17 @@ func TestModemQMIClientUsesResolvedEndpoint(t *testing.T) {
 func TestModemMBIMClientUsesResolvedEndpoint(t *testing.T) {
 	tests := []struct {
 		name     string
-		protocol Protocol
+		portType PortType
 		access   Access
 		closed   bool
 		wantErr  bool
 	}{
-		{name: "direct", protocol: ProtocolMBIM, access: AccessDirect},
-		{name: "proxy", protocol: ProtocolMBIM, access: AccessProxy},
-		{name: "wrong protocol", protocol: ProtocolQMI, access: AccessDirect, wantErr: true},
-		{name: "unresolved access", protocol: ProtocolMBIM, access: AccessAuto, wantErr: true},
-		{name: "invalid access", protocol: ProtocolMBIM, access: Access(99), wantErr: true},
-		{name: "closed", protocol: ProtocolMBIM, access: AccessDirect, closed: true, wantErr: true},
+		{name: "direct", portType: PortMBIM, access: AccessDirect},
+		{name: "proxy", portType: PortMBIM, access: AccessProxy},
+		{name: "wrong protocol", portType: PortQMI, access: AccessDirect, wantErr: true},
+		{name: "unresolved access", portType: PortMBIM, access: AccessAuto, wantErr: true},
+		{name: "invalid access", portType: PortMBIM, access: Access(99), wantErr: true},
+		{name: "closed", portType: PortMBIM, access: AccessDirect, closed: true, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -94,7 +94,7 @@ func TestModemMBIMClientUsesResolvedEndpoint(t *testing.T) {
 				return wantClient, nil
 			}
 
-			m := newModem("/dev/cdc-wdm0", tt.protocol, tt.access, unsupportedBackend{})
+			m := newModem(Port{Type: tt.portType, Path: "/dev/cdc-wdm0"}, tt.access, unsupportedBackend{})
 			if tt.closed {
 				if err := m.Close(); err != nil {
 					t.Fatalf("Close() error = %v", err)
@@ -117,16 +117,16 @@ func TestModemMBIMClientUsesResolvedEndpoint(t *testing.T) {
 	}
 }
 
-func TestModemProtocolClientReturnsOpenError(t *testing.T) {
+func TestModemProtocolClientPropagatesOpenError(t *testing.T) {
 	openErr := errors.New("open")
 	tests := []struct {
 		name     string
-		protocol Protocol
+		portType PortType
 		run      func(*Modem) error
 	}{
 		{
 			name:     "QMI",
-			protocol: ProtocolQMI,
+			portType: PortQMI,
 			run: func(m *Modem) error {
 				oldOpen := openModemQMIClient
 				defer func() { openModemQMIClient = oldOpen }()
@@ -139,7 +139,7 @@ func TestModemProtocolClientReturnsOpenError(t *testing.T) {
 		},
 		{
 			name:     "MBIM",
-			protocol: ProtocolMBIM,
+			portType: PortMBIM,
 			run: func(m *Modem) error {
 				oldOpen := openModemMBIMClient
 				defer func() { openModemMBIMClient = oldOpen }()
@@ -154,7 +154,7 @@ func TestModemProtocolClientReturnsOpenError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := newModem("/dev/cdc-wdm0", tt.protocol, AccessDirect, unsupportedBackend{})
+			m := newModem(Port{Type: tt.portType, Path: "/dev/cdc-wdm0"}, AccessDirect, unsupportedBackend{})
 			if err := tt.run(m); !errors.Is(err, openErr) {
 				t.Fatalf("client open error = %v, want %v", err, openErr)
 			}

@@ -24,13 +24,13 @@ func (m *Modem) QMIClient(ctx context.Context, slot uint8) (*qcom.Client, error)
 	if m.closed || m.backend == nil {
 		return nil, ErrClosed
 	}
-	if m.protocol != ProtocolQMI {
-		return nil, fmt.Errorf("opening QMI client: modem protocol is %s", m.protocol)
+	if m.port.Type != PortQMI {
+		return nil, fmt.Errorf("opening QMI client: modem protocol is %s", m.port.Protocol())
 	}
 	if m.access != AccessProxy && m.access != AccessDirect {
 		return nil, unresolvedAccessError("QMI")
 	}
-	return openModemQMIClient(ctx, m.device, m.access, slot)
+	return openModemQMIClient(ctx, m.port.Path, m.access, slot)
 }
 
 // MBIMClient opens an independently owned MBIM client using the modem's
@@ -42,13 +42,13 @@ func (m *Modem) MBIMClient(ctx context.Context, slot uint8) (*mbimproto.Client, 
 	if m.closed || m.backend == nil {
 		return nil, ErrClosed
 	}
-	if m.protocol != ProtocolMBIM {
-		return nil, fmt.Errorf("opening MBIM client: modem protocol is %s", m.protocol)
+	if m.port.Type != PortMBIM {
+		return nil, fmt.Errorf("opening MBIM client: modem protocol is %s", m.port.Protocol())
 	}
 	if m.access != AccessProxy && m.access != AccessDirect {
 		return nil, unresolvedAccessError("MBIM")
 	}
-	return openModemMBIMClient(ctx, m.device, m.access, slot)
+	return openModemMBIMClient(ctx, m.port.Path, m.access, slot)
 }
 
 func openQMIClient(ctx context.Context, device string, access Access, slot uint8) (*qcom.Client, error) {

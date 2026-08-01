@@ -6,9 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -132,9 +132,8 @@ func (q *deviceUeventQueue) take() deviceUeventBatch {
 	return batch
 }
 
-// Discover returns the current QMI/MBIM control-node candidates. A device may
-// have ProtocolUnknown when its kernel metadata is inconclusive; Open will
-// then perform active protocol handshakes.
+// Discover returns physical modems with the QMI and MBIM control ports
+// identified by Linux WWAN metadata or the bound kernel driver.
 func Discover(ctx context.Context) ([]Device, error) {
 	return discover(ctx, defaultSysRoot, defaultDevRoot, true)
 }
@@ -176,7 +175,7 @@ func openUeventSocket() (int, error) {
 func watchDevices(ctx context.Context, fd int, initial []Device, out chan<- Result[DeviceEvent]) {
 	defer close(out)
 
-	current := devicesByPath(initial)
+	current := devicesByKey(initial)
 	readerCtx, cancelReader := context.WithCancel(ctx)
 	queue := newDeviceUeventQueue()
 	readerDone := make(chan struct{})
@@ -314,43 +313,34 @@ func waitUeventSettle(ctx context.Context) bool {
 }
 
 func reconcileDeviceEvents(current map[string]Device, removals []kernelUevent, next []Device) (map[string]Device, []DeviceEvent) {
-	events := make([]DeviceEvent, 0, len(removals)+len(next))
+	nextByKey := devicesByKey(next)
+	reconnected := make(map[string]struct{})
+	// Re-created control nodes invalidate existing file descriptors even when
+	// the settled discovery snapshot is otherwise identical.
 	for _, removal := range removals {
-		events = append(events, removeControlDevice(current, removal)...)
-	}
-	nextByPath := devicesByPath(next)
-	events = append(events, diffDevices(current, nextByPath)...)
-	return nextByPath, slices.Clip(events)
-}
-
-func removeControlDevice(current map[string]Device, event kernelUevent) []DeviceEvent {
-	name := event.controlNodeName()
-	if name == "" || name == "." {
-		return nil
-	}
-	paths := make([]string, 0, len(current))
-	for path := range current {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-
-	var events []DeviceEvent
-	for _, path := range paths {
-		device := current[path]
-		if !deviceHasControlNode(device, name) {
+		name := removal.controlNodeName()
+		if name == "" || name == "." {
 			continue
 		}
-		events = append(events, DeviceEvent{Type: DeviceRemoved, Device: cloneDevice(device)})
-		delete(current, path)
+		for key, before := range current {
+			after, exists := nextByKey[key]
+			if !exists {
+				continue
+			}
+			if !deviceHasControlNode(before, name) || !deviceHasControlNode(after, name) {
+				continue
+			}
+			reconnected[key] = struct{}{}
+		}
 	}
-	return slices.Clip(events)
+	return nextByKey, diffDevices(current, nextByKey, reconnected)
 }
 
 func deviceHasControlNode(device Device, name string) bool {
-	if filepath.Base(strings.TrimSpace(device.Path)) == name {
-		return true
-	}
 	for _, port := range device.Ports {
+		if port.Protocol() == ProtocolUnknown {
+			continue
+		}
 		if strings.TrimSpace(port.Name) == name || filepath.Base(strings.TrimSpace(port.Path)) == name || filepath.Base(strings.TrimSpace(port.SysPath)) == name {
 			return true
 		}
@@ -358,29 +348,30 @@ func deviceHasControlNode(device Device, name string) bool {
 	return false
 }
 
-func diffDevices(current, next map[string]Device) []DeviceEvent {
-	paths := make([]string, 0, len(current)+len(next))
+func diffDevices(current, next map[string]Device, reconnected map[string]struct{}) []DeviceEvent {
 	seen := make(map[string]struct{}, len(current)+len(next))
-	for path := range current {
-		seen[path] = struct{}{}
+	for key := range current {
+		seen[key] = struct{}{}
 	}
-	for path := range next {
-		seen[path] = struct{}{}
+	for key := range next {
+		seen[key] = struct{}{}
 	}
-	for path := range seen {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
 
-	events := make([]DeviceEvent, 0)
-	for _, path := range paths {
-		before, existed := current[path]
-		after, exists := next[path]
+	events := make([]DeviceEvent, 0, len(seen)+len(reconnected))
+	for _, key := range slices.Sorted(maps.Keys(seen)) {
+		before, existed := current[key]
+		after, exists := next[key]
+		_, reconnect := reconnected[key]
 		switch {
 		case !existed && exists:
 			events = append(events, DeviceEvent{Type: DeviceAdded, Device: cloneDevice(after)})
 		case existed && !exists:
 			events = append(events, DeviceEvent{Type: DeviceRemoved, Device: cloneDevice(before)})
+		case existed && exists && reconnect:
+			events = append(events,
+				DeviceEvent{Type: DeviceRemoved, Device: cloneDevice(before)},
+				DeviceEvent{Type: DeviceAdded, Device: cloneDevice(after)},
+			)
 		case existed && exists && !sameDevice(before, after):
 			events = append(events, DeviceEvent{Type: DeviceChanged, Device: cloneDevice(after)})
 		}

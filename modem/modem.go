@@ -18,8 +18,7 @@ const connectPollInterval = 250 * time.Millisecond
 type Modem struct {
 	mu             sync.RWMutex
 	backend        backend
-	device         string
-	protocol       Protocol
+	port           Port
 	access         Access
 	closed         bool
 	done           chan struct{}
@@ -30,11 +29,10 @@ type Modem struct {
 	closeErr       error
 }
 
-func newModem(device string, protocol Protocol, access Access, b backend) *Modem {
+func newModem(port Port, access Access, b backend) *Modem {
 	return &Modem{
 		backend:        b,
-		device:         device,
-		protocol:       protocol,
+		port:           port,
 		access:         access,
 		done:           make(chan struct{}),
 		bearers:        make(map[uint64]*Bearer),
@@ -42,10 +40,13 @@ func newModem(device string, protocol Protocol, access Access, b backend) *Modem
 	}
 }
 
-func (m *Modem) Device() string { return m.device }
+// Port returns the control port opened by the modem.
+func (m *Modem) Port() Port { return m.port }
 
-func (m *Modem) Protocol() Protocol { return m.protocol }
+// Protocol returns the control protocol carried by the opened port.
+func (m *Modem) Protocol() Protocol { return m.port.Protocol() }
 
+// Access returns the resolved direct or proxy access method.
 func (m *Modem) Access() Access { return m.access }
 
 func (m *Modem) Close() error {
@@ -555,7 +556,7 @@ func (m *Modem) Connect(ctx context.Context, cfg ConnectConfig) (*Bearer, error)
 	if err != nil {
 		return nil, err
 	}
-	interfaceName, err := selectNetworkInterface(ctx, m.device, cfg.Interface)
+	interfaceName, err := selectNetworkInterface(ctx, m.port.Path, cfg.Interface)
 	if err != nil {
 		return nil, err
 	}

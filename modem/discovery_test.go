@@ -20,6 +20,9 @@ func TestDiscoverFixture(t *testing.T) {
 	}
 	addDiscoveryFixture(t, sysRoot, "wwan", "wwan0qmi", "QMI", "qmi_wwan", []string{"wwan0"})
 	addDiscoveryFixture(t, sysRoot, "usbmisc", "cdc-wdm1", "MBIM", "cdc_mbim", []string{"wwan1", "wwan1.1"})
+	if err := os.MkdirAll(filepath.Join(sysRoot, "class", "usbmisc", "cdc-wdm9", "device"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	devices, err := discover(context.Background(), sysRoot, devRoot, false)
 	if err != nil {
@@ -29,33 +32,54 @@ func TestDiscoverFixture(t *testing.T) {
 		t.Fatalf("len(devices) = %d, want 2", len(devices))
 	}
 	tests := []struct {
-		name       string
-		index      int
-		protocol   Protocol
-		driver     string
-		interfaces []string
+		name  string
+		index int
+		ports []Port
 	}{
-		{name: "MBIM", index: 0, protocol: ProtocolMBIM, driver: "cdc_mbim", interfaces: []string{"wwan1", "wwan1.1"}},
-		{name: "QMI", index: 1, protocol: ProtocolQMI, driver: "qmi_wwan", interfaces: []string{"wwan0"}},
+		{
+			name:  "MBIM",
+			index: 0,
+			ports: []Port{
+				{Type: PortMBIM, Name: "cdc-wdm1", Path: filepath.Join(devRoot, "cdc-wdm1"), SysPath: filepath.Join(sysRoot, "class", "usbmisc", "cdc-wdm1"), Driver: "cdc_mbim"},
+				{Type: PortNetwork, Name: "wwan1", Driver: "cdc_mbim", ControlPath: filepath.Join(devRoot, "cdc-wdm1")},
+				{Type: PortNetwork, Name: "wwan1.1", Driver: "cdc_mbim", ControlPath: filepath.Join(devRoot, "cdc-wdm1")},
+			},
+		},
+		{
+			name:  "QMI",
+			index: 1,
+			ports: []Port{
+				{Type: PortQMI, Name: "wwan0qmi", Path: filepath.Join(devRoot, "wwan0qmi"), SysPath: filepath.Join(sysRoot, "class", "wwan", "wwan0qmi"), Driver: "qmi_wwan"},
+				{Type: PortNetwork, Name: "wwan0", Driver: "qmi_wwan", ControlPath: filepath.Join(devRoot, "wwan0qmi")},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			device := devices[tt.index]
-			if device.Protocol != tt.protocol || device.Driver != tt.driver || !reflect.DeepEqual(device.NetworkInterfaces, tt.interfaces) {
-				t.Errorf("device = %+v, want protocol %s driver %s interfaces %v", device, tt.protocol, tt.driver, tt.interfaces)
+			if !reflect.DeepEqual(device.Ports, tt.ports) {
+				t.Errorf("device ports = %#v, want %#v", device.Ports, tt.ports)
 			}
 		})
 	}
 }
 
-func TestDiscoverAggregatesUSBControlAndATPorts(t *testing.T) {
+func TestDiscoverAggregatesUSBPortsWithoutSelectingOne(t *testing.T) {
 	root := t.TempDir()
 	sysRoot := filepath.Join(root, "sys")
 	devRoot := filepath.Join(root, "dev")
 	usbDevice := filepath.Join(sysRoot, "devices", "pci0000:00", "usb1", "1-2")
-	controlInterface := filepath.Join(usbDevice, "1-2:1.4")
+	qmiInterface := filepath.Join(usbDevice, "1-2:1.4")
+	mbimInterface := filepath.Join(usbDevice, "1-2:1.5")
 	atInterface := filepath.Join(usbDevice, "1-2:1.2")
-	for _, path := range []string{controlInterface, atInterface, filepath.Join(sysRoot, "class", "usbmisc"), filepath.Join(sysRoot, "class", "tty")} {
+	for _, path := range []string{
+		filepath.Join(qmiInterface, "net", "wwan0"),
+		filepath.Join(mbimInterface, "net", "wwan1"),
+		atInterface,
+		filepath.Join(sysRoot, "class", "wwan"),
+		filepath.Join(sysRoot, "class", "usbmisc"),
+		filepath.Join(sysRoot, "class", "tty"),
+	} {
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -65,14 +89,24 @@ func TestDiscoverAggregatesUSBControlAndATPorts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	controlEntry := filepath.Join(sysRoot, "class", "usbmisc", "cdc-wdm0")
-	if err := os.MkdirAll(controlEntry, 0o755); err != nil {
+	qmiEntry := filepath.Join(sysRoot, "class", "usbmisc", "cdc-wdm0")
+	if err := os.MkdirAll(qmiEntry, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(controlEntry, "type"), []byte("QMI\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(qmiEntry, "type"), []byte("QMI\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(controlInterface, filepath.Join(controlEntry, "device")); err != nil {
+	if err := os.Symlink(qmiInterface, filepath.Join(qmiEntry, "device")); err != nil {
+		t.Fatal(err)
+	}
+	mbimEntry := filepath.Join(sysRoot, "class", "wwan", "wwan0mbim0")
+	if err := os.MkdirAll(mbimEntry, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mbimEntry, "type"), []byte("MBIM\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(mbimInterface, filepath.Join(mbimEntry, "device")); err != nil {
 		t.Fatal(err)
 	}
 	atEntry := filepath.Join(sysRoot, "class", "tty", "ttyUSB2")
@@ -95,65 +129,138 @@ func TestDiscoverAggregatesUSBControlAndATPorts(t *testing.T) {
 		t.Fatalf("PhysicalPath = %q, want %q", device.PhysicalPath, usbDevice)
 	}
 	wantPorts := []Port{
-		{Type: PortQMI, Name: "cdc-wdm0", Path: filepath.Join(devRoot, "cdc-wdm0"), SysPath: controlEntry},
+		{Type: PortQMI, Name: "cdc-wdm0", Path: filepath.Join(devRoot, "cdc-wdm0"), SysPath: qmiEntry},
+		{Type: PortMBIM, Name: "wwan0mbim0", Path: filepath.Join(devRoot, "wwan0mbim0"), SysPath: mbimEntry},
 		{Type: PortAT, Name: "ttyUSB2", Path: filepath.Join(devRoot, "ttyUSB2"), SysPath: atEntry},
+		{Type: PortNetwork, Name: "wwan0", ControlPath: filepath.Join(devRoot, "cdc-wdm0")},
+		{Type: PortNetwork, Name: "wwan1", ControlPath: filepath.Join(devRoot, "wwan0mbim0")},
 	}
 	if !reflect.DeepEqual(device.Ports, wantPorts) {
 		t.Fatalf("Ports = %#v, want %#v", device.Ports, wantPorts)
 	}
 }
 
+func TestKernelProtocolUsesMetadataOnly(t *testing.T) {
+	tests := []struct {
+		name      string
+		typeValue string
+		driver    string
+		entryName string
+		want      Protocol
+	}{
+		{name: "WWAN QMI type", typeValue: "QMI\n", entryName: "port0", want: ProtocolQMI},
+		{name: "WWAN MBIM type", typeValue: "MBIM\n", entryName: "port0", want: ProtocolMBIM},
+		{name: "WWAN type takes priority", typeValue: "QMI\n", driver: "cdc_mbim", entryName: "port0", want: ProtocolQMI},
+		{name: "QMI driver", driver: "qmi_wwan", entryName: "cdc-wdm0", want: ProtocolQMI},
+		{name: "MBIM driver", driver: "cdc_mbim", entryName: "cdc-wdm0", want: ProtocolMBIM},
+		{name: "misleading QMI name", entryName: "definitely-qmi", want: ProtocolUnknown},
+		{name: "misleading MBIM name", entryName: "definitely-mbim", want: ProtocolUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			entry := filepath.Join(root, tt.entryName)
+			if err := os.MkdirAll(filepath.Join(entry, "device"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tt.typeValue != "" {
+				if err := os.WriteFile(filepath.Join(entry, "type"), []byte(tt.typeValue), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.driver != "" {
+				driverTarget := filepath.Join(root, "drivers", tt.driver)
+				if err := os.MkdirAll(driverTarget, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(driverTarget, filepath.Join(entry, "device", "driver")); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if got := kernelProtocol(entry); got != tt.want {
+				t.Errorf("kernelProtocol() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDiffDevices(t *testing.T) {
-	current := devicesByPath([]Device{
-		{Path: "/dev/a", Protocol: ProtocolQMI},
-		{Path: "/dev/b", Protocol: ProtocolMBIM},
+	current := devicesByKey([]Device{
+		{PhysicalPath: "/sys/a", Ports: []Port{{Type: PortQMI, Path: "/dev/a"}}},
+		{PhysicalPath: "/sys/b", Ports: []Port{{Type: PortMBIM, Path: "/dev/b"}}},
 	})
-	next := devicesByPath([]Device{
-		{Path: "/dev/b", Protocol: ProtocolMBIM, NetworkInterfaces: []string{"wwan0"}},
-		{Path: "/dev/c", Protocol: ProtocolQMI},
+	next := devicesByKey([]Device{
+		{PhysicalPath: "/sys/b", Ports: []Port{{Type: PortMBIM, Path: "/dev/b"}, {Type: PortNetwork, Name: "wwan0"}}},
+		{PhysicalPath: "/sys/c", Ports: []Port{{Type: PortQMI, Path: "/dev/c"}}},
 	})
 	want := []DeviceEvent{
-		{Type: DeviceRemoved, Device: Device{Path: "/dev/a", Protocol: ProtocolQMI}},
-		{Type: DeviceChanged, Device: Device{Path: "/dev/b", Protocol: ProtocolMBIM, NetworkInterfaces: []string{"wwan0"}}},
-		{Type: DeviceAdded, Device: Device{Path: "/dev/c", Protocol: ProtocolQMI}},
+		{Type: DeviceRemoved, Device: Device{PhysicalPath: "/sys/a", Ports: []Port{{Type: PortQMI, Path: "/dev/a"}}}},
+		{Type: DeviceChanged, Device: Device{PhysicalPath: "/sys/b", Ports: []Port{{Type: PortMBIM, Path: "/dev/b"}, {Type: PortNetwork, Name: "wwan0"}}}},
+		{Type: DeviceAdded, Device: Device{PhysicalPath: "/sys/c", Ports: []Port{{Type: PortQMI, Path: "/dev/c"}}}},
 	}
-	if got := diffDevices(current, next); !reflect.DeepEqual(got, want) {
+	if got := diffDevices(current, next, nil); !reflect.DeepEqual(got, want) {
 		t.Errorf("diffDevices() = %#v, want %#v", got, want)
 	}
 }
 
-func TestReconcileDeviceEventsPreservesSamePathReconnect(t *testing.T) {
+func TestReconcileDeviceEventsUsesPhysicalDeviceSemantics(t *testing.T) {
+	qmiPort := Port{Type: PortQMI, Name: "cdc-wdm0", Path: "/dev/cdc-wdm0", SysPath: "/sys/class/usbmisc/cdc-wdm0"}
+	mbimPort := Port{Type: PortMBIM, Name: "wwan0mbim0", Path: "/dev/wwan0mbim0", SysPath: "/sys/class/wwan/wwan0mbim0"}
 	tests := []struct {
-		name    string
-		current Device
-		removal kernelUevent
+		name     string
+		current  Device
+		removals []kernelUevent
+		next     []Device
+		want     []DeviceEvent
 	}{
 		{
-			name: "usbmisc control node",
-			current: Device{
-				Path:         "/dev/cdc-wdm0",
-				PhysicalPath: "/sys/devices/modem-1",
-				Protocol:     ProtocolQMI,
-				Ports: []Port{
-					{Type: PortQMI, Name: "cdc-wdm0", Path: "/dev/cdc-wdm0", SysPath: "/sys/class/usbmisc/cdc-wdm0"},
-				},
+			name:     "same control port reconnects",
+			current:  Device{PhysicalPath: "/sys/devices/modem-1", Ports: []Port{qmiPort}},
+			removals: []kernelUevent{{action: "remove", subsystem: "usbmisc", devName: "cdc-wdm0"}},
+			next:     []Device{{PhysicalPath: "/sys/devices/modem-1", Ports: []Port{qmiPort}}},
+			want: []DeviceEvent{
+				{Type: DeviceRemoved, Device: Device{PhysicalPath: "/sys/devices/modem-1", Ports: []Port{qmiPort}}},
+				{Type: DeviceAdded, Device: Device{PhysicalPath: "/sys/devices/modem-1", Ports: []Port{qmiPort}}},
 			},
-			removal: kernelUevent{action: "remove", subsystem: "usbmisc", devName: "cdc-wdm0"},
+		},
+		{
+			name:     "one of multiple control ports disappears",
+			current:  Device{PhysicalPath: "/sys/devices/modem-1", Ports: []Port{qmiPort, mbimPort}},
+			removals: []kernelUevent{{action: "remove", subsystem: "usbmisc", devName: "cdc-wdm0"}},
+			next:     []Device{{PhysicalPath: "/sys/devices/modem-1", Ports: []Port{mbimPort}}},
+			want:     []DeviceEvent{{Type: DeviceChanged, Device: Device{PhysicalPath: "/sys/devices/modem-1", Ports: []Port{mbimPort}}}},
+		},
+		{
+			name:     "last control port disappears",
+			current:  Device{PhysicalPath: "/sys/devices/modem-1", Ports: []Port{qmiPort}},
+			removals: []kernelUevent{{action: "remove", subsystem: "usbmisc", devName: "cdc-wdm0"}},
+			want:     []DeviceEvent{{Type: DeviceRemoved, Device: Device{PhysicalPath: "/sys/devices/modem-1", Ports: []Port{qmiPort}}}},
+		},
+		{
+			name:    "multiple control ports reconnect once",
+			current: Device{PhysicalPath: "/sys/devices/modem-1", Ports: []Port{qmiPort, mbimPort}},
+			removals: []kernelUevent{
+				{action: "remove", subsystem: "usbmisc", devName: "cdc-wdm0"},
+				{action: "remove", subsystem: "wwan", devName: "wwan0mbim0"},
+			},
+			next: []Device{{PhysicalPath: "/sys/devices/modem-1", Ports: []Port{qmiPort, mbimPort}}},
+			want: []DeviceEvent{
+				{Type: DeviceRemoved, Device: Device{PhysicalPath: "/sys/devices/modem-1", Ports: []Port{qmiPort, mbimPort}}},
+				{Type: DeviceAdded, Device: Device{PhysicalPath: "/sys/devices/modem-1", Ports: []Port{qmiPort, mbimPort}}},
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			current := devicesByPath([]Device{tt.current})
-			next, got := reconcileDeviceEvents(current, []kernelUevent{tt.removal}, []Device{tt.current})
-			want := []DeviceEvent{
-				{Type: DeviceRemoved, Device: tt.current},
-				{Type: DeviceAdded, Device: tt.current},
+			current := devicesByKey([]Device{tt.current})
+			next, got := reconcileDeviceEvents(current, tt.removals, tt.next)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("reconcileDeviceEvents() events = %#v, want %#v", got, tt.want)
 			}
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("reconcileDeviceEvents() events = %#v, want %#v", got, want)
-			}
-			if !reflect.DeepEqual(next, devicesByPath([]Device{tt.current})) {
+			if !reflect.DeepEqual(next, devicesByKey(tt.next)) {
 				t.Fatalf("reconcileDeviceEvents() current = %#v, want final device", next)
 			}
 		})

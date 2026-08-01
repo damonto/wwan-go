@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	mbimproto "github.com/damonto/wwan-go/mbim"
 	modemmbim "github.com/damonto/wwan-go/modem/mbim"
@@ -17,89 +16,77 @@ import (
 	qmiproto "github.com/damonto/wwan-go/qcom/qmi"
 )
 
-const probeTimeout = 5 * time.Second
-
 var (
 	statDevice      = os.Stat
-	protocolForNode = systemProtocolForNode
 	openQMIBackend  = openQMI
 	openMBIMBackend = openMBIM
 )
 
-// Open detects the control protocol and opens deviceNode through the selected
-// access method. It does not start a background state machine.
-func Open(ctx context.Context, deviceNode string, access Access) (*Modem, error) {
-	if err := validateOpenInput(ctx, deviceNode, access); err != nil {
+// Open opens a QMI or MBIM control port through the selected access method.
+// The port protocol must come from kernel discovery or be set explicitly by
+// the caller. Open never probes or falls back to another protocol.
+func Open(ctx context.Context, port Port, access Access) (*Modem, error) {
+	if err := validateOpenInput(ctx, port, access); err != nil {
 		return nil, err
 	}
 
-	hint := protocolForNode(deviceNode)
-	protocols := protocolProbeOrder(hint)
-
-	openErr := &OpenError{Device: deviceNode}
-	for _, protocol := range protocols {
-		probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-		var b backend
-		selected := access
-		var err error
-		switch protocol {
-		case ProtocolQMI:
-			b, selected, err = openQMIBackend(probeCtx, deviceNode, access)
-		case ProtocolMBIM:
-			b, selected, err = openMBIMBackend(probeCtx, deviceNode, access)
-		}
-		cancel()
-		if err == nil {
-			return newModem(deviceNode, protocol, selected, b), nil
-		}
-		openErr.Attempts = append(openErr.Attempts, ProbeError{Protocol: protocol, Access: selected, Err: err})
-		if ctx.Err() != nil {
-			return nil, openErr
-		}
+	var b backend
+	selected := access
+	var err error
+	switch port.Type {
+	case PortQMI:
+		b, selected, err = openQMIBackend(ctx, port.Path, access)
+	case PortMBIM:
+		b, selected, err = openMBIMBackend(ctx, port.Path, access)
 	}
-	return nil, openErr
+	if err != nil {
+		return nil, fmt.Errorf("opening modem port %s: %w", port.Path, err)
+	}
+	return newModem(port, selected, b), nil
 }
 
-func protocolProbeOrder(hint Protocol) []Protocol {
-	switch hint {
-	case ProtocolQMI:
-		return []Protocol{ProtocolQMI, ProtocolMBIM}
-	case ProtocolMBIM:
-		return []Protocol{ProtocolMBIM, ProtocolQMI}
-	default:
-		return []Protocol{ProtocolQMI, ProtocolMBIM}
-	}
-}
-
-func validateOpenInput(ctx context.Context, deviceNode string, access Access) error {
+func validateOpenInput(ctx context.Context, port Port, access Access) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if deviceNode == "" {
-		return errors.New("opening modem: device node is empty")
+	if port.Path == "" {
+		return errors.New("opening modem: control port path is empty")
+	}
+	if port.Protocol() == ProtocolUnknown {
+		return fmt.Errorf("opening modem port %s: %w", port.Path, ErrProtocolUnknown)
 	}
 	if access != AccessAuto && access != AccessProxy && access != AccessDirect {
 		return fmt.Errorf("opening modem: access method %d is invalid", access)
 	}
-	info, err := statDevice(deviceNode)
+	info, err := statDevice(port.Path)
 	if err != nil {
-		return fmt.Errorf("opening modem node %s: %w", deviceNode, err)
+		return fmt.Errorf("opening modem node %s: %w", port.Path, err)
 	}
 	if info.Mode()&os.ModeDevice == 0 || info.Mode()&os.ModeCharDevice == 0 {
-		return fmt.Errorf("opening modem node %s: not a character device", deviceNode)
+		return fmt.Errorf("opening modem node %s: not a character device", port.Path)
+	}
+	if err := validatePortMetadata(port); err != nil {
+		return err
 	}
 	return nil
 }
 
-func systemProtocolForNode(deviceNode string) Protocol {
-	name := filepath.Base(deviceNode)
-	for _, class := range []string{"wwan", "usbmisc"} {
-		entryPath := filepath.Join(defaultSysRoot, "class", class, name)
-		if _, err := os.Stat(entryPath); err == nil {
-			return protocolHint(entryPath, name)
-		}
+func validatePortMetadata(port Port) error {
+	if port.SysPath == "" {
+		return nil
 	}
-	return protocolHint("", name)
+
+	wantProtocol := port.Protocol()
+	if protocol := kernelProtocol(port.SysPath); protocol != wantProtocol {
+		return fmt.Errorf("validating modem port %s metadata: %w: protocol is %s, want %s", port.Path, ErrPortChanged, protocol, wantProtocol)
+	}
+	if port.Driver == "" {
+		return nil
+	}
+	if driver := symlinkBase(filepath.Join(port.SysPath, "device", "driver")); driver != port.Driver {
+		return fmt.Errorf("validating modem port %s metadata: %w: driver is %q, want %q", port.Path, ErrPortChanged, driver, port.Driver)
+	}
+	return nil
 }
 
 func openQMI(ctx context.Context, device string, access Access) (backend, Access, error) {
@@ -114,7 +101,7 @@ func openQMI(ctx context.Context, device string, access Access) (backend, Access
 	}
 	transport, err := qmiproto.Open(ctx, option)
 	if err != nil {
-		return nil, qmiAccessFromError(access, err), fmt.Errorf("opening QMI transport: %w", err)
+		return nil, access, fmt.Errorf("opening QMI transport: %w", err)
 	}
 	selected := AccessDirect
 	if transport.UsesProxy() {
@@ -144,7 +131,7 @@ func openMBIM(ctx context.Context, device string, access Access) (backend, Acces
 	}
 	client, err := mbimproto.Open(ctx, option)
 	if err != nil {
-		return nil, mbimAccessFromError(access, err), fmt.Errorf("opening MBIM client: %w", err)
+		return nil, access, fmt.Errorf("opening MBIM client: %w", err)
 	}
 	selected := AccessDirect
 	if client.UsesProxy() {
@@ -155,26 +142,4 @@ func openMBIM(ctx context.Context, device string, access Access) (backend, Acces
 		return nil, selected, fmt.Errorf("probing MBIM device services: %w", err)
 	}
 	return modemmbim.New(client, device), selected, nil
-}
-
-func qmiAccessFromError(requested Access, err error) Access {
-	if requested != AccessAuto {
-		return requested
-	}
-	var openErr *qmiproto.OpenError
-	if errors.As(err, &openErr) && openErr.Proxy {
-		return AccessProxy
-	}
-	return AccessDirect
-}
-
-func mbimAccessFromError(requested Access, err error) Access {
-	if requested != AccessAuto {
-		return requested
-	}
-	var openErr *mbimproto.OpenError
-	if errors.As(err, &openErr) && openErr.Proxy {
-		return AccessProxy
-	}
-	return AccessDirect
 }
