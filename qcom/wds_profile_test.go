@@ -339,13 +339,15 @@ func TestWDSProfileValidationAcceptsNonIP(t *testing.T) {
 		{
 			name: "create",
 			validate: func() error {
-				return validateWDSProfileConfig(WDSProfileConfig{APN: "nonip", PDPType: WDSPDPTypeNonIP})
+				config := WDSProfileConfig{APN: "nonip", PDPType: WDSPDPTypeNonIP}
+				return config.validate()
 			},
 		},
 		{
 			name: "update",
 			validate: func() error {
-				return validateWDSProfileUpdate(WDSProfileUpdate{PDPType: ptr(WDSPDPTypeNonIP)})
+				update := WDSProfileUpdate{PDPType: ptr(WDSPDPTypeNonIP)}
+				return update.validate()
 			},
 		},
 	}

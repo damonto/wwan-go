@@ -164,7 +164,7 @@ func (r *PacketServiceInfo) UnmarshalBinary(data []byte) error {
 			TAC: binary.LittleEndian.Uint32(data[40:44]),
 		}
 		if dataSubclassUses5GCore(dataSubclass) && trackingAreaIdentity.PLMN.MCC != 0 {
-			if err := validatePLMN(trackingAreaIdentity.PLMN); err != nil {
+			if err := trackingAreaIdentity.PLMN.validate(); err != nil {
 				return fmt.Errorf("parsing MBIM packet service tracking area identity: %w", err)
 			}
 			if err := validateTAC(trackingAreaIdentity.TAC); err != nil {

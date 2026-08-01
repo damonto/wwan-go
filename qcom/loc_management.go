@@ -217,7 +217,7 @@ type LOCInjectPositionRequest struct {
 
 // Request converts an injected position into LOC TLVs.
 func (r LOCInjectPositionRequest) Request() (Request, error) {
-	if err := validateLOCInjectPositionConfig(r.Config); err != nil {
+	if err := r.Config.validate(); err != nil {
 		return Request{}, fmt.Errorf("encoding QMI LOC position: %w", err)
 	}
 	var tlvs tlv.TLVs
@@ -602,7 +602,7 @@ func (c *Client) LOCDeleteAssistanceData(ctx context.Context, config LOCDeleteAs
 	return nil
 }
 
-func validateLOCInjectPositionConfig(config LOCInjectPositionConfig) error {
+func (config *LOCInjectPositionConfig) validate() error {
 	if config.HorizontalReliability != nil && *config.HorizontalReliability > LOCReliabilityHigh {
 		return fmt.Errorf("horizontal reliability %d is out of range", *config.HorizontalReliability)
 	}

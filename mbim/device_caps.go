@@ -155,7 +155,7 @@ func (r *DeviceCapsInfo) unmarshalV1(data []byte) error {
 		SMSCaps:       SMSCaps(binary.LittleEndian.Uint32(data[20:24])),
 		ControlCaps:   ControlCaps(binary.LittleEndian.Uint32(data[24:28])),
 	}
-	if err := validateDeviceCapsInfo(result); err != nil {
+	if err := result.validate(); err != nil {
 		return fmt.Errorf("parsing MBIM device capabilities: %w", err)
 	}
 	maxSessions := binary.LittleEndian.Uint32(data[28:32])
@@ -194,7 +194,7 @@ func (r *DeviceCapsInfo) unmarshalV2(data []byte, version uint16) error {
 		SMSCaps:       SMSCaps(binary.LittleEndian.Uint32(data[20:24])),
 		ControlCaps:   ControlCaps(binary.LittleEndian.Uint32(data[24:28])),
 	}
-	if err := validateDeviceCapsInfo(result); err != nil {
+	if err := result.validate(); err != nil {
 		return fmt.Errorf("parsing MBIMEx device capabilities: %w", err)
 	}
 	maxSessions := binary.LittleEndian.Uint32(data[28:32])
@@ -235,7 +235,7 @@ func (r *DeviceCapsInfo) unmarshalV3(data []byte, version uint16) error {
 		ControlCaps:   ControlCaps(binary.LittleEndian.Uint32(data[24:28])),
 		DataSubclass:  DataSubclass(binary.LittleEndian.Uint64(data[28:36])),
 	}
-	if err := validateDeviceCapsInfo(result); err != nil {
+	if err := result.validate(); err != nil {
 		return fmt.Errorf("parsing MBIMEx device capabilities: %w", err)
 	}
 
@@ -311,7 +311,7 @@ func (r *DeviceCapsInfo) unmarshalV3(data []byte, version uint16) error {
 	return nil
 }
 
-func validateDeviceCapsInfo(info DeviceCapsInfo) error {
+func (info *DeviceCapsInfo) validate() error {
 	if info.DeviceType > DeviceTypeRemote {
 		return fmt.Errorf("device type %d is outside 0..%d", info.DeviceType, DeviceTypeRemote)
 	}

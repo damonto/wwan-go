@@ -150,7 +150,7 @@ func (r WDSUpdateProfileRequest) Request() (Request, error) {
 	if wdsProfileUpdateEmpty(r.Update) {
 		return Request{}, errors.New("no profile fields selected")
 	}
-	if err := validateWDSProfileUpdate(r.Update); err != nil {
+	if err := r.Update.validate(); err != nil {
 		return Request{}, err
 	}
 	tlvs := tlv.TLVs{tlv.Bytes(wdsTLVProfileID, []byte{byte(r.Profile.Type), r.Profile.Index})}
@@ -257,7 +257,7 @@ func (c *Client) WDSUpdateProfile(ctx context.Context, id WDSProfileID, update W
 	if wdsProfileUpdateEmpty(update) {
 		return errors.New("modifying QMI WDS profile: no fields selected")
 	}
-	if err := validateWDSProfileUpdate(update); err != nil {
+	if err := update.validate(); err != nil {
 		return fmt.Errorf("modifying QMI WDS profile %d: %w", id.Index, err)
 	}
 
@@ -301,7 +301,7 @@ func wdsProfileUpdateEmpty(update WDSProfileUpdate) bool {
 		update.APNType == nil && update.CLATEnabled == nil && update.IPv6PrefixDelegation == nil
 }
 
-func validateWDSProfileUpdate(update WDSProfileUpdate) error {
+func (update *WDSProfileUpdate) validate() error {
 	if update.Name != nil {
 		if err := validateWDSString(*update.Name, wdsProfileNameMaxLength); err != nil {
 			return fmt.Errorf("validating WDS profile name: %w", err)
@@ -415,7 +415,7 @@ func (c *Client) WDSCreateProfileWithConfig(ctx context.Context, cfg WDSProfileC
 	if cfg.Name == "" {
 		cfg.Name = fmt.Sprintf("wwan-go-%d", cfg.PDPType)
 	}
-	if err := validateWDSProfileConfig(cfg); err != nil {
+	if err := cfg.validate(); err != nil {
 		return WDSProfileID{}, fmt.Errorf("creating QMI WDS profile: %w", err)
 	}
 
@@ -455,11 +455,12 @@ func (c *Client) WDSCreateProfileWithConfig(ctx context.Context, cfg WDSProfileC
 	return id, nil
 }
 
-func validateWDSProfileConfig(cfg WDSProfileConfig) error {
+func (cfg *WDSProfileConfig) validate() error {
 	if err := validateWDSProfileType(cfg.Type); err != nil {
 		return err
 	}
-	return validateWDSProfileUpdate(wdsProfileUpdateFromConfig(cfg))
+	update := wdsProfileUpdateFromConfig(*cfg)
+	return update.validate()
 }
 
 func validateWDSProfileIPv4(address *netip.Addr) error {

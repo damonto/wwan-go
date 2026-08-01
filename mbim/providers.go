@@ -47,7 +47,7 @@ const (
 )
 
 func (p Provider) MarshalBinary() ([]byte, error) {
-	if err := validateProvider(p); err != nil {
+	if err := p.validate(); err != nil {
 		return nil, fmt.Errorf("encoding MBIM provider: %w", err)
 	}
 	return p.marshalBinary(), nil
@@ -106,7 +106,7 @@ func (p *Provider) UnmarshalBinary(data []byte) error {
 		RSSI:          binary.LittleEndian.Uint32(data[24:28]),
 		ErrorRate:     binary.LittleEndian.Uint32(data[28:32]),
 	}
-	if err := validateProvider(provider); err != nil {
+	if err := provider.validate(); err != nil {
 		return fmt.Errorf("parsing MBIM provider: %w", err)
 	}
 	*p = provider
@@ -120,7 +120,7 @@ func (p Providers) MarshalBinary() ([]byte, error) {
 	return p.marshalBinary(), nil
 }
 
-func validateProvider(provider Provider) error {
+func (provider Provider) validate() error {
 	if err := validateProviderID(provider.ID); err != nil {
 		return err
 	}
@@ -168,7 +168,7 @@ func validErrorRate(errorRate uint32) bool {
 
 func validateProviders(providers []Provider) error {
 	for i, provider := range providers {
-		if err := validateProvider(provider); err != nil {
+		if err := provider.validate(); err != nil {
 			return fmt.Errorf("provider %d: %w", i, err)
 		}
 	}
@@ -333,7 +333,7 @@ func (c *Client) HomeProvider(ctx context.Context) (Provider, error) {
 }
 
 func (c *Client) SetHomeProvider(ctx context.Context, provider Provider) (Provider, error) {
-	if err := validateProvider(provider); err != nil {
+	if err := provider.validate(); err != nil {
 		return Provider{}, fmt.Errorf("setting MBIM home provider: %w", err)
 	}
 	request := HomeProviderSetRequest{TransactionID: c.nextTransactionID(), Provider: provider}

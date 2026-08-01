@@ -25,7 +25,7 @@ type TAIList struct {
 type TAILists []TAIList
 
 func (l TAIList) MarshalBinary() ([]byte, error) {
-	if err := validateTAIList(l); err != nil {
+	if err := l.validate(); err != nil {
 		return nil, fmt.Errorf("encoding TAI list: %w", err)
 	}
 
@@ -154,13 +154,13 @@ func unmarshalTAIListPrefix(data []byte) (TAIList, int, error) {
 		return TAIList{}, 0, fmt.Errorf("parsing TAI list: type %d is reserved", listType)
 	}
 
-	if err := validateTAIList(list); err != nil {
+	if err := list.validate(); err != nil {
 		return TAIList{}, 0, fmt.Errorf("parsing TAI list: %w", err)
 	}
 	return list, totalLength, nil
 }
 
-func validateTAIList(list TAIList) error {
+func (list TAIList) validate() error {
 	switch list.Type {
 	case TAIListTypeNonConsecutive, TAIListTypeConsecutive:
 		if len(list.TACs) < 1 || len(list.TACs) > 16 {
@@ -169,7 +169,7 @@ func validateTAIList(list TAIList) error {
 		if len(list.TAIs) != 0 {
 			return errors.New("single-PLMN list contains multi-PLMN TAI values")
 		}
-		if err := validatePLMN(list.PLMN); err != nil {
+		if err := list.PLMN.validate(); err != nil {
 			return err
 		}
 		for index, tac := range list.TACs {
@@ -188,7 +188,7 @@ func validateTAIList(list TAIList) error {
 			return errors.New("multi-PLMN list contains single-PLMN fields")
 		}
 		for index, tai := range list.TAIs {
-			if err := validatePLMN(tai.PLMN); err != nil {
+			if err := tai.PLMN.validate(); err != nil {
 				return fmt.Errorf("TAI %d: %w", index, err)
 			}
 			if err := validateTAC(tai.TAC); err != nil {
@@ -201,7 +201,7 @@ func validateTAIList(list TAIList) error {
 	return nil
 }
 
-func validatePLMN(plmn PLMN) error {
+func (plmn PLMN) validate() error {
 	if plmn.MCC&0xF000 != 0 {
 		return errors.New("PLMN MCC has nonzero unused bits")
 	}

@@ -348,7 +348,7 @@ func (r NASConfigureSignalInfo2Request) Request() (Request, error) {
 		}
 	}
 	if r.Config.LTEReport != nil {
-		if err := validateNASLTEReportConfig(*r.Config.LTEReport); err != nil {
+		if err := r.Config.LTEReport.validate(); err != nil {
 			return Request{}, err
 		}
 		tlvs = append(tlvs, tlv.Bytes(nasTLVSignalConfig2LTEReport, []byte{
@@ -412,7 +412,7 @@ func encodeNASSignalThresholds2(values []int16) ([]byte, error) {
 	return append([]byte{byte(len(values))}, encodeNASInt16s(values)...), nil
 }
 
-func validateNASLTEReportConfig(config NASLTESignalReportConfig) error {
+func (config NASLTESignalReportConfig) validate() error {
 	if config.Rate > NASLTESignalReportRateFiveSeconds {
 		return fmt.Errorf("encoding QMI NAS LTE signal report: rate %d is out of range", config.Rate)
 	}

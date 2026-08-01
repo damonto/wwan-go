@@ -13,7 +13,7 @@ func (cfg WDSProfileConfig) MarshalTLVs() (tlv.TLVs, error) {
 	if cfg.Name == "" {
 		cfg.Name = fmt.Sprintf("wwan-go-%d", cfg.PDPType)
 	}
-	if err := validateWDSProfileConfig(cfg); err != nil {
+	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 

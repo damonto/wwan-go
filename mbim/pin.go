@@ -105,7 +105,7 @@ func validPinLength(length uint32) bool {
 	return length <= 16 || length == pinLengthUnknown
 }
 
-func validatePinDesc(desc PinDesc) error {
+func (desc PinDesc) validate() error {
 	if desc.Mode > PinModeDisabled {
 		return fmt.Errorf("mode %d is outside 0..%d", desc.Mode, PinModeDisabled)
 	}
@@ -221,7 +221,7 @@ func (r *PinListInfo) UnmarshalBinary(data []byte) error {
 			LengthMin: binary.LittleEndian.Uint32(data[offset+8 : offset+12]),
 			LengthMax: binary.LittleEndian.Uint32(data[offset+12 : offset+16]),
 		}
-		if err := validatePinDesc(descs[i]); err != nil {
+		if err := descs[i].validate(); err != nil {
 			return fmt.Errorf("parsing MBIM PIN list %s descriptor: %w", names[i], err)
 		}
 	}

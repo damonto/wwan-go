@@ -141,7 +141,7 @@ func (r *IPConfigurationInfo) UnmarshalBinary(data []byte) error {
 		},
 	}
 	for _, field := range fields {
-		if err := validateIPConfigurationFields(field); err != nil {
+		if err := field.validate(); err != nil {
 			return fmt.Errorf("parsing MBIM IP configuration: %w", err)
 		}
 	}
@@ -207,7 +207,7 @@ func (r *IPConfigurationInfo) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
-func validateIPConfigurationFields(fields ipConfigurationFields) error {
+func (fields ipConfigurationFields) validate() error {
 	if fields.availability&IPConfigurationAvailableAddress == 0 &&
 		(fields.addressCount != 0 || fields.addressOffset != 0) {
 		return fmt.Errorf("%s address fields are nonzero while address information is unavailable", fields.name)
