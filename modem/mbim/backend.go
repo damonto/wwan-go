@@ -970,7 +970,7 @@ func (b *Backend) FirmwareUpdateInfo(ctx context.Context) (FirmwareUpdateInfo, e
 
 func mbimPowerState(state mbimproto.RadioStateInfo) PowerState {
 	if state.HwRadioState == mbimproto.RadioSwitchStateOff || state.SwRadioState == mbimproto.RadioSwitchStateOff {
-		return PowerStateOff
+		return PowerStateLow
 	}
 	return PowerStateOn
 }

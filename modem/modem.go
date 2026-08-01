@@ -161,6 +161,14 @@ func (m *Modem) Status(ctx context.Context) (Status, error) {
 	return status, nil
 }
 
+func (m *Modem) PowerState(ctx context.Context) (PowerState, error) {
+	b, err := m.currentBackend()
+	if err != nil {
+		return PowerStateUnknown, err
+	}
+	return b.PowerState(ctx)
+}
+
 func (m *Modem) ownBearerCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

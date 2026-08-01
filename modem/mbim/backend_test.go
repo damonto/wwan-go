@@ -13,6 +13,46 @@ import (
 	mbimproto "github.com/damonto/wwan-go/mbim"
 )
 
+func TestMBIMPowerState(t *testing.T) {
+	tests := []struct {
+		name  string
+		state mbimproto.RadioStateInfo
+		want  PowerState
+	}{
+		{
+			name: "radio on",
+			state: mbimproto.RadioStateInfo{
+				HwRadioState: mbimproto.RadioSwitchStateOn,
+				SwRadioState: mbimproto.RadioSwitchStateOn,
+			},
+			want: PowerStateOn,
+		},
+		{
+			name: "hardware radio off",
+			state: mbimproto.RadioStateInfo{
+				HwRadioState: mbimproto.RadioSwitchStateOff,
+				SwRadioState: mbimproto.RadioSwitchStateOn,
+			},
+			want: PowerStateLow,
+		},
+		{
+			name: "software radio off",
+			state: mbimproto.RadioStateInfo{
+				HwRadioState: mbimproto.RadioSwitchStateOn,
+				SwRadioState: mbimproto.RadioSwitchStateOff,
+			},
+			want: PowerStateLow,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mbimPowerState(tt.state); got != tt.want {
+				t.Errorf("mbimPowerState(%+v) = %d, want %d", tt.state, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPopulateActiveMBIMSIMSlot(t *testing.T) {
 	tests := []struct {
 		name  string

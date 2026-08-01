@@ -955,7 +955,9 @@ func qmiPowerState(mode qcom.DMSOperatingMode) PowerState {
 	switch mode {
 	case qcom.DMSOperatingModeOnline:
 		return PowerStateOn
-	case qcom.DMSOperatingModeLowPower, qcom.DMSOperatingModePersistentLowPower:
+	case qcom.DMSOperatingModeLowPower,
+		qcom.DMSOperatingModePersistentLowPower,
+		qcom.DMSOperatingModeModeOnlyLowPower:
 		return PowerStateLow
 	case qcom.DMSOperatingModeOffline, qcom.DMSOperatingModeShuttingDown:
 		return PowerStateOff

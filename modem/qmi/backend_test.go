@@ -42,6 +42,30 @@ func TestQMIErrorClassification(t *testing.T) {
 	}
 }
 
+func TestQMIPowerState(t *testing.T) {
+	tests := []struct {
+		name string
+		mode qcom.DMSOperatingMode
+		want PowerState
+	}{
+		{name: "online", mode: qcom.DMSOperatingModeOnline, want: PowerStateOn},
+		{name: "low power", mode: qcom.DMSOperatingModeLowPower, want: PowerStateLow},
+		{name: "persistent low power", mode: qcom.DMSOperatingModePersistentLowPower, want: PowerStateLow},
+		{name: "mode-only low power", mode: qcom.DMSOperatingModeModeOnlyLowPower, want: PowerStateLow},
+		{name: "offline", mode: qcom.DMSOperatingModeOffline, want: PowerStateOff},
+		{name: "shutting down", mode: qcom.DMSOperatingModeShuttingDown, want: PowerStateOff},
+		{name: "factory test", mode: qcom.DMSOperatingModeFactoryTest, want: PowerStateUnknown},
+		{name: "resetting", mode: qcom.DMSOperatingModeResetting, want: PowerStateUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := qmiPowerState(tt.mode); got != tt.want {
+				t.Errorf("qmiPowerState(%d) = %d, want %d", tt.mode, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestApplyQMICellLocation(t *testing.T) {
 	tests := []struct {
 		name     string

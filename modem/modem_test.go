@@ -138,6 +138,37 @@ func (s *lifecycleSession) Close() error {
 	return nil
 }
 
+func TestModemPowerState(t *testing.T) {
+	tests := []struct {
+		name    string
+		power   PowerState
+		closed  bool
+		want    PowerState
+		wantErr error
+	}{
+		{name: "reads backend state", power: PowerStateLow, want: PowerStateLow},
+		{name: "rejects closed modem", power: PowerStateOn, closed: true, want: PowerStateUnknown, wantErr: ErrClosed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &connectBackend{power: tt.power}
+			modem := newModem("/dev/test", ProtocolQMI, AccessDirect, backend)
+			if tt.closed {
+				if err := modem.Close(); err != nil {
+					t.Fatalf("Close() error = %v", err)
+				}
+			}
+			got, err := modem.PowerState(t.Context())
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("PowerState() error = %v, want %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("PowerState() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestModemClose(t *testing.T) {
 	tests := []struct {
 		name string
