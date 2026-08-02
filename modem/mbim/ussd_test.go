@@ -17,13 +17,13 @@ func TestUSSDCodec(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dcs, payload, err := encodeMBIMUSSD(tt.text)
+			dcs, payload, err := encodeUSSD(tt.text)
 			if err != nil {
-				t.Fatalf("encodeMBIMUSSD() error = %v", err)
+				t.Fatalf("encodeUSSD() error = %v", err)
 			}
-			decoded, err := mbimUSSDMessage(mbimproto.USSDInfo{DataCodingScheme: dcs, Payload: payload})
+			decoded, err := ussdMessage(mbimproto.USSDInfo{DataCodingScheme: dcs, Payload: payload})
 			if err != nil {
-				t.Fatalf("mbimUSSDMessage() error = %v", err)
+				t.Fatalf("ussdMessage() error = %v", err)
 			}
 			if decoded.Text != tt.text {
 				t.Errorf("USSD round trip = %q, want %q", decoded.Text, tt.text)
@@ -42,8 +42,8 @@ func TestUSSDDecodeValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := mbimUSSDMessage(tt.info); err == nil {
-				t.Fatal("mbimUSSDMessage() error = nil, want non-nil")
+			if _, err := ussdMessage(tt.info); err == nil {
+				t.Fatal("ussdMessage() error = nil, want non-nil")
 			}
 		})
 	}

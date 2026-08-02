@@ -26,6 +26,7 @@ type PDNConfig struct {
 	RequestTimeout    time.Duration
 	MuxDataPort       *WDSMuxDataPort
 	LegacyMuxDataPort WDSSIOPort
+	LegacyMuxFallback *WDSMuxDataPort
 	CallType          *WDSCallType
 }
 
@@ -51,6 +52,7 @@ type IMSPDNConfig struct {
 	RequestTimeout    time.Duration
 	MuxDataPort       *WDSMuxDataPort
 	LegacyMuxDataPort WDSSIOPort
+	LegacyMuxFallback *WDSMuxDataPort
 }
 
 // IMSPDNInfo contains IMS-specific state in addition to the underlying PDN.
@@ -66,6 +68,7 @@ type pdnOpenConfig struct {
 	PDNConfig
 	technology        WDSTechnologyPreference
 	requestedSettings WDSRuntimeSettingsMask
+	profileIPFamily   bool
 }
 
 // PDNSession owns a WDS packet-data handle and, on QMUX, its QMI client ID.
@@ -135,14 +138,16 @@ func (c *Client) OpenIMSPDN(ctx context.Context, cfg IMSPDNConfig) (*IMSPDNSessi
 			RequestTimeout:    cfg.RequestTimeout,
 			MuxDataPort:       cfg.MuxDataPort,
 			LegacyMuxDataPort: cfg.LegacyMuxDataPort,
+			LegacyMuxFallback: cfg.LegacyMuxFallback,
 			CallType:          &callType,
 		},
 		technology: WDSTechnologyPreference3GPP,
 		requestedSettings: WDSRuntimeRequestedIMSSettings |
 			WDSRuntimeRequestedNetworkSettings,
+		profileIPFamily: cfg.LegacyMuxDataPort != 0,
 	}
 	pdn, err := c.openPDN(ctx, pdnCfg)
-	if err != nil && cfg.LegacyMuxDataPort == 0 &&
+	if err != nil && !pdnCfg.profileIPFamily &&
 		(cfg.IPPreference == WDSIPPreferenceDefault || cfg.IPPreference == WDSIPPreferenceUnspecified) {
 		if restricted, ok := wdsRestrictedIPPreference(err); ok {
 			initialErr := err
@@ -204,6 +209,9 @@ func (c *Client) openPDN(ctx context.Context, cfg pdnOpenConfig) (*PDNSession, e
 	if cfg.MuxDataPort != nil && cfg.LegacyMuxDataPort != 0 {
 		return nil, errors.New("mux data port and legacy mux data port are mutually exclusive")
 	}
+	if cfg.LegacyMuxFallback != nil && cfg.LegacyMuxDataPort == 0 {
+		return nil, errors.New("legacy mux fallback requires a legacy mux data port")
+	}
 	if err := validateWDSIPPreference(cfg.IPPreference); err != nil {
 		return nil, err
 	}
@@ -244,9 +252,9 @@ func (c *Client) openPDN(ctx context.Context, cfg pdnOpenConfig) (*PDNSession, e
 			return nil, errors.Join(err, session.Close())
 		}
 	}
-	// Legacy BAM-DMUX firmware selects the family from the stored IMS profile.
-	// Do not override that profile through either WDS family mechanism.
-	if cfg.LegacyMuxDataPort == 0 && (cfg.IPPreference == WDSIPPreferenceIPv4 || cfg.IPPreference == WDSIPPreferenceIPv6) {
+	// Some IMS profiles on legacy BAM-DMUX firmware own the IP-family choice.
+	// General PDNs still need the caller's explicit family on the same endpoint.
+	if !cfg.profileIPFamily && (cfg.IPPreference == WDSIPPreferenceIPv4 || cfg.IPPreference == WDSIPPreferenceIPv6) {
 		if err := session.setClientIPFamily(ctx, WDSIPFamily(cfg.IPPreference)); err != nil {
 			return nil, errors.Join(err, session.Close())
 		}
@@ -256,12 +264,16 @@ func (c *Client) openPDN(ctx context.Context, cfg pdnOpenConfig) (*PDNSession, e
 			return nil, errors.Join(err, session.Close())
 		}
 	} else if cfg.LegacyMuxDataPort != 0 {
-		if err := session.bindLegacyMuxDataPort(ctx, cfg.LegacyMuxDataPort); err != nil {
+		err := session.bindLegacyMuxDataPort(ctx, cfg.LegacyMuxDataPort)
+		if errors.Is(err, QMIErrorDeviceUnsupported) && cfg.LegacyMuxFallback != nil {
+			err = session.bindMuxDataPort(ctx, *cfg.LegacyMuxFallback)
+		}
+		if err != nil {
 			return nil, errors.Join(err, session.Close())
 		}
 	}
 	startCfg := cfg
-	if cfg.LegacyMuxDataPort != 0 {
+	if cfg.profileIPFamily {
 		startCfg.IPPreference = WDSIPPreferenceDefault
 	}
 	if err := session.start(ctx, startCfg); err != nil {

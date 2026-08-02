@@ -556,11 +556,11 @@ func (m *Modem) Connect(ctx context.Context, cfg ConnectConfig) (*Bearer, error)
 	if err != nil {
 		return nil, err
 	}
-	interfaceName, err := selectNetworkInterface(ctx, m.port.Path, cfg.Interface)
+	networkPort, err := selectNetworkPort(ctx, m.port.Path, cfg.Interface)
 	if err != nil {
 		return nil, err
 	}
-	cfg.Interface = interfaceName
+	cfg.Interface = networkPort.Name
 	if cfg.PIN != "" {
 		info, err := b.SIMInfo(ctx)
 		if err != nil {
@@ -620,7 +620,12 @@ func (m *Modem) Connect(ctx context.Context, cfg ConnectConfig) (*Bearer, error)
 		}
 	}
 
-	session, err := b.Connect(ctx, cfg)
+	var session sessionBackend
+	if dataPortBackend, ok := b.(dataPortBearerBackend); ok {
+		session, err = dataPortBackend.ConnectPort(ctx, cfg, networkPort)
+	} else {
+		session, err = b.Connect(ctx, cfg)
+	}
 	if err != nil {
 		return nil, err
 	}

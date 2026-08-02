@@ -410,6 +410,83 @@ func TestCATTerminalProfileRejectsMalformedTLV(t *testing.T) {
 	}
 }
 
+func TestCATCachedProactiveCommand(t *testing.T) {
+	raw := []byte{0xD0, 0x09, 0x81, 0x03, 0x01, 0x25, 0x00, 0x82, 0x02, 0x81, 0x82}
+	value, err := (CATCommand{Ref: 0x01020304, Data: raw}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("CATCommand.MarshalBinary() error = %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		commandID CATCachedCommandID
+		response  Response
+		wantErr   bool
+	}{
+		{
+			name:      "setup menu",
+			commandID: CATCachedCommandSetupMenu,
+			response:  successResponse(MessageCATGetCachedProactiveCommand, tlv.Bytes(0x10, value)),
+		},
+		{
+			name:      "setup event list",
+			commandID: CATCachedCommandSetupEventList,
+			response:  successResponse(MessageCATGetCachedProactiveCommand, tlv.Bytes(0x11, value)),
+		},
+		{
+			name:      "setup idle mode text",
+			commandID: CATCachedCommandSetupIdleModeText,
+			response:  successResponse(MessageCATGetCachedProactiveCommand, tlv.Bytes(0x12, value)),
+		},
+		{
+			name:      "missing command",
+			commandID: CATCachedCommandSetupMenu,
+			response:  successResponse(MessageCATGetCachedProactiveCommand),
+			wantErr:   true,
+		},
+		{
+			name:      "invalid command ID",
+			commandID: 4,
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeTransport{t: t}
+			if tt.commandID <= CATCachedCommandSetupIdleModeText {
+				transport.calls = []transportCall{{
+					check: func(req Request) {
+						if req.MessageID != MessageCATGetCachedProactiveCommand {
+							t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, MessageCATGetCachedProactiveCommand)
+						}
+						assertTLV(t, req.TLVs, 0x01, binary.LittleEndian.AppendUint32(nil, uint32(tt.commandID)))
+						assertTLV(t, req.TLVs, 0x10, []byte{0x01})
+					},
+					resp: tt.response,
+				}}
+			}
+			client := &Client{
+				transport:  transport,
+				slot:       1,
+				catService: ServiceCAT2,
+				clientIDs:  map[ServiceType]uint8{ServiceCAT2: 7},
+			}
+
+			got, err := NewCAT(client).CachedProactiveCommand(context.Background(), tt.commandID)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("CachedProactiveCommand() error = %v, wantErr %t", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if got.Ref != 0x01020304 || !bytes.Equal(got.Data, raw) {
+				t.Fatalf("CachedProactiveCommand() = %+v, want ref 0x01020304 data % X", got, raw)
+			}
+		})
+	}
+}
+
 func TestEventReportErrorMaskRejectsMalformedTLV(t *testing.T) {
 	tests := []struct {
 		name  string

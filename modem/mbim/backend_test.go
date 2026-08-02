@@ -13,7 +13,7 @@ import (
 	mbimproto "github.com/damonto/wwan-go/mbim"
 )
 
-func TestMBIMPowerState(t *testing.T) {
+func TestPowerState(t *testing.T) {
 	tests := []struct {
 		name  string
 		state mbimproto.RadioStateInfo
@@ -46,14 +46,14 @@ func TestMBIMPowerState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := mbimPowerState(tt.state); got != tt.want {
-				t.Errorf("mbimPowerState(%+v) = %d, want %d", tt.state, got, tt.want)
+			if got := powerState(tt.state); got != tt.want {
+				t.Errorf("powerState(%+v) = %d, want %d", tt.state, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestPopulateActiveMBIMSIMSlot(t *testing.T) {
+func TestPopulateActiveSIMSlot(t *testing.T) {
 	tests := []struct {
 		name  string
 		slots []SIMSlot
@@ -75,7 +75,7 @@ func TestPopulateActiveMBIMSIMSlot(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			populateActiveMBIMSIMSlot(tt.slots, tt.sim)
+			populateActiveSIMSlot(tt.slots, tt.sim)
 			if !reflect.DeepEqual(tt.slots, tt.want) {
 				t.Errorf("SIM slots = %+v, want %+v", tt.slots, tt.want)
 			}
@@ -245,7 +245,7 @@ func TestSIMInfoFromSubscriber(t *testing.T) {
 	}
 }
 
-func TestNetworkStatusFromMBIM(t *testing.T) {
+func TestNetworkStatus(t *testing.T) {
 	tests := []struct {
 		name         string
 		registration mbimproto.RegistrationStateInfo
@@ -283,14 +283,14 @@ func TestNetworkStatusFromMBIM(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := networkStatusFromMBIM(tt.registration, tt.packet); !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("networkStatusFromMBIM() = %+v, want %+v", got, tt.want)
+			if got := networkStatus(tt.registration, tt.packet); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("networkStatus() = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestSignalFromMBIM(t *testing.T) {
+func TestSignalFromState(t *testing.T) {
 	tests := []struct {
 		name  string
 		state mbimproto.SignalStateInfo
@@ -308,14 +308,14 @@ func TestSignalFromMBIM(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := signalFromMBIM(tt.state); !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("signalFromMBIM() = %+v, want %+v", got, tt.want)
+			if got := signalFromState(tt.state); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("signalFromState() = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestApplyMBIMLTEServingCell(t *testing.T) {
+func TestApplyLTEServingCell(t *testing.T) {
 	tests := []struct {
 		name    string
 		serving *mbimproto.LTEServingCell
@@ -340,7 +340,7 @@ func TestApplyMBIMLTEServingCell(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cell := CellInfo{OperatorID: "00101", CellID: 1, TrackingAreaCode: 2, PhysicalCellID: 3, ARFCN: 4}
-			applyMBIMLTEServingCell(&cell, tt.serving)
+			applyLTEServingCell(&cell, tt.serving)
 			if !reflect.DeepEqual(cell, tt.want) {
 				t.Errorf("CellInfo = %+v, want %+v", cell, tt.want)
 			}
@@ -388,8 +388,8 @@ func TestNetworkConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := mbimNetworkConfig("wwan1", tt.info); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("mbimNetworkConfig() = %#v, want %#v", got, tt.want)
+			if got := networkConfig("wwan1", tt.info); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("networkConfig() = %#v, want %#v", got, tt.want)
 			}
 		})
 	}
@@ -412,12 +412,12 @@ func TestAPNTypeMapping(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			value := apnTypeToMBIM(tt.value)
+			value := contextType(tt.value)
 			if value != tt.want {
-				t.Errorf("apnTypeToMBIM() = %x, want %x", value, tt.want)
+				t.Errorf("contextType() = %x, want %x", value, tt.want)
 			}
-			if got := mbimAPNType(value); got != tt.wantBack {
-				t.Errorf("mbimAPNType() = %#x, want %#x", got, tt.wantBack)
+			if got := apnType(value); got != tt.wantBack {
+				t.Errorf("apnType() = %#x, want %#x", got, tt.wantBack)
 			}
 		})
 	}
@@ -453,7 +453,7 @@ func TestSessionAllocation(t *testing.T) {
 	}
 }
 
-func TestCleanupStaleMBIMSessions(t *testing.T) {
+func TestCleanupStaleSessions(t *testing.T) {
 	tests := []struct {
 		name             string
 		client           *staleSessionClient
@@ -498,9 +498,9 @@ func TestCleanupStaleMBIMSessions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := cleanupStaleMBIMSessions(context.Background(), tt.client, 4)
+			err := cleanupStaleSessions(context.Background(), tt.client, 4)
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("cleanupStaleMBIMSessions() error = %v, wantErr %t", err, tt.wantErr)
+				t.Fatalf("cleanupStaleSessions() error = %v, wantErr %t", err, tt.wantErr)
 			}
 			if !reflect.DeepEqual(tt.client.disconnected, tt.wantDisconnected) {
 				t.Fatalf("disconnected sessions = %v, want %v", tt.client.disconnected, tt.wantDisconnected)
@@ -509,7 +509,7 @@ func TestCleanupStaleMBIMSessions(t *testing.T) {
 	}
 }
 
-func TestMBIMFeatures(t *testing.T) {
+func TestFeaturesFromServices(t *testing.T) {
 	all := mbimproto.DeviceServicesResponse{Services: []mbimproto.DeviceService{
 		{ServiceID: mbimproto.ServiceBasicConnect, CIDs: []uint32{
 			mbimproto.CIDProvisionedContexts, mbimproto.CIDSignalState, mbimproto.CIDPin, mbimproto.CIDPinList,
@@ -545,8 +545,8 @@ func TestMBIMFeatures(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := mbimFeatures(tt.services); got != tt.want {
-				t.Errorf("mbimFeatures() = %#x, want %#x", got, tt.want)
+			if got := featuresFromServices(tt.services); got != tt.want {
+				t.Errorf("featuresFromServices() = %#x, want %#x", got, tt.want)
 			}
 		})
 	}

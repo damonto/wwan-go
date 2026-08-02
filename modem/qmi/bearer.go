@@ -13,9 +13,10 @@ import (
 	"github.com/damonto/wwan-go/qcom"
 )
 
-type qmiSession struct {
+type session struct {
 	mu        sync.RWMutex
 	sessions  []*qcom.PDNSession
+	link      *rmnetLink
 	connected []bool
 	infoValue BearerInfo
 	started   time.Time
@@ -24,27 +25,43 @@ type qmiSession struct {
 }
 
 func (b *Backend) Connect(ctx context.Context, cfg ConnectConfig) (sessionBackend, error) {
+	return b.ConnectPort(ctx, cfg, Port{Type: PortNetwork, Name: cfg.Interface})
+}
+
+// ConnectPort starts a QMI data session using discovery metadata associated
+// with the selected network port.
+func (b *Backend) ConnectPort(ctx context.Context, cfg ConnectConfig, port Port) (sessionBackend, error) {
 	interfaceName := cfg.Interface
 	if cfg.ProfileID > 255 {
 		return nil, fmt.Errorf("connecting QMI data session: profile ID %d exceeds 255", cfg.ProfileID)
 	}
-	preferences := qmiIPPreferences(cfg.IPFamily)
+	var link *rmnetLink
+	if port.QMIEndpoint.Type == QMIEndpointEmbedded {
+		var err error
+		link, err = b.prepareIPALink(ctx, port)
+		if err != nil {
+			return nil, fmt.Errorf("connecting QMI data session: %w", err)
+		}
+		interfaceName = link.Name
+	}
+	preferences := ipPreferences(cfg.IPFamily)
 	sessions := make([]*qcom.PDNSession, 0, len(preferences))
 	infos := make([]qcom.PDNInfo, 0, len(preferences))
 	connected := make([]bool, 0, len(preferences))
 	for _, preference := range preferences {
-		pdn, err := b.client.OpenPDN(ctx, qcom.PDNConfig{
-			APN:            cfg.APN,
-			Authentication: authenticationToQMI(cfg.Authentication),
-			Username:       cfg.Username,
-			Password:       cfg.Password,
-			IPPreference:   preference,
-			ProfileIndex:   uint8(cfg.ProfileID),
-		})
+		var muxID uint8
+		if link != nil {
+			muxID = link.MuxID
+		}
+		pdnCfg := pdnConfig(cfg, preference, port, muxID)
+		pdn, err := b.client.OpenPDN(ctx, pdnCfg)
 		if err != nil {
+			closeErr := closeSessions(sessions)
+			linkErr := link.Close()
 			return nil, errors.Join(
 				fmt.Errorf("connecting QMI %s data session: %w", preference, err),
-				closeQMISessions(sessions),
+				closeErr,
+				linkErr,
 			)
 		}
 		info := pdn.Info()
@@ -52,20 +69,53 @@ func (b *Backend) Connect(ctx context.Context, cfg ConnectConfig) (sessionBacken
 		infos = append(infos, info)
 		connected = append(connected, info.PacketDataReady)
 	}
-	return &qmiSession{
+	return &session{
 		sessions:  sessions,
+		link:      link,
 		connected: connected,
 		started:   time.Now(),
 		infoValue: BearerInfo{
 			Connected: slices.Contains(connected, true),
 			ProfileID: cfg.ProfileID,
 			APN:       cfg.APN,
-			Network:   mergeQMINetworkConfigs(interfaceName, infos),
+			Network:   mergeNetworkConfigs(interfaceName, infos),
 		},
 	}, nil
 }
 
-func (s *qmiSession) Info() BearerInfo {
+func pdnConfig(cfg ConnectConfig, preference qcom.WDSIPPreference, port Port, muxID uint8) qcom.PDNConfig {
+	result := qcom.PDNConfig{
+		APN:            cfg.APN,
+		Authentication: authenticationMask(cfg.Authentication),
+		Username:       cfg.Username,
+		Password:       cfg.Password,
+		IPPreference:   preference,
+		ProfileIndex:   uint8(cfg.ProfileID),
+	}
+	if muxID != 0 {
+		result.MuxDataPort = &qcom.WDSMuxDataPort{
+			Endpoint: &qcom.DataEndpoint{
+				Type:        qcom.DataEndpointEmbedded,
+				InterfaceID: port.QMIEndpoint.InterfaceNumber,
+			},
+			MuxID: muxID,
+		}
+	} else if port.QMIEndpoint.SIOPort != 0 {
+		result.LegacyMuxDataPort = qcom.WDSSIOPort(port.QMIEndpoint.SIOPort)
+		if port.QMIEndpoint.Type == QMIEndpointBAMDMUX {
+			result.LegacyMuxFallback = &qcom.WDSMuxDataPort{
+				Endpoint: &qcom.DataEndpoint{
+					Type:        qcom.DataEndpointBAMDMUX,
+					InterfaceID: port.QMIEndpoint.InterfaceNumber,
+				},
+				MuxID: 0,
+			}
+		}
+	}
+	return result
+}
+
+func (s *session) Info() BearerInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := s.infoValue
@@ -73,7 +123,7 @@ func (s *qmiSession) Info() BearerInfo {
 	return result
 }
 
-func (s *qmiSession) Stats(ctx context.Context) (BearerStats, error) {
+func (s *session) Stats(ctx context.Context) (BearerStats, error) {
 	s.mu.RLock()
 	sessions := slices.Clone(s.sessions)
 	s.mu.RUnlock()
@@ -94,7 +144,7 @@ func (s *qmiSession) Stats(ctx context.Context) (BearerStats, error) {
 	return result, errors.Join(errs...)
 }
 
-func (s *qmiSession) Watch(ctx context.Context) (<-chan Result[BearerEvent], error) {
+func (s *session) Watch(ctx context.Context) (<-chan Result[BearerEvent], error) {
 	s.mu.RLock()
 	sessions := slices.Clone(s.sessions)
 	s.mu.RUnlock()
@@ -150,7 +200,7 @@ func (s *qmiSession) Watch(ctx context.Context) (<-chan Result[BearerEvent], err
 			s.mu.Lock()
 			s.connected[update.index] = update.value.Status.ConnectionStatus == qcom.WDSConnectionStatusConnected
 			s.infoValue.Connected = slices.Contains(s.connected, true)
-			s.infoValue.Network = mergeQMINetworkConfigs(s.infoValue.Network.Interface, infos)
+			s.infoValue.Network = mergeNetworkConfigs(s.infoValue.Network.Interface, infos)
 			s.mu.Unlock()
 			if !sendStreamResult(ctx, out, Result[BearerEvent]{Value: BearerEvent{Info: s.Info()}}) {
 				return
@@ -160,14 +210,16 @@ func (s *qmiSession) Watch(ctx context.Context) (<-chan Result[BearerEvent], err
 	return out, nil
 }
 
-func (s *qmiSession) Disconnect(context.Context) error { return s.Close() }
+func (s *session) Disconnect(context.Context) error { return s.Close() }
 
-func (s *qmiSession) Close() error {
+func (s *session) Close() error {
 	s.closeOnce.Do(func() {
 		s.mu.RLock()
 		sessions := slices.Clone(s.sessions)
 		s.mu.RUnlock()
-		s.closeErr = closeQMISessions(sessions)
+		sessionErr := closeSessions(sessions)
+		linkErr := s.link.Close()
+		s.closeErr = errors.Join(sessionErr, linkErr)
 		s.mu.Lock()
 		s.infoValue.Connected = false
 		clear(s.connected)
@@ -176,7 +228,7 @@ func (s *qmiSession) Close() error {
 	return s.closeErr
 }
 
-func closeQMISessions(sessions []*qcom.PDNSession) error {
+func closeSessions(sessions []*qcom.PDNSession) error {
 	var errs []error
 	for i, session := range sessions {
 		if err := session.Close(); err != nil {
@@ -186,7 +238,7 @@ func closeQMISessions(sessions []*qcom.PDNSession) error {
 	return errors.Join(errs...)
 }
 
-func qmiNetworkConfig(interfaceName string, info qcom.PDNInfo) NetworkConfig {
+func networkConfig(interfaceName string, info qcom.PDNInfo) NetworkConfig {
 	result := NetworkConfig{Interface: interfaceName, MTU: info.MTU}
 	if addr, ok := netip.AddrFromSlice(info.LocalIPv4); ok && addr.Unmap().Is4() {
 		addr = addr.Unmap()
@@ -214,10 +266,10 @@ func qmiNetworkConfig(interfaceName string, info qcom.PDNInfo) NetworkConfig {
 	return result
 }
 
-func mergeQMINetworkConfigs(interfaceName string, infos []qcom.PDNInfo) NetworkConfig {
+func mergeNetworkConfigs(interfaceName string, infos []qcom.PDNInfo) NetworkConfig {
 	result := NetworkConfig{Interface: interfaceName}
 	for _, info := range infos {
-		config := qmiNetworkConfig(interfaceName, info)
+		config := networkConfig(interfaceName, info)
 		result.Addresses = appendUnique(result.Addresses, config.Addresses...)
 		result.Gateways = appendUnique(result.Gateways, config.Gateways...)
 		result.DNS = appendUnique(result.DNS, config.DNS...)
@@ -244,7 +296,7 @@ func cloneNetworkConfig(config NetworkConfig) NetworkConfig {
 	return config
 }
 
-func qmiIPPreferences(family IPFamily) []qcom.WDSIPPreference {
+func ipPreferences(family IPFamily) []qcom.WDSIPPreference {
 	switch family {
 	case IPFamilyIPv4:
 		return []qcom.WDSIPPreference{qcom.WDSIPPreferenceIPv4}

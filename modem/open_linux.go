@@ -83,7 +83,7 @@ func validatePortMetadata(port Port) error {
 	if port.Driver == "" {
 		return nil
 	}
-	if driver := symlinkBase(filepath.Join(port.SysPath, "device", "driver")); driver != port.Driver {
+	if driver := deviceDriver(filepath.Join(port.SysPath, "device")); driver != port.Driver {
 		return fmt.Errorf("validating modem port %s metadata: %w: driver is %q, want %q", port.Path, ErrPortChanged, driver, port.Driver)
 	}
 	return nil

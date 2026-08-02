@@ -639,16 +639,17 @@ const (
 	MessageRemoteUnlock              MessageID = 0x005D
 
 	// CAT/CAT2 service commands
-	MessageCATSetEventReport       MessageID = 0x0001
-	MessageCATEventReport          MessageID = 0x0001
-	MessageCATGetServiceState      MessageID = 0x0020
-	MessageCATSendTerminalResponse MessageID = 0x0021
-	MessageSendEnvelope            MessageID = 0x0022
-	MessageCATSendEnvelope         MessageID = 0x0022
-	MessageCATEventConfirmation    MessageID = 0x0026
-	MessageCATGetTerminalProfile   MessageID = 0x002C
-	MessageCATSetConfiguration     MessageID = 0x002D
-	MessageCATGetConfiguration     MessageID = 0x002E
+	MessageCATSetEventReport            MessageID = 0x0001
+	MessageCATEventReport               MessageID = 0x0001
+	MessageCATGetServiceState           MessageID = 0x0020
+	MessageCATSendTerminalResponse      MessageID = 0x0021
+	MessageSendEnvelope                 MessageID = 0x0022
+	MessageCATSendEnvelope              MessageID = 0x0022
+	MessageCATEventConfirmation         MessageID = 0x0026
+	MessageCATGetTerminalProfile        MessageID = 0x002C
+	MessageCATSetConfiguration          MessageID = 0x002D
+	MessageCATGetConfiguration          MessageID = 0x002E
+	MessageCATGetCachedProactiveCommand MessageID = 0x002F
 )
 
 // QMIResult represents the result code in QMI responses.

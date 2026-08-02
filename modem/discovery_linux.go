@@ -29,7 +29,7 @@ type kernelUevent struct {
 }
 
 func (e kernelUevent) removesControlNode() bool {
-	return e.action == "remove" && (e.subsystem == "wwan" || e.subsystem == "usbmisc")
+	return e.action == "remove" && (e.subsystem == "wwan" || e.subsystem == "usbmisc" || e.subsystem == "rpmsg")
 }
 
 func (e kernelUevent) controlNodeName() string {
@@ -132,10 +132,10 @@ func (q *deviceUeventQueue) take() deviceUeventBatch {
 	return batch
 }
 
-// Discover returns physical modems with the QMI and MBIM control ports
-// identified by Linux WWAN metadata or the bound kernel driver.
+// Discover returns physical modems with kernel-confirmed QMI and MBIM control
+// ports plus their associated network and serial-port metadata.
 func Discover(ctx context.Context) ([]Device, error) {
-	return discover(ctx, defaultSysRoot, defaultDevRoot, true)
+	return discover(ctx, discoveryConfig{sysRoot: defaultSysRoot, devRoot: defaultDevRoot, requireNode: true})
 }
 
 // WatchDevices reports an initial Present snapshot and later kernel-driven
@@ -294,7 +294,7 @@ func parseModemUevent(data []byte) (kernelUevent, bool) {
 		}
 	}
 	switch event.subsystem {
-	case "wwan", "usbmisc", "net", "tty":
+	case "wwan", "usbmisc", "net", "tty", "rpmsg":
 		return event, true
 	default:
 		return kernelUevent{}, false

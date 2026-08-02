@@ -54,14 +54,14 @@ func (b *Backend) Capabilities(ctx context.Context) (Capabilities, error) {
 	if err != nil {
 		return Capabilities{}, fmt.Errorf("reading MBIM device services: %w", err)
 	}
-	features := mbimFeatures(services)
+	features := featuresFromServices(services)
 	pduSMS := mbimproto.SMSCapsPDUReceive | mbimproto.SMSCapsPDUSend
 	if caps.SMSCaps&pduSMS != pduSMS {
 		features &^= FeatureSMS
 	}
 	result := Capabilities{
-		SupportedTechnologies: mbimDataClass(caps.DataClass),
-		CurrentTechnologies:   mbimDataClass(caps.DataClass),
+		SupportedTechnologies: technologyFromDataClass(caps.DataClass),
+		CurrentTechnologies:   technologyFromDataClass(caps.DataClass),
 		SupportedIPFamilies:   IPFamilyIPv4v6,
 		Features:              features,
 		MaxBearers:            caps.MaxSessions,
@@ -83,7 +83,7 @@ func (b *Backend) Capabilities(ctx context.Context) (Capabilities, error) {
 	return result, nil
 }
 
-func mbimFeatures(services mbimproto.DeviceServicesResponse) Feature {
+func featuresFromServices(services mbimproto.DeviceServicesResponse) Feature {
 	supports := services.SupportsCID
 	var features Feature
 	if supports(mbimproto.ServiceBasicConnect, mbimproto.CIDProvisionedContexts) {
@@ -125,7 +125,7 @@ func mbimFeatures(services mbimproto.DeviceServicesResponse) Feature {
 	return features
 }
 
-func mbimDataClass(class mbimproto.DataClass) Technology {
+func technologyFromDataClass(class mbimproto.DataClass) Technology {
 	var result Technology
 	if class&mbimproto.DataClassGPRS != 0 || class&mbimproto.DataClassEDGE != 0 {
 		result |= TechnologyGSM
@@ -163,7 +163,7 @@ func (b *Backend) PowerState(ctx context.Context) (PowerState, error) {
 	if err != nil {
 		return PowerStateUnknown, fmt.Errorf("reading MBIM power state: %w", err)
 	}
-	return mbimPowerState(radio), nil
+	return powerState(radio), nil
 }
 
 func (b *Backend) Reset(ctx context.Context) error {
@@ -182,7 +182,7 @@ func (b *Backend) Modes(ctx context.Context) ([]Mode, Mode, error) {
 	if err != nil {
 		return nil, Mode{}, fmt.Errorf("reading MBIM mode preference: %w", err)
 	}
-	current := Mode{Allowed: mbimDataClass(registration.PreferredDataClasses)}
+	current := Mode{Allowed: technologyFromDataClass(registration.PreferredDataClasses)}
 	if current.Allowed == 0 {
 		current.Allowed = caps.CurrentTechnologies
 	}
@@ -196,7 +196,7 @@ func (b *Backend) SetModes(ctx context.Context, mode Mode) error {
 	if mode.Preferred&^mode.Allowed != 0 {
 		return errors.New("setting MBIM modes: preferred technologies are not a subset of allowed technologies")
 	}
-	if _, err := b.client.SetRegistrationState(ctx, "", mbimproto.RegisterActionAutomatic, technologyToMBIMDataClass(mode.Allowed)); err != nil {
+	if _, err := b.client.SetRegistrationState(ctx, "", mbimproto.RegisterActionAutomatic, dataClass(mode.Allowed)); err != nil {
 		return fmt.Errorf("setting MBIM modes: %w", err)
 	}
 	return nil
@@ -227,11 +227,11 @@ func (b *Backend) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, fmt.Errorf("reading MBIM signal: %w", err)
 	}
-	network := networkStatusFromMBIM(registration, packet)
-	signal := signalFromMBIM(signalState)
+	network := networkStatus(registration, packet)
+	signal := signalFromState(signalState)
 	return Status{
-		Power:         mbimPowerState(radio),
-		SIM:           mbimSIMState(ready.ReadyState),
+		Power:         powerState(radio),
+		SIM:           simState(ready.ReadyState),
 		Registration:  network.Registration,
 		PacketService: network.PacketService,
 		Technology:    network.Technology,
@@ -264,7 +264,7 @@ func (b *Backend) SIMInfo(ctx context.Context) (SIMInfo, error) {
 
 func simInfoFromSubscriber(ready mbimproto.SubscriberReadyStatusResponse) SIMInfo {
 	result := SIMInfo{
-		State:      mbimSIMState(ready.ReadyState),
+		State:      simState(ready.ReadyState),
 		Slot:       uint8(ready.SlotID + 1),
 		ICCID:      ready.SIMICCID,
 		IMSI:       ready.SubscriberID,
@@ -325,17 +325,17 @@ func (b *Backend) SIMSlots(ctx context.Context) ([]SIMSlot, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading MBIM SIM slot %d: %w", i+1, err)
 		}
-		slots[i] = SIMSlot{Index: uint8(i + 1), Active: i == active, State: mbimSlotSIMState(status.State)}
+		slots[i] = SIMSlot{Index: uint8(i + 1), Active: i == active, State: slotSIMState(status.State)}
 	}
 	if sim, simErr := b.SIMInfo(ctx); simErr == nil {
-		populateActiveMBIMSIMSlot(slots, sim)
+		populateActiveSIMSlot(slots, sim)
 	} else if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 	return slots, nil
 }
 
-func populateActiveMBIMSIMSlot(slots []SIMSlot, sim SIMInfo) {
+func populateActiveSIMSlot(slots []SIMSlot, sim SIMInfo) {
 	for i := range slots {
 		if !slots[i].Active {
 			continue
@@ -392,7 +392,7 @@ func (b *Backend) PreferredNetworks(ctx context.Context) ([]PreferredNetwork, er
 	}
 	result := make([]PreferredNetwork, len(providers))
 	for i, provider := range providers {
-		result[i] = PreferredNetwork{OperatorID: provider.ID, Technology: mbimCellularClass(provider.CellularClass)}
+		result[i] = PreferredNetwork{OperatorID: provider.ID, Technology: technologyFromCellularClass(provider.CellularClass)}
 	}
 	return result, nil
 }
@@ -400,7 +400,7 @@ func (b *Backend) PreferredNetworks(ctx context.Context) ([]PreferredNetwork, er
 func (b *Backend) SetPreferredNetworks(ctx context.Context, networks []PreferredNetwork) error {
 	providers := make([]mbimproto.Provider, len(networks))
 	for i, network := range networks {
-		providers[i] = mbimproto.Provider{ID: network.OperatorID, State: mbimproto.ProviderStatePreferred, CellularClass: technologyToMBIMCellularClass(network.Technology), RSSI: 99, ErrorRate: 99}
+		providers[i] = mbimproto.Provider{ID: network.OperatorID, State: mbimproto.ProviderStatePreferred, CellularClass: cellularClass(network.Technology), RSSI: 99, ErrorRate: 99}
 	}
 	if _, err := b.client.SetPreferredProviders(ctx, providers); err != nil {
 		return fmt.Errorf("setting MBIM preferred networks: %w", err)
@@ -417,7 +417,7 @@ func (b *Backend) NetworkStatus(ctx context.Context) (NetworkStatus, error) {
 	if err != nil {
 		return NetworkStatus{}, fmt.Errorf("reading MBIM packet service: %w", err)
 	}
-	result := networkStatusFromMBIM(registration, packet)
+	result := networkStatus(registration, packet)
 	if location, locationErr := b.client.LocationInfoStatus(ctx); locationErr == nil {
 		result.LocationAreaCode = location.LocationAreaCode
 		result.TrackingAreaCode = location.TrackingAreaCode
@@ -426,24 +426,24 @@ func (b *Backend) NetworkStatus(ctx context.Context) (NetworkStatus, error) {
 	return result, nil
 }
 
-func networkStatusFromMBIM(registration mbimproto.RegistrationStateInfo, packet mbimproto.PacketServiceInfo) NetworkStatus {
+func networkStatus(registration mbimproto.RegistrationStateInfo, packet mbimproto.PacketServiceInfo) NetworkStatus {
 	result := NetworkStatus{}
-	applyMBIMRegistration(&result, registration)
-	applyMBIMPacketService(&result, packet)
+	applyRegistration(&result, registration)
+	applyPacketService(&result, packet)
 	return result
 }
 
-func applyMBIMRegistration(result *NetworkStatus, registration mbimproto.RegistrationStateInfo) {
-	result.Registration = mbimRegistrationState(registration.RegisterState)
-	result.Available = mbimDataClass(mbimproto.DataClass(registration.AvailableDataClasses))
+func applyRegistration(result *NetworkStatus, registration mbimproto.RegistrationStateInfo) {
+	result.Registration = registrationState(registration.RegisterState)
+	result.Available = technologyFromDataClass(mbimproto.DataClass(registration.AvailableDataClasses))
 	result.OperatorID = registration.ProviderID
 	result.OperatorName = registration.ProviderName
 	result.RoamingText = registration.RoamingText
 }
 
-func applyMBIMPacketService(result *NetworkStatus, packet mbimproto.PacketServiceInfo) {
+func applyPacketService(result *NetworkStatus, packet mbimproto.PacketServiceInfo) {
 	result.PacketService = PacketServiceState(packet.PacketServiceState)
-	result.Technology = mbimDataClass(packet.CurrentDataClass)
+	result.Technology = technologyFromDataClass(packet.CurrentDataClass)
 	result.UplinkBitsPerSecond = packet.UplinkSpeed
 	result.DownlinkBitsPerSecond = packet.DownlinkSpeed
 }
@@ -453,7 +453,7 @@ func (b *Backend) Register(ctx context.Context, cfg RegisterConfig) error {
 	if cfg.OperatorID != "" {
 		action = mbimproto.RegisterActionManual
 	}
-	if _, err := b.client.SetRegistrationState(ctx, cfg.OperatorID, action, technologyToMBIMDataClass(cfg.Technology)); err != nil {
+	if _, err := b.client.SetRegistrationState(ctx, cfg.OperatorID, action, dataClass(cfg.Technology)); err != nil {
 		return fmt.Errorf("registering MBIM network: %w", err)
 	}
 	return nil
@@ -469,7 +469,7 @@ func (b *Backend) ScanNetworks(ctx context.Context) ([]Operator, error) {
 		result[i] = Operator{
 			ID:         provider.ID,
 			Name:       provider.Name,
-			Technology: mbimCellularClass(provider.CellularClass),
+			Technology: technologyFromCellularClass(provider.CellularClass),
 			Available:  provider.State&mbimproto.ProviderStateVisible != 0,
 			Current:    provider.State&mbimproto.ProviderStateRegistered != 0,
 			Forbidden:  provider.State&mbimproto.ProviderStateForbidden != 0,
@@ -496,14 +496,14 @@ func (b *Backend) FacilityLocks(ctx context.Context) ([]FacilityLock, error) {
 	}
 	active, activeErr := b.client.PIN(ctx)
 	result := []FacilityLock{
-		mbimFacilityLock(FacilityNetwork, list.Network),
-		mbimFacilityLock(FacilityNetworkSubset, list.NetworkSubset),
-		mbimFacilityLock(FacilityServiceProvider, list.ServiceProvider),
-		mbimFacilityLock(FacilityCorporate, list.Corporate),
+		facilityLock(FacilityNetwork, list.Network),
+		facilityLock(FacilityNetworkSubset, list.NetworkSubset),
+		facilityLock(FacilityServiceProvider, list.ServiceProvider),
+		facilityLock(FacilityCorporate, list.Corporate),
 	}
 	if activeErr == nil {
 		for i := range result {
-			facility, blocked := mbimPINFacility(active.Type)
+			facility, blocked := facilityFromPINType(active.Type)
 			if result[i].Facility != facility {
 				continue
 			}
@@ -524,14 +524,14 @@ func (b *Backend) SetFacilityLock(ctx context.Context, facility Facility, enable
 	if enabled {
 		operation = mbimproto.PinOperationEnable
 	}
-	if _, err := b.client.SetPIN(ctx, facilityToMBIMPIN(facility), operation, key, ""); err != nil {
+	if _, err := b.client.SetPIN(ctx, pinType(facility), operation, key, ""); err != nil {
 		return fmt.Errorf("setting MBIM facility lock: %w", err)
 	}
 	return nil
 }
 
 func (b *Backend) UnblockFacilityLock(ctx context.Context, facility Facility, key string) error {
-	if _, err := b.client.SetPIN(ctx, facilityToMBIMPUK(facility), mbimproto.PinOperationEnter, key, ""); err != nil {
+	if _, err := b.client.SetPIN(ctx, pukType(facility), mbimproto.PinOperationEnter, key, ""); err != nil {
 		return fmt.Errorf("unblocking MBIM facility lock: %w", err)
 	}
 	return nil
@@ -544,8 +544,8 @@ func (b *Backend) InitialEPSBearer(ctx context.Context) (InitialEPSConfig, error
 	}
 	return InitialEPSConfig{
 		APN:            info.AccessString,
-		IPFamily:       mbimIPFamily(info.IPType),
-		Authentication: mbimAuthentication(info.AuthProtocol),
+		IPFamily:       ipFamily(info.IPType),
+		Authentication: authentication(info.AuthProtocol),
 		Username:       info.UserName,
 		Password:       info.Password,
 	}, nil
@@ -558,7 +558,7 @@ func (b *Backend) InitialEPSSettings(ctx context.Context) (InitialEPSConfig, err
 	}
 	for _, current := range configurations {
 		if current.Roaming == mbimproto.LTEAttachRoamingControlHome {
-			return initialEPSFromMBIM(current), nil
+			return initialEPSConfig(current), nil
 		}
 	}
 	return InitialEPSConfig{}, fmt.Errorf("reading MBIM initial EPS settings: home configuration: %w", ErrNotSupported)
@@ -570,13 +570,13 @@ func (b *Backend) SetInitialEPSSettings(ctx context.Context, cfg InitialEPSConfi
 		return InitialEPSConfig{}, fmt.Errorf("reading MBIM initial EPS settings: %w", err)
 	}
 	home := mbimproto.LTEAttachConfiguration{
-		IPType:       ipFamilyToMBIM(cfg.IPFamily),
+		IPType:       contextIPType(cfg.IPFamily),
 		Roaming:      mbimproto.LTEAttachRoamingControlHome,
 		Source:       mbimproto.ContextSourceUser,
 		AccessString: cfg.APN,
 		UserName:     cfg.Username,
 		Password:     cfg.Password,
-		AuthProtocol: authenticationToMBIM(cfg.Authentication),
+		AuthProtocol: authProtocol(cfg.Authentication),
 	}
 	found := false
 	for i := range configurations {
@@ -595,17 +595,17 @@ func (b *Backend) SetInitialEPSSettings(ctx context.Context, cfg InitialEPSConfi
 	}
 	for _, current := range updated {
 		if current.Roaming == mbimproto.LTEAttachRoamingControlHome {
-			return initialEPSFromMBIM(current), nil
+			return initialEPSConfig(current), nil
 		}
 	}
 	return InitialEPSConfig{}, errors.New("setting MBIM initial EPS settings: home configuration missing from response")
 }
 
-func mbimFacilityLock(facility Facility, desc mbimproto.PinDesc) FacilityLock {
+func facilityLock(facility Facility, desc mbimproto.PinDesc) FacilityLock {
 	return FacilityLock{Facility: facility, Enabled: desc.Mode == mbimproto.PinModeEnabled}
 }
 
-func facilityToMBIMPIN(facility Facility) mbimproto.PinType {
+func pinType(facility Facility) mbimproto.PinType {
 	switch facility {
 	case FacilityNetworkSubset:
 		return mbimproto.PinTypeNetworkSubset
@@ -618,7 +618,7 @@ func facilityToMBIMPIN(facility Facility) mbimproto.PinType {
 	}
 }
 
-func facilityToMBIMPUK(facility Facility) mbimproto.PinType {
+func pukType(facility Facility) mbimproto.PinType {
 	switch facility {
 	case FacilityNetworkSubset:
 		return mbimproto.PinTypeNetworkSubsetPUK
@@ -631,7 +631,7 @@ func facilityToMBIMPUK(facility Facility) mbimproto.PinType {
 	}
 }
 
-func mbimPINFacility(pin mbimproto.PinType) (Facility, bool) {
+func facilityFromPINType(pin mbimproto.PinType) (Facility, bool) {
 	switch pin {
 	case mbimproto.PinTypeNetwork, mbimproto.PinTypeNetworkPUK:
 		return FacilityNetwork, pin == mbimproto.PinTypeNetworkPUK
@@ -646,11 +646,11 @@ func mbimPINFacility(pin mbimproto.PinType) (Facility, bool) {
 	}
 }
 
-func initialEPSFromMBIM(value mbimproto.LTEAttachConfiguration) InitialEPSConfig {
+func initialEPSConfig(value mbimproto.LTEAttachConfiguration) InitialEPSConfig {
 	return InitialEPSConfig{
 		APN:            value.AccessString,
-		IPFamily:       mbimIPFamily(value.IPType),
-		Authentication: mbimAuthentication(value.AuthProtocol),
+		IPFamily:       ipFamily(value.IPType),
+		Authentication: authentication(value.AuthProtocol),
 		Username:       value.UserName,
 		Password:       value.Password,
 	}
@@ -661,10 +661,10 @@ func (b *Backend) Signal(ctx context.Context) (Signal, error) {
 	if err != nil {
 		return Signal{}, fmt.Errorf("reading MBIM signal: %w", err)
 	}
-	return signalFromMBIM(state), nil
+	return signalFromState(state), nil
 }
 
-func signalFromMBIM(state mbimproto.SignalStateInfo) Signal {
+func signalFromState(state mbimproto.SignalStateInfo) Signal {
 	result := Signal{}
 	if state.RSSI <= 31 {
 		rssi := -113 + float64(state.RSSI)*2
@@ -672,7 +672,7 @@ func signalFromMBIM(state mbimproto.SignalStateInfo) Signal {
 		result.Radios = append(result.Radios, RadioSignal{RSSI: knownSignal(rssi)})
 	}
 	for _, value := range state.RsrpSnr {
-		radio := RadioSignal{Technology: mbimDataClass(value.SystemType)}
+		radio := RadioSignal{Technology: technologyFromDataClass(value.SystemType)}
 		if value.RSRP <= 126 {
 			radio.RSRP = knownSignal(float64(value.RSRP) - 156)
 		}
@@ -705,7 +705,7 @@ func (b *Backend) Profiles(ctx context.Context) ([]Profile, error) {
 	if err == nil {
 		result := make([]Profile, len(contexts))
 		for i, value := range contexts {
-			result[i] = mbimProfileV2(value)
+			result[i] = profileFromV2(value)
 		}
 		return result, nil
 	}
@@ -715,31 +715,31 @@ func (b *Backend) Profiles(ctx context.Context) ([]Profile, error) {
 	}
 	result := make([]Profile, len(legacy))
 	for i, value := range legacy {
-		result[i] = mbimProfile(value)
+		result[i] = profileFromV1(value)
 	}
 	return result, nil
 }
 
 func (b *Backend) CreateProfile(ctx context.Context, cfg ProfileConfig) (Profile, error) {
-	value := mbimProfileV2Config(math.MaxUint32, cfg)
+	value := profileV2Config(math.MaxUint32, cfg)
 	contexts, v2Err := b.client.SetProvisionedContextV2(ctx, mbimproto.ContextOperationDefault, value)
 	if v2Err == nil {
 		for _, current := range contexts {
 			if current.AccessString == cfg.APN && current.UserName == cfg.Username {
-				return mbimProfileV2(current), nil
+				return profileFromV2(current), nil
 			}
 		}
 		return Profile{}, errors.New("creating MBIM profile: modem did not return the created V2 profile")
 	}
 
-	legacy := mbimproto.ProvisionedContext{ContextID: math.MaxUint32, ContextType: apnTypeToMBIM(cfg.APNType), AccessString: cfg.APN, UserName: cfg.Username, Password: cfg.Password, AuthProtocol: authenticationToMBIM(cfg.Authentication)}
+	legacy := mbimproto.ProvisionedContext{ContextID: math.MaxUint32, ContextType: contextType(cfg.APNType), AccessString: cfg.APN, UserName: cfg.Username, Password: cfg.Password, AuthProtocol: authProtocol(cfg.Authentication)}
 	contextsV1, err := b.client.SetProvisionedContext(ctx, legacy, "")
 	if err != nil {
 		return Profile{}, fmt.Errorf("creating MBIM profile: %w", errors.Join(v2Err, err))
 	}
 	for _, current := range contextsV1 {
 		if current.AccessString == cfg.APN && current.UserName == cfg.Username {
-			return mbimProfile(current), nil
+			return profileFromV1(current), nil
 		}
 	}
 	return Profile{}, errors.New("creating MBIM profile: modem did not return the created profile")
@@ -752,14 +752,14 @@ func (b *Backend) UpdateProfile(ctx context.Context, update ProfileUpdate) (Prof
 			if current.ContextID != uint32(update.ID) {
 				continue
 			}
-			applyMBIMProfileV2Update(&current, update)
+			applyProfileV2Update(&current, update)
 			updated, err := b.client.SetProvisionedContextV2(ctx, mbimproto.ContextOperationDefault, current)
 			if err != nil {
 				return Profile{}, fmt.Errorf("updating MBIM V2 profile: %w", err)
 			}
 			for _, result := range updated {
 				if result.ContextID == uint32(update.ID) {
-					return mbimProfileV2(result), nil
+					return profileFromV2(result), nil
 				}
 			}
 			return Profile{}, fmt.Errorf("updating MBIM V2 profile: profile %d missing from response", update.ID)
@@ -794,10 +794,10 @@ func (b *Backend) UpdateProfile(ctx context.Context, update ProfileUpdate) (Prof
 		value.Password = *update.Password
 	}
 	if update.Authentication != nil {
-		value.AuthProtocol = authenticationToMBIM(*update.Authentication)
+		value.AuthProtocol = authProtocol(*update.Authentication)
 	}
 	if update.APNType != nil {
-		value.ContextType = apnTypeToMBIM(*update.APNType)
+		value.ContextType = contextType(*update.APNType)
 	}
 	updated, err := b.client.SetProvisionedContext(ctx, *value, "")
 	if err != nil {
@@ -805,29 +805,29 @@ func (b *Backend) UpdateProfile(ctx context.Context, update ProfileUpdate) (Prof
 	}
 	for _, current := range updated {
 		if current.ContextID == uint32(update.ID) {
-			return mbimProfile(current), nil
+			return profileFromV1(current), nil
 		}
 	}
 	return Profile{}, fmt.Errorf("updating MBIM profile: profile %d missing from response", update.ID)
 }
 
-func mbimProfileV2Config(id uint32, cfg ProfileConfig) mbimproto.ProvisionedContextV2 {
+func profileV2Config(id uint32, cfg ProfileConfig) mbimproto.ProvisionedContextV2 {
 	return mbimproto.ProvisionedContextV2{
 		ContextID:    id,
-		ContextType:  apnTypeToMBIM(cfg.APNType),
-		IPType:       ipFamilyToMBIM(cfg.IPFamily),
-		State:        mbimContextState(cfg.Enabled),
+		ContextType:  contextType(cfg.APNType),
+		IPType:       contextIPType(cfg.IPFamily),
+		State:        contextState(cfg.Enabled),
 		Roaming:      mbimproto.ContextRoamingControlAllowAll,
 		MediaType:    mbimproto.ContextMediaTypeCellularOnly,
 		Source:       mbimproto.ContextSourceUser,
 		AccessString: cfg.APN,
 		UserName:     cfg.Username,
 		Password:     cfg.Password,
-		AuthProtocol: authenticationToMBIM(cfg.Authentication),
+		AuthProtocol: authProtocol(cfg.Authentication),
 	}
 }
 
-func applyMBIMProfileV2Update(value *mbimproto.ProvisionedContextV2, update ProfileUpdate) {
+func applyProfileV2Update(value *mbimproto.ProvisionedContextV2, update ProfileUpdate) {
 	if update.APN != nil {
 		value.AccessString = *update.APN
 	}
@@ -838,20 +838,20 @@ func applyMBIMProfileV2Update(value *mbimproto.ProvisionedContextV2, update Prof
 		value.Password = *update.Password
 	}
 	if update.IPFamily != nil {
-		value.IPType = ipFamilyToMBIM(*update.IPFamily)
+		value.IPType = contextIPType(*update.IPFamily)
 	}
 	if update.Authentication != nil {
-		value.AuthProtocol = authenticationToMBIM(*update.Authentication)
+		value.AuthProtocol = authProtocol(*update.Authentication)
 	}
 	if update.Enabled != nil {
-		value.State = mbimContextState(*update.Enabled)
+		value.State = contextState(*update.Enabled)
 	}
 	if update.APNType != nil {
-		value.ContextType = apnTypeToMBIM(*update.APNType)
+		value.ContextType = contextType(*update.APNType)
 	}
 }
 
-func mbimContextState(enabled bool) mbimproto.ContextState {
+func contextState(enabled bool) mbimproto.ContextState {
 	if enabled {
 		return mbimproto.ContextStateEnabled
 	}
@@ -900,14 +900,14 @@ func (b *Backend) CellInfo(ctx context.Context) ([]CellInfo, error) {
 	}
 	stations, err := b.client.BaseStationsInfo(ctx, mbimproto.BaseStationCounts{LTE: 1})
 	if err == nil {
-		applyMBIMLTEServingCell(&cell, stations.LTEServingCell)
+		applyLTEServingCell(&cell, stations.LTEServingCell)
 	} else if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 	return []CellInfo{cell}, nil
 }
 
-func applyMBIMLTEServingCell(cell *CellInfo, serving *mbimproto.LTEServingCell) {
+func applyLTEServingCell(cell *CellInfo, serving *mbimproto.LTEServingCell) {
 	if cell == nil || serving == nil {
 		return
 	}
@@ -968,14 +968,14 @@ func (b *Backend) FirmwareUpdateInfo(ctx context.Context) (FirmwareUpdateInfo, e
 	return result, nil
 }
 
-func mbimPowerState(state mbimproto.RadioStateInfo) PowerState {
+func powerState(state mbimproto.RadioStateInfo) PowerState {
 	if state.HwRadioState == mbimproto.RadioSwitchStateOff || state.SwRadioState == mbimproto.RadioSwitchStateOff {
 		return PowerStateLow
 	}
 	return PowerStateOn
 }
 
-func mbimSIMState(state mbimproto.SubscriberReadyState) SIMState {
+func simState(state mbimproto.SubscriberReadyState) SIMState {
 	switch state {
 	case mbimproto.SubscriberReadyStateInitialized:
 		return SIMStateReady
@@ -990,7 +990,7 @@ func mbimSIMState(state mbimproto.SubscriberReadyState) SIMState {
 	}
 }
 
-func mbimSlotSIMState(state mbimproto.UICCSlotState) SIMState {
+func slotSIMState(state mbimproto.UICCSlotState) SIMState {
 	switch state {
 	case mbimproto.UICCSlotStateOffEmpty, mbimproto.UICCSlotStateEmpty, mbimproto.UICCSlotStateActiveESIMNoProfiles:
 		return SIMStateAbsent
@@ -1003,7 +1003,7 @@ func mbimSlotSIMState(state mbimproto.UICCSlotState) SIMState {
 	}
 }
 
-func mbimRegistrationState(state mbimproto.RegisterState) RegistrationState {
+func registrationState(state mbimproto.RegisterState) RegistrationState {
 	switch state {
 	case mbimproto.RegisterStateDeregistered:
 		return RegistrationIdle
@@ -1020,7 +1020,7 @@ func mbimRegistrationState(state mbimproto.RegisterState) RegistrationState {
 	}
 }
 
-func technologyToMBIMDataClass(technology Technology) mbimproto.DataClass {
+func dataClass(technology Technology) mbimproto.DataClass {
 	var result mbimproto.DataClass
 	if technology&TechnologyGSM != 0 {
 		result |= mbimproto.DataClassGPRS | mbimproto.DataClassEDGE
@@ -1040,21 +1040,21 @@ func technologyToMBIMDataClass(technology Technology) mbimproto.DataClass {
 	return result
 }
 
-func mbimCellularClass(class mbimproto.CellularClass) Technology {
+func technologyFromCellularClass(class mbimproto.CellularClass) Technology {
 	if class&mbimproto.CellularClassGSM != 0 {
 		return TechnologyGSM | TechnologyUMTS | TechnologyLTE | TechnologyNR5GNSA | TechnologyNR5GSA
 	}
 	return 0
 }
 
-func technologyToMBIMCellularClass(technology Technology) mbimproto.CellularClass {
+func cellularClass(technology Technology) mbimproto.CellularClass {
 	if technology&TechnologyAny != 0 {
 		return mbimproto.CellularClassGSM
 	}
 	return mbimproto.CellularClassNone
 }
 
-func authenticationToMBIM(authentication Authentication) mbimproto.AuthProtocol {
+func authProtocol(authentication Authentication) mbimproto.AuthProtocol {
 	switch {
 	case authentication&AuthenticationMSCHAPv2 != 0:
 		return mbimproto.AuthProtocolMSCHAPV2
@@ -1067,8 +1067,8 @@ func authenticationToMBIM(authentication Authentication) mbimproto.AuthProtocol 
 	}
 }
 
-func mbimAuthentication(authentication mbimproto.AuthProtocol) Authentication {
-	switch authentication {
+func authentication(protocol mbimproto.AuthProtocol) Authentication {
+	switch protocol {
 	case mbimproto.AuthProtocolPAP:
 		return AuthenticationPAP
 	case mbimproto.AuthProtocolCHAP:
@@ -1080,7 +1080,7 @@ func mbimAuthentication(authentication mbimproto.AuthProtocol) Authentication {
 	}
 }
 
-func mbimIPFamily(typ mbimproto.ContextIPType) IPFamily {
+func ipFamily(typ mbimproto.ContextIPType) IPFamily {
 	switch typ {
 	case mbimproto.ContextIPTypeIPv4:
 		return IPFamilyIPv4
@@ -1093,15 +1093,15 @@ func mbimIPFamily(typ mbimproto.ContextIPType) IPFamily {
 	}
 }
 
-func mbimProfile(value mbimproto.ProvisionedContext) Profile {
-	return Profile{ID: int32(value.ContextID), APN: value.AccessString, Authentication: mbimAuthentication(value.AuthProtocol), Username: value.UserName, Password: value.Password, APNType: mbimAPNType(value.ContextType), Enabled: true}
+func profileFromV1(value mbimproto.ProvisionedContext) Profile {
+	return Profile{ID: int32(value.ContextID), APN: value.AccessString, Authentication: authentication(value.AuthProtocol), Username: value.UserName, Password: value.Password, APNType: apnType(value.ContextType), Enabled: true}
 }
 
-func mbimProfileV2(value mbimproto.ProvisionedContextV2) Profile {
-	return Profile{ID: int32(value.ContextID), APN: value.AccessString, IPFamily: mbimIPFamily(value.IPType), Authentication: mbimAuthentication(value.AuthProtocol), Username: value.UserName, Password: value.Password, APNType: mbimAPNType(value.ContextType), Enabled: value.State == mbimproto.ContextStateEnabled}
+func profileFromV2(value mbimproto.ProvisionedContextV2) Profile {
+	return Profile{ID: int32(value.ContextID), APN: value.AccessString, IPFamily: ipFamily(value.IPType), Authentication: authentication(value.AuthProtocol), Username: value.UserName, Password: value.Password, APNType: apnType(value.ContextType), Enabled: value.State == mbimproto.ContextStateEnabled}
 }
 
-func apnTypeToMBIM(value APNType) mbimproto.ContextType {
+func contextType(value APNType) mbimproto.ContextType {
 	switch {
 	case value&APNTypeDefault != 0:
 		return mbimproto.ContextTypeInternet
@@ -1120,7 +1120,7 @@ func apnTypeToMBIM(value APNType) mbimproto.ContextType {
 	}
 }
 
-func mbimAPNType(value mbimproto.ContextType) APNType {
+func apnType(value mbimproto.ContextType) APNType {
 	switch value {
 	case mbimproto.ContextTypeInternet:
 		return APNTypeDefault

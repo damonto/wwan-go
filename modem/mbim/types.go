@@ -181,6 +181,12 @@ const (
 type Device = contract.Device
 type Port = contract.Port
 type PortType = contract.PortType
+type PortRole = contract.PortRole
+type BusType = contract.BusType
+type USBIdentity = contract.USBIdentity
+type USBInterface = contract.USBInterface
+type QMIEndpointType = contract.QMIEndpointType
+type QMIEndpoint = contract.QMIEndpoint
 
 const (
 	PortUnknown = contract.PortUnknown
@@ -188,6 +194,26 @@ const (
 	PortMBIM    = contract.PortMBIM
 	PortAT      = contract.PortAT
 	PortNetwork = contract.PortNetwork
+	PortGPS     = contract.PortGPS
+	PortQCDM    = contract.PortQCDM
+	PortDebug   = contract.PortDebug
+	PortAudio   = contract.PortAudio
+
+	PortRoleUnknown   = contract.PortRoleUnknown
+	PortRolePrimary   = contract.PortRolePrimary
+	PortRoleSecondary = contract.PortRoleSecondary
+	PortRolePPP       = contract.PortRolePPP
+
+	BusUnknown  = contract.BusUnknown
+	BusUSB      = contract.BusUSB
+	BusPlatform = contract.BusPlatform
+
+	QMIEndpointUnknown  = contract.QMIEndpointUnknown
+	QMIEndpointHSIC     = contract.QMIEndpointHSIC
+	QMIEndpointHSUSB    = contract.QMIEndpointHSUSB
+	QMIEndpointPCIe     = contract.QMIEndpointPCIe
+	QMIEndpointEmbedded = contract.QMIEndpointEmbedded
+	QMIEndpointBAMDMUX  = contract.QMIEndpointBAMDMUX
 )
 
 type DeviceEvent = contract.DeviceEvent

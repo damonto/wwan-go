@@ -571,6 +571,35 @@ func TestQMUXClientIDRejectsExtendedService(t *testing.T) {
 	}
 }
 
+func TestReleaseServiceClientIDAcceptsAlreadyInvalid(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "modem already discarded client ID"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeTransport{t: t, calls: []transportCall{{
+				resp: errorResponse(MessageReleaseClientID, QMIErrorInvalidClientId),
+			}}}
+			allocated := allocatedClientID{service: ServiceDMS, clientID: 5}
+			client := &Client{
+				transport:          transport,
+				clientIDs:          map[ServiceType]uint8{ServiceDMS: 5},
+				allocatedClientIDs: map[allocatedClientID]struct{}{allocated: {}},
+			}
+
+			if err := client.releaseServiceClientID(context.Background(), ServiceDMS, 5); err != nil {
+				t.Fatalf("releaseServiceClientID() error = %v", err)
+			}
+			if len(client.allocatedClientIDs) != 0 {
+				t.Fatalf("allocated client IDs = %v, want empty", client.allocatedClientIDs)
+			}
+		})
+	}
+}
+
 func TestClientReallocatesInvalidServiceClient(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1239,6 +1268,33 @@ func TestClientCloseIsIdempotent(t *testing.T) {
 	}
 	if reader.transport != nil {
 		t.Fatal("Transport was not cleared")
+	}
+}
+
+func TestClientCloseAcceptsAlreadyInvalidClientID(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "modem discarded client before close"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeTransport{t: t, calls: []transportCall{{
+				resp: errorResponse(MessageReleaseClientID, QMIErrorInvalidClientId),
+			}}}
+			client := &Client{
+				transport: transport,
+				clientIDs: map[ServiceType]uint8{ServiceUIM: 7},
+			}
+
+			if err := client.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			if transport.closeCalls != 1 {
+				t.Fatalf("transport Close() calls = %d, want 1", transport.closeCalls)
+			}
+		})
 	}
 }
 

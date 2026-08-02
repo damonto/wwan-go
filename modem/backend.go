@@ -66,6 +66,10 @@ type bearerBackend interface {
 	Connect(context.Context, ConnectConfig) (sessionBackend, error)
 }
 
+type dataPortBearerBackend interface {
+	ConnectPort(context.Context, ConnectConfig, Port) (sessionBackend, error)
+}
+
 type sessionBackend = contract.Session
 
 type messagingBackend interface {

@@ -27,7 +27,7 @@ func (b *Backend) ListMessages(ctx context.Context) ([]Message, error) {
 		part.Message.ID = record.MessageIndex
 		part.Message.Storage = MessageStorageDevice
 		part.Message.Refs = []MessageRef{{Storage: MessageStorageDevice, ID: record.MessageIndex}}
-		part.Message.State = mbimMessageState(record.MessageStatus)
+		part.Message.State = messageState(record.MessageStatus)
 		parts = append(parts, part)
 	}
 	return sms.Assemble(parts), nil
@@ -56,7 +56,7 @@ func (b *Backend) ReadMessage(ctx context.Context, id uint32) (Message, error) {
 	part.Message.ID = record.MessageIndex
 	part.Message.Storage = MessageStorageDevice
 	part.Message.Refs = []MessageRef{{Storage: MessageStorageDevice, ID: record.MessageIndex}}
-	part.Message.State = mbimMessageState(record.MessageStatus)
+	part.Message.State = messageState(record.MessageStatus)
 	return sms.CloneMessage(part.Message), nil
 }
 
@@ -217,13 +217,13 @@ func flashMessageParts(read mbimproto.SMSReadInfo) ([]sms.Part, error) {
 		if err := part.UnmarshalBinary(record.PDU); err != nil {
 			return nil, fmt.Errorf("decoding MBIM flash message %d: %w", i+1, err)
 		}
-		part.Message.State = mbimMessageState(record.MessageStatus)
+		part.Message.State = messageState(record.MessageStatus)
 		parts = append(parts, part)
 	}
 	return parts, nil
 }
 
-func mbimMessageState(status mbimproto.SMSStatus) MessageState {
+func messageState(status mbimproto.SMSStatus) MessageState {
 	switch status {
 	case mbimproto.SMSStatusNew:
 		return MessageStateReceivedUnread

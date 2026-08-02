@@ -4,6 +4,7 @@ package modem
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,7 +25,7 @@ func TestDiscoverFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	devices, err := discover(context.Background(), sysRoot, devRoot, false)
+	devices, err := discover(context.Background(), discoveryConfig{sysRoot: sysRoot, devRoot: devRoot})
 	if err != nil {
 		t.Fatalf("discover() error = %v", err)
 	}
@@ -40,17 +41,17 @@ func TestDiscoverFixture(t *testing.T) {
 			name:  "MBIM",
 			index: 0,
 			ports: []Port{
-				{Type: PortMBIM, Name: "cdc-wdm1", Path: filepath.Join(devRoot, "cdc-wdm1"), SysPath: filepath.Join(sysRoot, "class", "usbmisc", "cdc-wdm1"), Driver: "cdc_mbim"},
-				{Type: PortNetwork, Name: "wwan1", Driver: "cdc_mbim", ControlPath: filepath.Join(devRoot, "cdc-wdm1")},
-				{Type: PortNetwork, Name: "wwan1.1", Driver: "cdc_mbim", ControlPath: filepath.Join(devRoot, "cdc-wdm1")},
+				{Type: PortMBIM, Name: "cdc-wdm1", Path: filepath.Join(devRoot, "cdc-wdm1"), SysPath: filepath.Join(sysRoot, "class", "usbmisc", "cdc-wdm1"), Subsystem: "usbmisc", Driver: "cdc_mbim"},
+				{Type: PortNetwork, Name: "wwan1", Subsystem: "net", Driver: "cdc_mbim", ControlPath: filepath.Join(devRoot, "cdc-wdm1")},
+				{Type: PortNetwork, Name: "wwan1.1", Subsystem: "net", Driver: "cdc_mbim", ControlPath: filepath.Join(devRoot, "cdc-wdm1")},
 			},
 		},
 		{
 			name:  "QMI",
 			index: 1,
 			ports: []Port{
-				{Type: PortQMI, Name: "wwan0qmi", Path: filepath.Join(devRoot, "wwan0qmi"), SysPath: filepath.Join(sysRoot, "class", "wwan", "wwan0qmi"), Driver: "qmi_wwan"},
-				{Type: PortNetwork, Name: "wwan0", Driver: "qmi_wwan", ControlPath: filepath.Join(devRoot, "wwan0qmi")},
+				{Type: PortQMI, Name: "wwan0qmi", Path: filepath.Join(devRoot, "wwan0qmi"), SysPath: filepath.Join(sysRoot, "class", "wwan", "wwan0qmi"), Subsystem: "wwan", Driver: "qmi_wwan"},
+				{Type: PortNetwork, Name: "wwan0", Subsystem: "net", Driver: "qmi_wwan", ControlPath: filepath.Join(devRoot, "wwan0qmi")},
 			},
 		},
 	}
@@ -84,11 +85,17 @@ func TestDiscoverAggregatesUSBPortsWithoutSelectingOne(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for name, value := range map[string]string{"idVendor": "2c7c\n", "idProduct": "0800\n"} {
+	for name, value := range map[string]string{"idVendor": "2c7c\n", "idProduct": "0306\n"} {
 		if err := os.WriteFile(filepath.Join(usbDevice, name), []byte(value), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
+	addUSBInterfaceMetadata(t, qmiInterface, 4, 0xff, 0xff, 0xff)
+	addUSBInterfaceMetadata(t, mbimInterface, 5, 0x02, 0x0e, 0x00)
+	addUSBInterfaceMetadata(t, atInterface, 2, 0xff, 0xff, 0xff)
+	addDriverLink(t, sysRoot, qmiInterface, "qmi_wwan")
+	addDriverLink(t, sysRoot, mbimInterface, "cdc_mbim")
+	addDriverLink(t, sysRoot, atInterface, "option")
 	qmiEntry := filepath.Join(sysRoot, "class", "usbmisc", "cdc-wdm0")
 	if err := os.MkdirAll(qmiEntry, 0o755); err != nil {
 		t.Fatal(err)
@@ -117,7 +124,7 @@ func TestDiscoverAggregatesUSBPortsWithoutSelectingOne(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	devices, err := discover(context.Background(), sysRoot, devRoot, false)
+	devices, err := discover(context.Background(), discoveryConfig{sysRoot: sysRoot, devRoot: devRoot})
 	if err != nil {
 		t.Fatalf("discover() error = %v", err)
 	}
@@ -128,15 +135,64 @@ func TestDiscoverAggregatesUSBPortsWithoutSelectingOne(t *testing.T) {
 	if device.PhysicalPath != usbDevice {
 		t.Fatalf("PhysicalPath = %q, want %q", device.PhysicalPath, usbDevice)
 	}
+	if device.Bus != BusUSB || device.USB != (USBIdentity{VendorID: 0x2c7c, ProductID: 0x0306}) {
+		t.Fatalf("device identity = %d/%#v, want USB 2c7c:0306", device.Bus, device.USB)
+	}
+	qmiUSB := USBInterface{Valid: true, Number: 4, Class: 0xff, Subclass: 0xff, Protocol: 0xff}
+	mbimUSB := USBInterface{Valid: true, Number: 5, Class: 0x02, Subclass: 0x0e}
+	atUSB := USBInterface{Valid: true, Number: 2, Class: 0xff, Subclass: 0xff, Protocol: 0xff}
 	wantPorts := []Port{
-		{Type: PortQMI, Name: "cdc-wdm0", Path: filepath.Join(devRoot, "cdc-wdm0"), SysPath: qmiEntry},
-		{Type: PortMBIM, Name: "wwan0mbim0", Path: filepath.Join(devRoot, "wwan0mbim0"), SysPath: mbimEntry},
-		{Type: PortAT, Name: "ttyUSB2", Path: filepath.Join(devRoot, "ttyUSB2"), SysPath: atEntry},
-		{Type: PortNetwork, Name: "wwan0", ControlPath: filepath.Join(devRoot, "cdc-wdm0")},
-		{Type: PortNetwork, Name: "wwan1", ControlPath: filepath.Join(devRoot, "wwan0mbim0")},
+		{Type: PortQMI, Name: "cdc-wdm0", Path: filepath.Join(devRoot, "cdc-wdm0"), SysPath: qmiEntry, Subsystem: "usbmisc", Driver: "qmi_wwan", USB: qmiUSB},
+		{Type: PortMBIM, Name: "wwan0mbim0", Path: filepath.Join(devRoot, "wwan0mbim0"), SysPath: mbimEntry, Subsystem: "wwan", Driver: "cdc_mbim", USB: mbimUSB},
+		{Type: PortAT, Role: PortRolePrimary, Name: "ttyUSB2", Path: filepath.Join(devRoot, "ttyUSB2"), SysPath: atEntry, Subsystem: "tty", Driver: "option", USB: atUSB},
+		{Type: PortNetwork, Name: "wwan0", Subsystem: "net", Driver: "qmi_wwan", USB: qmiUSB, QMIEndpoint: QMIEndpoint{Type: QMIEndpointHSUSB, InterfaceNumber: 4}, ControlPath: filepath.Join(devRoot, "cdc-wdm0")},
+		{Type: PortNetwork, Name: "wwan1", Subsystem: "net", Driver: "cdc_mbim", USB: mbimUSB, ControlPath: filepath.Join(devRoot, "wwan0mbim0")},
 	}
 	if !reflect.DeepEqual(device.Ports, wantPorts) {
 		t.Fatalf("Ports = %#v, want %#v", device.Ports, wantPorts)
+	}
+}
+
+func TestDiscoverPreservesKernelProtocolOnQCOMAncestor(t *testing.T) {
+	tests := []struct {
+		name     string
+		protocol string
+		portName string
+		want     PortType
+	}{
+		{name: "QMI uses SoC branch", protocol: "QMI", portName: "wwan0qmi0", want: PortQMI},
+		{name: "MBIM stays generic", protocol: "MBIM", portName: "wwan0mbim0", want: PortMBIM},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			sysRoot := filepath.Join(root, "sys")
+			devRoot := filepath.Join(root, "dev")
+			modemPath := filepath.Join(sysRoot, "devices", "platform", "soc", "modem")
+			portPath := filepath.Join(modemPath, "wwan", tt.portName)
+			entryPath := filepath.Join(sysRoot, "class", "wwan", tt.portName)
+			for _, path := range []string{portPath, entryPath} {
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			addPlatformDriverLink(t, sysRoot, modemPath, qcomSoCDriverName)
+			if err := os.WriteFile(filepath.Join(entryPath, "type"), []byte(tt.protocol+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(portPath, filepath.Join(entryPath, "device")); err != nil {
+				t.Fatal(err)
+			}
+
+			devices, err := discover(context.Background(), discoveryConfig{sysRoot: sysRoot, devRoot: devRoot})
+			if err != nil {
+				t.Fatalf("discover() error = %v", err)
+			}
+			if len(devices) != 1 || len(devices[0].Ports) != 1 || devices[0].Ports[0].Type != tt.want {
+				t.Fatalf("devices = %#v, want one kernel-confirmed port type %d", devices, tt.want)
+			}
+		})
 	}
 }
 
@@ -181,6 +237,27 @@ func TestKernelProtocolUsesMetadataOnly(t *testing.T) {
 
 			if got := kernelProtocol(entry); got != tt.want {
 				t.Errorf("kernelProtocol() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGenericTTYPortType(t *testing.T) {
+	tests := []struct {
+		name string
+		port string
+		want PortType
+	}{
+		{name: "USB serial", port: "ttyUSB0", want: PortAT},
+		{name: "CDC ACM", port: "ttyACM0", want: PortAT},
+		{name: "explicit AT name", port: "modem-at", want: PortAT},
+		{name: "unrecognized platform tty", port: "ttyHS0", want: PortUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := genericTTYPortType(tt.port); got != tt.want {
+				t.Errorf("genericTTYPortType(%q) = %d, want %d", tt.port, got, tt.want)
 			}
 		})
 	}
@@ -317,6 +394,7 @@ func TestModemUevent(t *testing.T) {
 		{name: "usbmisc", data: "change@/devices/x\x00SUBSYSTEM=usbmisc\x00", want: true},
 		{name: "net", data: "add@/devices/x\x00SUBSYSTEM=net\x00", want: true},
 		{name: "tty", data: "add@/devices/x\x00SUBSYSTEM=tty\x00", want: true},
+		{name: "rpmsg", data: "add@/devices/x\x00SUBSYSTEM=rpmsg\x00", want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -347,5 +425,31 @@ func addDiscoveryFixture(t *testing.T, sysRoot, class, name, protocol, driver st
 		if err := os.Mkdir(filepath.Join(entry, "device", "net", interfaceName), 0o755); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func addUSBInterfaceMetadata(t *testing.T, path string, number, class, subclass, protocol uint8) {
+	t.Helper()
+	values := map[string]uint8{
+		"bInterfaceNumber":   number,
+		"bInterfaceClass":    class,
+		"bInterfaceSubClass": subclass,
+		"bInterfaceProtocol": protocol,
+	}
+	for name, value := range values {
+		if err := os.WriteFile(filepath.Join(path, name), fmt.Appendf(nil, "%02x\n", value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func addDriverLink(t *testing.T, sysRoot, devicePath, driver string) {
+	t.Helper()
+	driverTarget := filepath.Join(sysRoot, "bus", "usb", "drivers", driver)
+	if err := os.MkdirAll(driverTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(driverTarget, filepath.Join(devicePath, "driver")); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"github.com/damonto/wwan-go/qcom"
 )
 
-const qmiDeviceStorageBit = uint32(1 << 31)
+const deviceStorageBit = uint32(1 << 31)
 
 func (*Backend) MessageStorages(context.Context) (MessageStorageInfo, error) {
 	return MessageStorageInfo{
@@ -37,10 +37,10 @@ func (b *Backend) ListMessages(ctx context.Context) ([]Message, error) {
 			if err := part.UnmarshalBinary(raw.Data); err != nil {
 				return nil, fmt.Errorf("decoding QMI message %d: %w", entry.Reference.Index, err)
 			}
-			part.Message.ID = qmiMessageID(entry.Reference)
-			part.Message.Storage = qmiMessageStorage(entry.Reference.Storage)
-			part.Message.Refs = []MessageRef{qmiStoredMessageRef(entry.Reference)}
-			part.Message.State = qmiMessageState(entry.Tag)
+			part.Message.ID = messageID(entry.Reference)
+			part.Message.Storage = messageStorage(entry.Reference.Storage)
+			part.Message.Refs = []MessageRef{storedMessageRef(entry.Reference)}
+			part.Message.State = messageState(entry.Tag)
 			parts = append(parts, part)
 		}
 	}
@@ -48,7 +48,7 @@ func (b *Backend) ListMessages(ctx context.Context) ([]Message, error) {
 }
 
 func (b *Backend) ReadStoredMessage(ctx context.Context, ref MessageRef) (Message, error) {
-	reference, err := qmiStoredReference(ref)
+	reference, err := storedReference(ref)
 	if err != nil {
 		return Message{}, err
 	}
@@ -56,7 +56,7 @@ func (b *Backend) ReadStoredMessage(ctx context.Context, ref MessageRef) (Messag
 }
 
 func (b *Backend) ReadMessage(ctx context.Context, id uint32) (Message, error) {
-	return b.readStoredMessage(ctx, qmiMessageReference(id))
+	return b.readStoredMessage(ctx, messageReference(id))
 }
 
 func (b *Backend) readStoredMessage(ctx context.Context, reference qcom.WMSMessageReference) (Message, error) {
@@ -72,10 +72,10 @@ func (b *Backend) readStoredMessage(ctx context.Context, reference qcom.WMSMessa
 	if err := part.UnmarshalBinary(raw.Data); err != nil {
 		return Message{}, fmt.Errorf("decoding QMI message %d: %w", reference.Index, err)
 	}
-	part.Message.ID = qmiMessageID(reference)
-	part.Message.Storage = qmiMessageStorage(reference.Storage)
-	part.Message.Refs = []MessageRef{qmiStoredMessageRef(reference)}
-	part.Message.State = qmiMessageState(raw.Tag)
+	part.Message.ID = messageID(reference)
+	part.Message.Storage = messageStorage(reference.Storage)
+	part.Message.Refs = []MessageRef{storedMessageRef(reference)}
+	part.Message.State = messageState(raw.Tag)
 	return sms.CloneMessage(part.Message), nil
 }
 
@@ -109,7 +109,7 @@ func (b *Backend) StoreMessage(ctx context.Context, cfg MessageConfig) ([]Messag
 		return nil, err
 	}
 	tag := qcom.WMSTagMONotSent
-	storage, err := qmiStorage(cfg.Storage)
+	storage, err := wmsStorage(cfg.Storage)
 	if err != nil {
 		return nil, err
 	}
@@ -123,9 +123,9 @@ func (b *Backend) StoreMessage(ctx context.Context, cfg MessageConfig) ([]Messag
 		if err := part.UnmarshalBinary(pdu); err != nil {
 			return nil, fmt.Errorf("decoding stored QMI message part %d: %w", len(result)+1, err)
 		}
-		part.Message.ID = qmiMessageID(reference)
-		part.Message.Storage = qmiMessageStorage(reference.Storage)
-		part.Message.Refs = []MessageRef{qmiStoredMessageRef(reference)}
+		part.Message.ID = messageID(reference)
+		part.Message.Storage = messageStorage(reference.Storage)
+		part.Message.Refs = []MessageRef{storedMessageRef(reference)}
 		part.Message.State = MessageStateStoredUnsent
 		result = append(result, sms.CloneMessage(part.Message))
 	}
@@ -133,11 +133,11 @@ func (b *Backend) StoreMessage(ctx context.Context, cfg MessageConfig) ([]Messag
 }
 
 func (b *Backend) DeleteMessage(ctx context.Context, id uint32) error {
-	return b.deleteStoredMessage(ctx, qmiMessageReference(id))
+	return b.deleteStoredMessage(ctx, messageReference(id))
 }
 
 func (b *Backend) DeleteStoredMessage(ctx context.Context, ref MessageRef) error {
-	reference, err := qmiStoredReference(ref)
+	reference, err := storedReference(ref)
 	if err != nil {
 		return err
 	}
@@ -186,11 +186,11 @@ func (b *Backend) WatchMessages(ctx context.Context) (<-chan Result[Message], er
 				return
 			}
 			if raw.Stored {
-				part.Message.ID = qmiMessageID(raw.Reference)
-				part.Message.Storage = qmiMessageStorage(raw.Reference.Storage)
-				part.Message.Refs = []MessageRef{qmiStoredMessageRef(raw.Reference)}
+				part.Message.ID = messageID(raw.Reference)
+				part.Message.Storage = messageStorage(raw.Reference.Storage)
+				part.Message.Refs = []MessageRef{storedMessageRef(raw.Reference)}
 			}
-			part.Message.State = qmiMessageState(raw.Tag)
+			part.Message.State = messageState(raw.Tag)
 			if raw.AckIndicator == qcom.WMSAckRequired {
 				if err := b.client.WMSAcknowledge(ctx, qcom.WMSAckRequest{TransactionID: raw.TransactionID, Protocol: qcom.WMSMessageProtocolWCDMA, Success: true}); err != nil {
 					sendStreamResult(ctx, out, Result[Message]{Err: err})
@@ -206,19 +206,19 @@ func (b *Backend) WatchMessages(ctx context.Context) (<-chan Result[Message], er
 	return out, nil
 }
 
-func qmiStoredMessageRef(reference qcom.WMSMessageReference) MessageRef {
-	return MessageRef{Storage: qmiMessageStorage(reference.Storage), ID: reference.Index}
+func storedMessageRef(reference qcom.WMSMessageReference) MessageRef {
+	return MessageRef{Storage: messageStorage(reference.Storage), ID: reference.Index}
 }
 
-func qmiStoredReference(ref MessageRef) (qcom.WMSMessageReference, error) {
-	storage, err := qmiStorage(ref.Storage)
+func storedReference(ref MessageRef) (qcom.WMSMessageReference, error) {
+	storage, err := wmsStorage(ref.Storage)
 	if err != nil {
 		return qcom.WMSMessageReference{}, err
 	}
 	return qcom.WMSMessageReference{Storage: storage, Index: ref.ID}, nil
 }
 
-func qmiStorage(storage MessageStorage) (qcom.WMSStorage, error) {
+func wmsStorage(storage MessageStorage) (qcom.WMSStorage, error) {
 	switch storage {
 	case MessageStorageUnknown, MessageStorageDevice:
 		return qcom.WMSStorageNV, nil
@@ -229,28 +229,28 @@ func qmiStorage(storage MessageStorage) (qcom.WMSStorage, error) {
 	}
 }
 
-func qmiMessageID(reference qcom.WMSMessageReference) uint32 {
+func messageID(reference qcom.WMSMessageReference) uint32 {
 	if reference.Storage == qcom.WMSStorageNV {
-		return reference.Index | qmiDeviceStorageBit
+		return reference.Index | deviceStorageBit
 	}
 	return reference.Index
 }
 
-func qmiMessageReference(id uint32) qcom.WMSMessageReference {
-	if id&qmiDeviceStorageBit != 0 {
-		return qcom.WMSMessageReference{Storage: qcom.WMSStorageNV, Index: id &^ qmiDeviceStorageBit}
+func messageReference(id uint32) qcom.WMSMessageReference {
+	if id&deviceStorageBit != 0 {
+		return qcom.WMSMessageReference{Storage: qcom.WMSStorageNV, Index: id &^ deviceStorageBit}
 	}
 	return qcom.WMSMessageReference{Storage: qcom.WMSStorageUIM, Index: id}
 }
 
-func qmiMessageStorage(storage qcom.WMSStorage) MessageStorage {
+func messageStorage(storage qcom.WMSStorage) MessageStorage {
 	if storage == qcom.WMSStorageUIM {
 		return MessageStorageSIM
 	}
 	return MessageStorageDevice
 }
 
-func qmiMessageState(tag qcom.WMSTag) MessageState {
+func messageState(tag qcom.WMSTag) MessageState {
 	switch tag {
 	case qcom.WMSTagMTRead:
 		return MessageStateReceivedRead

@@ -16,7 +16,7 @@ import (
 
 const closeTimeout = 5 * time.Second
 
-type mbimSession struct {
+type session struct {
 	mu        sync.RWMutex
 	backend   *Backend
 	id        uint32
@@ -26,6 +26,11 @@ type mbimSession struct {
 }
 
 func (b *Backend) Connect(ctx context.Context, cfg ConnectConfig) (sessionBackend, error) {
+	return b.ConnectPort(ctx, cfg, Port{Type: PortNetwork, Name: cfg.Interface})
+}
+
+// ConnectPort starts an MBIM data session on the selected network port.
+func (b *Backend) ConnectPort(ctx context.Context, cfg ConnectConfig, _ Port) (sessionBackend, error) {
 	interfaceName := cfg.Interface
 	if cfg.ProfileID != 0 {
 		profile, err := b.profile(ctx, cfg.ProfileID)
@@ -57,8 +62,8 @@ func (b *Backend) Connect(ctx context.Context, cfg ConnectConfig) (sessionBacken
 		AccessString:      cfg.APN,
 		UserName:          cfg.Username,
 		Password:          cfg.Password,
-		AuthProtocol:      authenticationToMBIM(cfg.Authentication),
-		IPType:            ipFamilyToMBIM(cfg.IPFamily),
+		AuthProtocol:      authProtocol(cfg.Authentication),
+		IPType:            contextIPType(cfg.IPFamily),
 		ContextType:       mbimproto.ContextTypeInternet,
 	})
 	if err != nil {
@@ -77,7 +82,7 @@ func (b *Backend) Connect(ctx context.Context, cfg ConnectConfig) (sessionBacken
 		return nil, errors.Join(fmt.Errorf("reading MBIM session IP configuration: %w", err), disconnectErr)
 	}
 	release = false
-	return &mbimSession{
+	return &session{
 		backend: b,
 		id:      sessionID,
 		started: time.Now(),
@@ -85,7 +90,7 @@ func (b *Backend) Connect(ctx context.Context, cfg ConnectConfig) (sessionBacken
 			Connected: true,
 			ProfileID: cfg.ProfileID,
 			APN:       cfg.APN,
-			Network:   mbimNetworkConfig(interfaceName, ip),
+			Network:   networkConfig(interfaceName, ip),
 		},
 	}, nil
 }
@@ -118,7 +123,7 @@ func (b *Backend) reserveSession(ctx context.Context, requested *uint32) (uint32
 	return b.reserveSessionID(maximum, requested)
 }
 
-type mbimSessionControl interface {
+type sessionControl interface {
 	QueryConnect(context.Context, mbimproto.SessionID) (mbimproto.ConnectInfo, error)
 	SetConnect(context.Context, mbimproto.ConnectConfig) (mbimproto.ConnectInfo, error)
 }
@@ -129,14 +134,14 @@ func (b *Backend) prepareSessions(ctx context.Context, maximum uint32) error {
 	if b.sessionsPrepared {
 		return nil
 	}
-	if err := cleanupStaleMBIMSessions(ctx, b.client, maximum); err != nil {
+	if err := cleanupStaleSessions(ctx, b.client, maximum); err != nil {
 		return fmt.Errorf("preparing MBIM data sessions: %w", err)
 	}
 	b.sessionsPrepared = true
 	return nil
 }
 
-func cleanupStaleMBIMSessions(ctx context.Context, client mbimSessionControl, maximum uint32) error {
+func cleanupStaleSessions(ctx context.Context, client sessionControl, maximum uint32) error {
 	for sessionID := range maximum {
 		info, err := client.QueryConnect(ctx, mbimproto.SessionID(sessionID))
 		if errors.Is(err, mbimproto.StatusContextNotActivated) {
@@ -196,7 +201,7 @@ func (b *Backend) releaseSession(id uint32) {
 	b.mu.Unlock()
 }
 
-func (s *mbimSession) Info() BearerInfo {
+func (s *session) Info() BearerInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := s.infoValue
@@ -204,7 +209,7 @@ func (s *mbimSession) Info() BearerInfo {
 	return result
 }
 
-func (s *mbimSession) Stats(ctx context.Context) (BearerStats, error) {
+func (s *session) Stats(ctx context.Context) (BearerStats, error) {
 	stats, err := s.backend.client.PacketStatistics(ctx)
 	if err != nil {
 		return BearerStats{}, fmt.Errorf("reading MBIM bearer statistics: %w", err)
@@ -218,7 +223,7 @@ func (s *mbimSession) Stats(ctx context.Context) (BearerStats, error) {
 	}, nil
 }
 
-func (s *mbimSession) Watch(ctx context.Context) (<-chan Result[BearerEvent], error) {
+func (s *session) Watch(ctx context.Context) (<-chan Result[BearerEvent], error) {
 	return contract.PollStream(ctx, 2*time.Second, func(ctx context.Context) (BearerEvent, error) {
 		connect, err := s.backend.client.QueryConnect(ctx, mbimproto.SessionID(s.id))
 		if err != nil {
@@ -235,14 +240,14 @@ func (s *mbimSession) Watch(ctx context.Context) (<-chan Result[BearerEvent], er
 				return BearerEvent{}, fmt.Errorf("reading MBIM bearer IP configuration: %w", err)
 			}
 			s.mu.Lock()
-			s.infoValue.Network = mbimNetworkConfig(interfaceName, ip)
+			s.infoValue.Network = networkConfig(interfaceName, ip)
 			s.mu.Unlock()
 		}
 		return BearerEvent{Info: s.Info()}, nil
 	}), nil
 }
 
-func (s *mbimSession) Disconnect(ctx context.Context) error {
+func (s *session) Disconnect(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -262,13 +267,13 @@ func (s *mbimSession) Disconnect(ctx context.Context) error {
 	return nil
 }
 
-func (s *mbimSession) Close() error {
+func (s *session) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 	defer cancel()
 	return s.Disconnect(ctx)
 }
 
-func mbimNetworkConfig(interfaceName string, info mbimproto.IPConfigurationInfo) NetworkConfig {
+func networkConfig(interfaceName string, info mbimproto.IPConfigurationInfo) NetworkConfig {
 	result := NetworkConfig{Interface: interfaceName, MTU: max(info.IPv4MTU, info.IPv6MTU)}
 	addresses := append(slices.Clone(info.IPv4Addresses), info.IPv6Addresses...)
 	for _, address := range addresses {
@@ -297,7 +302,7 @@ func cloneNetworkConfig(config NetworkConfig) NetworkConfig {
 	return config
 }
 
-func ipFamilyToMBIM(family IPFamily) mbimproto.ContextIPType {
+func contextIPType(family IPFamily) mbimproto.ContextIPType {
 	switch family {
 	case IPFamilyIPv4:
 		return mbimproto.ContextIPTypeIPv4

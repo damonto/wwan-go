@@ -187,7 +187,7 @@ func (b *Backend) WatchStatus(ctx context.Context) (<-chan Result[Status], error
 					sendWatchError(watchCtx, out, watchErrorResult(current, "decoding MBIM radio state indication", err))
 					return
 				}
-				current.Power = mbimPowerState(radio)
+				current.Power = powerState(radio)
 				if !contract.SendStreamResult(watchCtx, out, Result[Status]{Value: current}) {
 					return
 				}
@@ -205,7 +205,7 @@ func (b *Backend) WatchStatus(ctx context.Context) (<-chan Result[Status], error
 					sendWatchError(watchCtx, out, watchErrorResult(current, "decoding MBIM subscriber status indication", err))
 					return
 				}
-				current.SIM = mbimSIMState(ready.ReadyState)
+				current.SIM = simState(ready.ReadyState)
 				if !contract.SendStreamResult(watchCtx, out, Result[Status]{Value: current}) {
 					return
 				}
@@ -223,7 +223,7 @@ func (b *Backend) WatchStatus(ctx context.Context) (<-chan Result[Status], error
 					sendWatchError(watchCtx, out, watchErrorResult(current, "decoding MBIM registration state indication", err))
 					return
 				}
-				applyMBIMRegistrationToStatus(&current, registration)
+				applyRegistrationToStatus(&current, registration)
 				if !contract.SendStreamResult(watchCtx, out, Result[Status]{Value: current}) {
 					return
 				}
@@ -241,7 +241,7 @@ func (b *Backend) WatchStatus(ctx context.Context) (<-chan Result[Status], error
 					sendWatchError(watchCtx, out, watchErrorResult(current, "decoding MBIM packet service indication", err))
 					return
 				}
-				applyMBIMPacketToStatus(&current, packet)
+				applyPacketToStatus(&current, packet)
 				if !contract.SendStreamResult(watchCtx, out, Result[Status]{Value: current}) {
 					return
 				}
@@ -259,7 +259,7 @@ func (b *Backend) WatchStatus(ctx context.Context) (<-chan Result[Status], error
 					sendWatchError(watchCtx, out, watchErrorResult(current, "decoding MBIM signal state indication", err))
 					return
 				}
-				current.SignalQuality = signalFromMBIM(signal).Quality
+				current.SignalQuality = signalFromState(signal).Quality
 				if !contract.SendStreamResult(watchCtx, out, Result[Status]{Value: current}) {
 					return
 				}
@@ -398,7 +398,7 @@ func (b *Backend) WatchNetwork(ctx context.Context) (<-chan Result[NetworkStatus
 					sendWatchError(watchCtx, out, watchErrorResult(current, "decoding MBIM registration state indication", err))
 					return
 				}
-				applyMBIMRegistration(&current, registration)
+				applyRegistration(&current, registration)
 				if !contract.SendStreamResult(watchCtx, out, Result[NetworkStatus]{Value: current}) {
 					return
 				}
@@ -416,7 +416,7 @@ func (b *Backend) WatchNetwork(ctx context.Context) (<-chan Result[NetworkStatus
 					sendWatchError(watchCtx, out, watchErrorResult(current, "decoding MBIM packet service indication", err))
 					return
 				}
-				applyMBIMPacketService(&current, packet)
+				applyPacketService(&current, packet)
 				if !contract.SendStreamResult(watchCtx, out, Result[NetworkStatus]{Value: current}) {
 					return
 				}
@@ -487,7 +487,7 @@ func (b *Backend) WatchSignal(ctx context.Context) (<-chan Result[Signal], error
 					sendWatchError(watchCtx, out, watchErrorResult(Signal{}, "decoding MBIM signal state indication", err))
 					return
 				}
-				if !contract.SendStreamResult(watchCtx, out, Result[Signal]{Value: signalFromMBIM(signal)}) {
+				if !contract.SendStreamResult(watchCtx, out, Result[Signal]{Value: signalFromState(signal)}) {
 					return
 				}
 			case <-resync.C:
@@ -501,15 +501,15 @@ func (b *Backend) WatchSignal(ctx context.Context) (<-chan Result[Signal], error
 	return out, nil
 }
 
-func applyMBIMRegistrationToStatus(status *Status, registration mbimproto.RegistrationStateInfo) {
-	status.Registration = mbimRegistrationState(registration.RegisterState)
+func applyRegistrationToStatus(status *Status, registration mbimproto.RegistrationStateInfo) {
+	status.Registration = registrationState(registration.RegisterState)
 	status.OperatorID = registration.ProviderID
 	status.OperatorName = registration.ProviderName
 }
 
-func applyMBIMPacketToStatus(status *Status, packet mbimproto.PacketServiceInfo) {
+func applyPacketToStatus(status *Status, packet mbimproto.PacketServiceInfo) {
 	status.PacketService = PacketServiceState(packet.PacketServiceState)
-	status.Technology = mbimDataClass(packet.CurrentDataClass)
+	status.Technology = technologyFromDataClass(packet.CurrentDataClass)
 }
 
 func knownSignal(db float64) SignalValue { return SignalValue{DB: db, Known: true} }

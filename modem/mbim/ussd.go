@@ -15,7 +15,7 @@ const (
 )
 
 func (b *Backend) InitiateUSSD(ctx context.Context, text string) (USSDMessage, error) {
-	dcs, payload, err := encodeMBIMUSSD(text)
+	dcs, payload, err := encodeUSSD(text)
 	if err != nil {
 		return USSDMessage{}, err
 	}
@@ -23,11 +23,11 @@ func (b *Backend) InitiateUSSD(ctx context.Context, text string) (USSDMessage, e
 	if err != nil {
 		return USSDMessage{}, fmt.Errorf("initiating MBIM USSD: %w", err)
 	}
-	return mbimUSSDMessage(info)
+	return ussdMessage(info)
 }
 
 func (b *Backend) RespondUSSD(ctx context.Context, text string) (USSDMessage, error) {
-	dcs, payload, err := encodeMBIMUSSD(text)
+	dcs, payload, err := encodeUSSD(text)
 	if err != nil {
 		return USSDMessage{}, err
 	}
@@ -35,7 +35,7 @@ func (b *Backend) RespondUSSD(ctx context.Context, text string) (USSDMessage, er
 	if err != nil {
 		return USSDMessage{}, fmt.Errorf("responding to MBIM USSD: %w", err)
 	}
-	return mbimUSSDMessage(info)
+	return ussdMessage(info)
 }
 
 func (b *Backend) CancelUSSD(ctx context.Context) error {
@@ -77,7 +77,7 @@ func (b *Backend) WatchUSSD(ctx context.Context) (<-chan Result[USSDMessage], er
 				sendError(fmt.Errorf("decoding MBIM USSD event: %w", err))
 				return
 			}
-			message, err := mbimUSSDMessage(info)
+			message, err := ussdMessage(info)
 			if err != nil {
 				sendError(err)
 				return
@@ -90,7 +90,7 @@ func (b *Backend) WatchUSSD(ctx context.Context) (<-chan Result[USSDMessage], er
 	return out, nil
 }
 
-func encodeMBIMUSSD(text string) (uint32, []byte, error) {
+func encodeUSSD(text string) (uint32, []byte, error) {
 	septets, gsm7Err := sms.GSM7(text).MarshalBinary()
 	if gsm7Err == nil {
 		// Seven septets occupy seven octets and otherwise leave an ambiguous
@@ -114,8 +114,8 @@ func encodeMBIMUSSD(text string) (uint32, []byte, error) {
 	return ussdDCSUCS2, payload, nil
 }
 
-func mbimUSSDMessage(info mbimproto.USSDInfo) (USSDMessage, error) {
-	message := USSDMessage{State: mbimUSSDState(info), DCS: info.DataCodingScheme, Data: slices.Clone(info.Payload)}
+func ussdMessage(info mbimproto.USSDInfo) (USSDMessage, error) {
+	message := USSDMessage{State: ussdState(info), DCS: info.DataCodingScheme, Data: slices.Clone(info.Payload)}
 	switch info.DataCodingScheme {
 	case ussdDCSGSM7:
 		septets := sms.UnpackSeptets(info.Payload, 0, len(info.Payload)*8/7)
@@ -141,7 +141,7 @@ func mbimUSSDMessage(info mbimproto.USSDInfo) (USSDMessage, error) {
 	return message, nil
 }
 
-func mbimUSSDState(info mbimproto.USSDInfo) USSDState {
+func ussdState(info mbimproto.USSDInfo) USSDState {
 	switch info.Response {
 	case mbimproto.USSDResponseActionRequired:
 		return USSDStateUserResponse

@@ -75,7 +75,7 @@ func (b *Backend) WatchStatus(ctx context.Context) (<-chan Result[Status], error
 				if !event.OperatingModeKnown {
 					continue
 				}
-				current.Power = qmiPowerState(event.OperatingMode)
+				current.Power = powerState(event.OperatingMode)
 				if !contract.SendStreamResult(watchCtx, out, Result[Status]{Value: current}) {
 					return
 				}
@@ -84,7 +84,7 @@ func (b *Backend) WatchStatus(ctx context.Context) (<-chan Result[Status], error
 					cardEvents = nil
 					break
 				}
-				current.SIM = qmiSIMState(status)
+				current.SIM = simStateFromCardStatus(status)
 				if !contract.SendStreamResult(watchCtx, out, Result[Status]{Value: current}) {
 					return
 				}

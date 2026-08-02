@@ -1,9 +1,11 @@
 package qcom
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"testing"
+	"time"
 
 	"github.com/damonto/wwan-go/qcom/tlv"
 )
@@ -242,6 +244,112 @@ func TestCATForceClaimEvents(t *testing.T) {
 			}
 			if got := reader.clientIDs[reader.catService]; got != tt.wantCatCID {
 				t.Fatalf("CAT client ID = %d, want %d", got, tt.wantCatCID)
+			}
+		})
+	}
+}
+
+func TestCATForceClaimCommandsSubscribesBeforeClaim(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "setup menu",
+			raw:  []byte{0xD0, 0x09, 0x81, 0x03, 0x01, 0x25, 0x00, 0x82, 0x02, 0x81, 0x82},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			subscribed := false
+			releaseStarted := make(chan struct{})
+			allowRelease := make(chan struct{})
+			transport := &fakeIndicationTransport{
+				onSubscribe: func() { subscribed = true },
+				fakeTransport: fakeTransport{
+					t: t,
+					calls: []transportCall{
+						{
+							check: func(req Request) {
+								if !subscribed {
+									t.Fatal("CAT event registration started before indication subscription")
+								}
+								if req.MessageID != MessageCATSetEventReport {
+									t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, MessageCATSetEventReport)
+								}
+							},
+							resp: successResponse(MessageCATSetEventReport),
+						},
+						{
+							check: func(req Request) {
+								if req.MessageID != MessageReleaseClientID {
+									t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, MessageReleaseClientID)
+								}
+								close(releaseStarted)
+								<-allowRelease
+							},
+							resp: successResponse(MessageReleaseClientID),
+						},
+					},
+				},
+			}
+			client := &Client{
+				transport:  transport,
+				slot:       1,
+				catService: ServiceCAT2,
+				clientIDs:  map[ServiceType]uint8{ServiceCAT2: 7},
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			commands, claim, err := NewCAT(client).ForceClaimCommands(ctx, CATEventClaimConfig{RawMask: 1 << 3})
+			if err != nil {
+				cancel()
+				t.Fatalf("ForceClaimCommands() error = %v", err)
+			}
+			if claim.Service != ServiceCAT2 || claim.ClientID != 7 {
+				cancel()
+				t.Fatalf("ForceClaimCommands() claim = %+v", claim)
+			}
+
+			value := binary.LittleEndian.AppendUint32(nil, 0x01020304)
+			value = binary.LittleEndian.AppendUint16(value, uint16(len(tt.raw)))
+			value = append(value, tt.raw...)
+			transport.emit(Indication{TLVs: tlv.TLVs{tlv.Bytes(0x13, value)}})
+
+			select {
+			case got := <-commands:
+				if got.Ref != 0x01020304 || !bytes.Equal(got.Data, tt.raw) {
+					t.Fatalf("command = %+v, want ref 0x01020304 data % X", got, tt.raw)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for command")
+			}
+			cancel()
+			select {
+			case <-releaseStarted:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for CAT client release")
+			}
+			select {
+			case _, ok := <-commands:
+				if !ok {
+					t.Fatal("commands closed before CAT client release completed")
+				}
+				t.Fatal("received unexpected command during CAT client release")
+			default:
+			}
+			close(allowRelease)
+			select {
+			case _, ok := <-commands:
+				if ok {
+					t.Fatal("received unexpected command after cancellation")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for commands to close")
+			}
+			if _, ok := client.clientIDs[ServiceCAT2]; ok {
+				t.Fatal("CAT client is still retained after commands closed")
 			}
 		})
 	}

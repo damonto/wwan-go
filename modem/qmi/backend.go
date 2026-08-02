@@ -20,11 +20,14 @@ import (
 )
 
 type Backend struct {
-	client      *qcom.Client
-	device      string
-	metadataMu  sync.Mutex
-	metadataKey string
-	metadata    SIMInfo
+	client       *qcom.Client
+	device       string
+	metadataMu   sync.Mutex
+	metadataKey  string
+	metadata     SIMInfo
+	ipaMu        sync.Mutex
+	ipaReady     map[string]struct{}
+	newRMNetLink func(context.Context, string, uint32) (*rmnetLink, error)
 }
 
 func New(client *qcom.Client, device string) *Backend {
@@ -77,27 +80,27 @@ func (b *Backend) Capabilities(ctx context.Context) (Capabilities, error) {
 	if err != nil {
 		return Capabilities{}, fmt.Errorf("reading QMI service versions: %w", err)
 	}
-	technologies := qmiRadioInterfaces(caps.RadioInterfaces)
+	technologies := technologyFromDMSRadios(caps.RadioInterfaces)
 	result := Capabilities{
 		SupportedTechnologies: technologies,
 		CurrentTechnologies:   technologies,
 		SupportedIPFamilies:   IPFamilyIPv4v6,
-		Features:              qmiFeatures(versions),
+		Features:              featuresFromVersions(versions),
 		MaxBearers:            uint32(caps.MaxActiveDataSubscriptions),
 		MaxActiveBearers:      uint32(caps.MaxActiveDataSubscriptions),
 		MaxSIMSlots:           1,
 	}
 	if result.Features&FeatureFacilityLocks != 0 {
-		if _, lockErr := b.client.DMSGetCKStatus(ctx, qcom.DMSUIMFacilityNetwork); qmiUnsupported(lockErr) {
+		if _, lockErr := b.client.DMSGetCKStatus(ctx, qcom.DMSUIMFacilityNetwork); isUnsupported(lockErr) {
 			result.Features &^= FeatureFacilityLocks
 		}
 	}
 	if result.Features&FeatureSAR != 0 {
-		if _, sarErr := b.client.SARRFState(ctx); qmiSARUnsupported(sarErr) {
+		if _, sarErr := b.client.SARRFState(ctx); isSARUnsupported(sarErr) {
 			result.Features &^= FeatureSAR
 		}
 	}
-	if hasQMIService(versions, qcom.ServiceUIM) {
+	if hasService(versions, qcom.ServiceUIM) {
 		if slots, slotErr := b.SIMSlots(ctx); slotErr == nil && len(slots) > 0 {
 			result.MaxSIMSlots = uint8(min(len(slots), math.MaxUint8))
 			if len(slots) > 1 {
@@ -108,7 +111,7 @@ func (b *Backend) Capabilities(ctx context.Context) (Capabilities, error) {
 	return result, nil
 }
 
-func qmiFeatures(versions []qcom.ServiceVersion) Feature {
+func featuresFromVersions(versions []qcom.ServiceVersion) Feature {
 	var features Feature
 	for _, version := range versions {
 		switch version.Service {
@@ -129,13 +132,13 @@ func qmiFeatures(versions []qcom.ServiceVersion) Feature {
 	return features
 }
 
-func hasQMIService(versions []qcom.ServiceVersion, service qcom.ServiceType) bool {
+func hasService(versions []qcom.ServiceVersion, service qcom.ServiceType) bool {
 	return slices.ContainsFunc(versions, func(version qcom.ServiceVersion) bool {
 		return version.Service == service
 	})
 }
 
-func qmiRadioInterfaces(radios []qcom.DMSRadioInterface) Technology {
+func technologyFromDMSRadios(radios []qcom.DMSRadioInterface) Technology {
 	var result Technology
 	for _, radio := range radios {
 		switch radio {
@@ -175,13 +178,16 @@ func (b *Backend) PowerState(ctx context.Context) (PowerState, error) {
 	if err != nil {
 		return PowerStateUnknown, fmt.Errorf("reading QMI power state: %w", err)
 	}
-	return qmiPowerState(mode), nil
+	return powerState(mode), nil
 }
 
 func (b *Backend) Reset(ctx context.Context) error {
+	b.ipaMu.Lock()
+	defer b.ipaMu.Unlock()
 	if err := b.client.DMSReset(ctx); err != nil {
 		return fmt.Errorf("resetting QMI modem: %w", err)
 	}
+	clear(b.ipaReady)
 	return nil
 }
 
@@ -196,7 +202,7 @@ func (b *Backend) Modes(ctx context.Context) ([]Mode, Mode, error) {
 	}
 	current := Mode{Allowed: caps.CurrentTechnologies}
 	if preference.ModePreferenceKnown {
-		current.Allowed = qmiModePreference(preference.ModePreference)
+		current.Allowed = technologyFromModePreference(preference.ModePreference)
 	}
 	return []Mode{{Allowed: caps.SupportedTechnologies}}, current, nil
 }
@@ -208,7 +214,7 @@ func (b *Backend) SetModes(ctx context.Context, mode Mode) error {
 	if mode.Preferred&^mode.Allowed != 0 {
 		return errors.New("setting QMI modes: preferred technologies are not a subset of allowed technologies")
 	}
-	preference := technologyToQMIMode(mode.Allowed)
+	preference := modePreferenceFromTechnology(mode.Allowed)
 	if err := b.client.SetSystemSelectionPreference(ctx, qcom.NASSystemSelectionConfig{ModePreference: &preference}); err != nil {
 		return fmt.Errorf("setting QMI modes: %w", err)
 	}
@@ -219,7 +225,7 @@ func (b *Backend) SetCapabilities(ctx context.Context, technologies Technology) 
 	if technologies == 0 || technologies&^TechnologyAny != 0 {
 		return fmt.Errorf("setting QMI capabilities: technologies %#x are invalid", technologies)
 	}
-	preference := technologyToQMIMode(technologies)
+	preference := modePreferenceFromTechnology(technologies)
 	duration := qcom.NASChangePermanent
 	if err := b.client.SetSystemSelectionPreference(ctx, qcom.NASSystemSelectionConfig{
 		ModePreference: &preference,
@@ -251,8 +257,8 @@ func (b *Backend) Status(ctx context.Context) (Status, error) {
 		return Status{}, err
 	}
 	return Status{
-		Power:         qmiPowerState(mode),
-		SIM:           qmiSIMState(card),
+		Power:         powerState(mode),
+		SIM:           simStateFromCardStatus(card),
 		Registration:  network.Registration,
 		PacketService: network.PacketService,
 		Technology:    network.Technology,
@@ -267,7 +273,7 @@ func (b *Backend) SIMInfo(ctx context.Context) (SIMInfo, error) {
 	if err != nil {
 		return SIMInfo{}, fmt.Errorf("reading QMI card status: %w", err)
 	}
-	result := SIMInfo{Slot: b.client.Slot(), State: qmiSIMState(cardStatus)}
+	result := SIMInfo{Slot: b.client.Slot(), State: simStateFromCardStatus(cardStatus)}
 	if len(cardStatus.Cards) > 0 {
 		card := cardStatus.Cards[0]
 		result.PINRetries = card.UPINRetries
@@ -312,7 +318,7 @@ func (b *Backend) SIMSlots(ctx context.Context) ([]SIMSlot, error) {
 		slots[i] = SIMSlot{
 			Index:  uint8(i + 1),
 			Active: slot.PhysicalSlotStatus == qcom.SlotStateActive,
-			State:  qmiPhysicalSIMState(slot.PhysicalCardStatus),
+			State:  simStateFromPhysicalCardState(slot.PhysicalCardStatus),
 			ICCID:  decodeSlotICCID(slot.ICCID),
 		}
 	}
@@ -420,7 +426,7 @@ func (b *Backend) PreferredNetworks(ctx context.Context) ([]PreferredNetwork, er
 	}
 	networks := make([]PreferredNetwork, len(result.Networks))
 	for i, network := range result.Networks {
-		networks[i] = PreferredNetwork{OperatorID: network.PLMN.String(), Technology: qmiAccessTechnology(network.AccessTechnology)}
+		networks[i] = PreferredNetwork{OperatorID: network.PLMN.String(), Technology: technologyFromPLMNAccess(network.AccessTechnology)}
 	}
 	return networks, nil
 }
@@ -432,7 +438,7 @@ func (b *Backend) SetPreferredNetworks(ctx context.Context, networks []Preferred
 		if err := plmn.UnmarshalText([]byte(network.OperatorID)); err != nil {
 			return fmt.Errorf("setting QMI preferred network %d: %w", i, err)
 		}
-		values[i] = qcom.NASPreferredNetwork{PLMN: plmn, AccessTechnology: technologyToQMIAccess(network.Technology)}
+		values[i] = qcom.NASPreferredNetwork{PLMN: plmn, AccessTechnology: plmnAccessFromTechnology(network.Technology)}
 	}
 	clear := true
 	if err := b.client.SetPreferredNetworks(ctx, qcom.NASPreferredNetworksConfig{Networks: values, ClearPrevious: &clear}); err != nil {
@@ -451,17 +457,17 @@ func (b *Backend) NetworkStatus(ctx context.Context) (NetworkStatus, error) {
 
 func networkStatusFromServing(serving qcom.NASServingSystem) NetworkStatus {
 	result := NetworkStatus{
-		Registration:     qmiRegistrationState(serving),
-		PacketService:    qmiPacketService(serving.PSAttachState),
-		Technology:       qmiNASRadios(serving.RadioInterfaces),
-		Available:        qmiNASRadios(serving.RadioInterfaces),
+		Registration:     registrationStateFromServingSystem(serving),
+		PacketService:    packetServiceStateFromAttachState(serving.PSAttachState),
+		Technology:       technologyFromNASRadios(serving.RadioInterfaces),
+		Available:        technologyFromNASRadios(serving.RadioInterfaces),
 		LocationAreaCode: uint32(serving.LocationAreaCode),
 		TrackingAreaCode: uint32(serving.TrackingAreaCode),
 		CellID:           uint64(serving.CellID),
 	}
 	if serving.PLMNKnown {
 		result.OperatorID = serving.PLMN.String()
-		result.OperatorName = decodeQMINetworkDescription(serving.PLMN.Description)
+		result.OperatorName = decodeNetworkDescription(serving.PLMN.Description)
 	}
 	if serving.RoamingIndicatorKnown && serving.RoamingIndicator == qcom.NASRoamingIndicatorRoaming {
 		result.RoamingText = "roaming"
@@ -469,9 +475,9 @@ func networkStatusFromServing(serving qcom.NASServingSystem) NetworkStatus {
 	return result
 }
 
-func decodeQMINetworkDescription(value string) string {
+func decodeNetworkDescription(value string) string {
 	raw := []byte(value)
-	if decoded, ok := printableQMIString(raw); ok {
+	if decoded, ok := printableString(raw); ok {
 		return decoded
 	}
 
@@ -483,7 +489,7 @@ func decodeQMINetworkDescription(value string) string {
 	}
 	var gsm7 sms.GSM7
 	if err := gsm7.UnmarshalBinary(septets); err == nil {
-		if decoded, ok := printableQMIString([]byte(gsm7.String())); ok {
+		if decoded, ok := printableString([]byte(gsm7.String())); ok {
 			return decoded
 		}
 	}
@@ -493,14 +499,14 @@ func decodeQMINetworkDescription(value string) string {
 	}
 	var ucs2 sms.UCS2LE
 	if err := ucs2.UnmarshalBinary(raw); err == nil {
-		if decoded, ok := printableQMIString([]byte(ucs2.String())); ok {
+		if decoded, ok := printableString([]byte(ucs2.String())); ok {
 			return decoded
 		}
 	}
 	return ""
 }
 
-func printableQMIString(value []byte) (string, bool) {
+func printableString(value []byte) (string, bool) {
 	value = bytes.TrimRight(value, "\x00")
 	if !utf8.Valid(value) {
 		return "", false
@@ -523,7 +529,7 @@ func (b *Backend) Register(ctx context.Context, cfg RegisterConfig) error {
 		if err := plmn.UnmarshalText([]byte(cfg.OperatorID)); err != nil {
 			return fmt.Errorf("registering QMI network: %w", err)
 		}
-		radio := technologyToQMINASRadio(cfg.Technology)
+		radio := nasRadioFromTechnology(cfg.Technology)
 		registration.Action = qcom.NASRegisterManually
 		registration.Manual = &qcom.NASManualRegistration{PLMN: plmn, RadioInterface: radio}
 	}
@@ -542,8 +548,8 @@ func (b *Backend) ScanNetworks(ctx context.Context) ([]Operator, error) {
 	for i, network := range scan.Networks {
 		operators[i] = Operator{
 			ID:         network.PLMN.String(),
-			Name:       decodeQMINetworkDescription(network.PLMN.Description),
-			Technology: qmiNASRadios(network.RadioInterfaces),
+			Name:       decodeNetworkDescription(network.PLMN.Description),
+			Technology: technologyFromNASRadios(network.RadioInterfaces),
 			Available:  network.Status.InUse() == qcom.NASNetworkInUseAvailable,
 			Current:    network.Status.InUse() == qcom.NASNetworkInUseCurrent,
 			Forbidden:  network.Status.Forbidden() == qcom.NASNetworkForbidden,
@@ -567,9 +573,9 @@ func (b *Backend) FacilityLocks(ctx context.Context) ([]FacilityLock, error) {
 	facilities := []Facility{FacilityNetwork, FacilityNetworkSubset, FacilityServiceProvider, FacilityCorporate}
 	result := make([]FacilityLock, 0, len(facilities))
 	for _, facility := range facilities {
-		status, err := b.client.DMSGetCKStatus(ctx, facilityToQMI(facility))
+		status, err := b.client.DMSGetCKStatus(ctx, uimFacility(facility))
 		if err != nil {
-			if qmiUnsupported(err) {
+			if isUnsupported(err) {
 				return nil, fmt.Errorf("reading QMI facility %d: %w: %w", facility, ErrNotSupported, err)
 			}
 			return nil, fmt.Errorf("reading QMI facility %d: %w", facility, err)
@@ -591,7 +597,7 @@ func (b *Backend) SetFacilityLock(ctx context.Context, facility Facility, enable
 		state = qcom.DMSFacilityActivated
 	}
 	_, err := b.client.DMSSetCKProtection(ctx, qcom.DMSCKProtectionRequest{
-		Facility: facilityToQMI(facility),
+		Facility: uimFacility(facility),
 		State:    state,
 		Key:      key,
 	})
@@ -602,7 +608,7 @@ func (b *Backend) SetFacilityLock(ctx context.Context, facility Facility, enable
 }
 
 func (b *Backend) UnblockFacilityLock(ctx context.Context, facility Facility, key string) error {
-	_, err := b.client.DMSUnblockCK(ctx, qcom.DMSCKUnblockRequest{Facility: facilityToQMI(facility), Key: key})
+	_, err := b.client.DMSUnblockCK(ctx, qcom.DMSCKUnblockRequest{Facility: uimFacility(facility), Key: key})
 	if err != nil {
 		return fmt.Errorf("unblocking QMI facility lock: %w", err)
 	}
@@ -622,7 +628,7 @@ func (b *Backend) InitialEPSBearer(ctx context.Context) (InitialEPSConfig, error
 		result.APN = parameters.APN
 	}
 	if parameters.IPSupportKnown {
-		result.IPFamily = qmiAttachIPFamily(parameters.IPSupport)
+		result.IPFamily = ipFamilyFromAttachSupport(parameters.IPSupport)
 	}
 	if list, listErr := b.client.WDSLTEAttachPDNList(ctx); listErr == nil && list.CurrentKnown && len(list.Current) > 0 {
 		result.ProfileID = int32(list.Current[0])
@@ -645,7 +651,7 @@ func (b *Backend) InitialEPSSettings(ctx context.Context) (InitialEPSConfig, err
 	if err != nil {
 		return InitialEPSConfig{}, fmt.Errorf("reading QMI initial EPS profile %d: %w", list.Current[0], err)
 	}
-	return initialEPSFromProfile(qmiProfile(settings)), nil
+	return initialEPSFromProfile(profileFromSettings(settings)), nil
 }
 
 func (b *Backend) SetInitialEPSSettings(ctx context.Context, cfg InitialEPSConfig) (InitialEPSConfig, error) {
@@ -714,7 +720,7 @@ func (b *Backend) SetInitialEPSSettings(ctx context.Context, cfg InitialEPSConfi
 	return b.InitialEPSSettings(ctx)
 }
 
-func facilityToQMI(facility Facility) qcom.DMSUIMFacility {
+func uimFacility(facility Facility) qcom.DMSUIMFacility {
 	switch facility {
 	case FacilityNetworkSubset:
 		return qcom.DMSUIMFacilityNetworkSubset
@@ -727,7 +733,7 @@ func facilityToQMI(facility Facility) qcom.DMSUIMFacility {
 	}
 }
 
-func qmiAttachIPFamily(value qcom.WDSIPSupportType) IPFamily {
+func ipFamilyFromAttachSupport(value qcom.WDSIPSupportType) IPFamily {
 	switch value {
 	case qcom.WDSIPSupportIPv4:
 		return IPFamilyIPv4
@@ -742,7 +748,7 @@ func qmiAttachIPFamily(value qcom.WDSIPSupportType) IPFamily {
 
 func (b *Backend) Signal(ctx context.Context) (Signal, error) {
 	info, err := b.client.SignalInfo(ctx)
-	if qmiSignalUnavailable(err) {
+	if isSignalUnavailable(err) {
 		return Signal{}, nil
 	}
 	if err != nil {
@@ -781,7 +787,7 @@ func (b *Backend) SetSignalThresholds(ctx context.Context, thresholds SignalThre
 	if thresholds.ErrorRateThreshold {
 		return fmt.Errorf("setting QMI signal thresholds: %w", ErrNotSupported)
 	}
-	lteReport, nr5gReport, err := qmiSignalReportConfigs(thresholds.Interval)
+	lteReport, nr5gReport, err := signalReportConfigs(thresholds.Interval)
 	if err != nil {
 		return fmt.Errorf("setting QMI signal thresholds: %w", err)
 	}
@@ -802,7 +808,7 @@ func (b *Backend) SetSignalThresholds(ctx context.Context, thresholds SignalThre
 	}
 	if err := b.client.ConfigureSignalInfo2(ctx, config); err == nil {
 		return nil
-	} else if !qmiSignalV2Unsupported(err) {
+	} else if !isSignalV2Unsupported(err) {
 		return fmt.Errorf("setting QMI signal thresholds: %w", err)
 	}
 
@@ -816,7 +822,7 @@ func (b *Backend) SetSignalThresholds(ctx context.Context, thresholds SignalThre
 	return nil
 }
 
-func qmiSignalReportConfigs(interval time.Duration) (*qcom.NASLTESignalReportConfig, *qcom.NASNR5GSignalReportConfig, error) {
+func signalReportConfigs(interval time.Duration) (*qcom.NASLTESignalReportConfig, *qcom.NASNR5GSignalReportConfig, error) {
 	if interval == 0 {
 		return nil, nil, nil
 	}
@@ -833,7 +839,7 @@ func qmiSignalReportConfigs(interval time.Duration) (*qcom.NASLTESignalReportCon
 	return lte, nr5g, nil
 }
 
-func qmiSignalV2Unsupported(err error) bool {
+func isSignalV2Unsupported(err error) bool {
 	var protocolErr qcom.QMIError
 	if !errors.As(err, &protocolErr) {
 		return false
@@ -852,16 +858,16 @@ func (b *Backend) Profiles(ctx context.Context) ([]Profile, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading QMI profile %d: %w", entry.ID.Index, err)
 		}
-		profiles = append(profiles, qmiProfile(settings))
+		profiles = append(profiles, profileFromSettings(settings))
 	}
 	return profiles, nil
 }
 
 func (b *Backend) CreateProfile(ctx context.Context, cfg ProfileConfig) (Profile, error) {
-	profileCfg := qcom.WDSProfileConfig{Type: qcom.WDSProfileType3GPP, APN: cfg.APN, PDPType: ipFamilyToQMIPDP(cfg.IPFamily), Username: cfg.Username, Password: cfg.Password, Authentication: authenticationToQMI(cfg.Authentication)}
+	profileCfg := qcom.WDSProfileConfig{Type: qcom.WDSProfileType3GPP, APN: cfg.APN, PDPType: pdpTypeFromIPFamily(cfg.IPFamily), Username: cfg.Username, Password: cfg.Password, Authentication: authenticationMask(cfg.Authentication)}
 	disabled := !cfg.Enabled
 	profileCfg.APNDisabled = &disabled
-	apnType := apnTypeToQMI(cfg.APNType)
+	apnType := apnTypeMask(cfg.APNType)
 	profileCfg.APNType = &apnType
 	id, err := b.client.WDSCreateProfileWithConfig(ctx, profileCfg)
 	if err != nil {
@@ -871,22 +877,22 @@ func (b *Backend) CreateProfile(ctx context.Context, cfg ProfileConfig) (Profile
 	if err != nil {
 		return Profile{}, fmt.Errorf("reading created QMI profile: %w", err)
 	}
-	return qmiProfile(settings), nil
+	return profileFromSettings(settings), nil
 }
 
 func (b *Backend) UpdateProfile(ctx context.Context, update ProfileUpdate) (Profile, error) {
 	id := qcom.WDSProfileID{Type: qcom.WDSProfileType3GPP, Index: uint8(update.ID)}
 	value := qcom.WDSProfileUpdate{APN: update.APN, Username: update.Username, Password: update.Password}
 	if update.IPFamily != nil {
-		pdp := ipFamilyToQMIPDP(*update.IPFamily)
+		pdp := pdpTypeFromIPFamily(*update.IPFamily)
 		value.PDPType = &pdp
 	}
 	if update.Authentication != nil {
-		auth := authenticationToQMI(*update.Authentication)
+		auth := authenticationMask(*update.Authentication)
 		value.Authentication = &auth
 	}
 	if update.APNType != nil {
-		apnType := apnTypeToQMI(*update.APNType)
+		apnType := apnTypeMask(*update.APNType)
 		value.APNType = &apnType
 	}
 	if update.Enabled != nil {
@@ -900,7 +906,7 @@ func (b *Backend) UpdateProfile(ctx context.Context, update ProfileUpdate) (Prof
 	if err != nil {
 		return Profile{}, fmt.Errorf("reading updated QMI profile: %w", err)
 	}
-	return qmiProfile(settings), nil
+	return profileFromSettings(settings), nil
 }
 
 func (b *Backend) DeleteProfile(ctx context.Context, id int32) error {
@@ -942,14 +948,14 @@ func (b *Backend) CellInfo(ctx context.Context) ([]CellInfo, error) {
 	}
 	location, err := b.client.CellLocationInfo(ctx)
 	if err == nil {
-		applyQMICellLocation(&cell, location)
+		applyCellLocation(&cell, location)
 	} else if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 	return []CellInfo{cell}, nil
 }
 
-func applyQMICellLocation(cell *CellInfo, location qcom.NASCellLocationInfo) {
+func applyCellLocation(cell *CellInfo, location qcom.NASCellLocationInfo) {
 	if cell == nil || !location.LTEIntraEARFCNKnown {
 		return
 	}
@@ -959,7 +965,7 @@ func applyQMICellLocation(cell *CellInfo, location qcom.NASCellLocationInfo) {
 func (b *Backend) SAR(ctx context.Context) (SARState, error) {
 	state, err := b.client.SARRFState(ctx)
 	if err != nil {
-		if qmiSARUnsupported(err) {
+		if isSARUnsupported(err) {
 			return SARState{}, fmt.Errorf("reading QMI SAR state: %w: %w", ErrNotSupported, err)
 		}
 		return SARState{}, fmt.Errorf("reading QMI SAR state: %w", err)
@@ -967,17 +973,17 @@ func (b *Backend) SAR(ctx context.Context) (SARState, error) {
 	return SARState{Enabled: true, PowerLevel: uint32(state)}, nil
 }
 
-func qmiUnsupported(err error) bool {
+func isUnsupported(err error) bool {
 	return errors.Is(err, qcom.QMIErrorNotSupported) ||
 		errors.Is(err, qcom.QMIErrorDeviceUnsupported) ||
 		errors.Is(err, qcom.QMIErrorInvalidQmiCommand)
 }
 
-func qmiSARUnsupported(err error) bool {
-	return qmiUnsupported(err) || errors.Is(err, qcom.QMIErrorNoMemory)
+func isSARUnsupported(err error) bool {
+	return isUnsupported(err) || errors.Is(err, qcom.QMIErrorNoMemory)
 }
 
-func qmiSignalUnavailable(err error) bool {
+func isSignalUnavailable(err error) bool {
 	return errors.Is(err, qcom.QMIErrorInformationUnavailable) ||
 		errors.Is(err, qcom.QMIErrorNoRadio) ||
 		errors.Is(err, qcom.QMIErrorNoNetworkFound)
@@ -1001,7 +1007,7 @@ func (b *Backend) FirmwareUpdateInfo(ctx context.Context) (FirmwareUpdateInfo, e
 	return FirmwareUpdateInfo{Methods: []FirmwareUpdateMethod{FirmwareUpdateQDL}, Version: revision.Revision, Ports: []string{b.device}}, nil
 }
 
-func qmiPowerState(mode qcom.DMSOperatingMode) PowerState {
+func powerState(mode qcom.DMSOperatingMode) PowerState {
 	switch mode {
 	case qcom.DMSOperatingModeOnline:
 		return PowerStateOn
@@ -1016,7 +1022,7 @@ func qmiPowerState(mode qcom.DMSOperatingMode) PowerState {
 	}
 }
 
-func qmiModePreference(preference qcom.NASModePreference) Technology {
+func technologyFromModePreference(preference qcom.NASModePreference) Technology {
 	var result Technology
 	if preference&qcom.NASModePreferenceGSM != 0 {
 		result |= TechnologyGSM
@@ -1033,7 +1039,7 @@ func qmiModePreference(preference qcom.NASModePreference) Technology {
 	return result
 }
 
-func technologyToQMIMode(technology Technology) qcom.NASModePreference {
+func modePreferenceFromTechnology(technology Technology) qcom.NASModePreference {
 	var result qcom.NASModePreference
 	if technology&TechnologyGSM != 0 {
 		result |= qcom.NASModePreferenceGSM
@@ -1050,7 +1056,7 @@ func technologyToQMIMode(technology Technology) qcom.NASModePreference {
 	return result
 }
 
-func qmiNASRadios(radios []qcom.NASRadioInterface) Technology {
+func technologyFromNASRadios(radios []qcom.NASRadioInterface) Technology {
 	var result Technology
 	for _, radio := range radios {
 		switch radio {
@@ -1071,7 +1077,7 @@ func qmiNASRadios(radios []qcom.NASRadioInterface) Technology {
 	return result
 }
 
-func qmiSIMState(status qcom.CardStatus) SIMState {
+func simStateFromCardStatus(status qcom.CardStatus) SIMState {
 	if len(status.Cards) == 0 || status.Cards[0].State == qcom.CardStateAbsent {
 		return SIMStateAbsent
 	}
@@ -1090,7 +1096,7 @@ func qmiSIMState(status qcom.CardStatus) SIMState {
 	return SIMStateUnknown
 }
 
-func qmiPhysicalSIMState(state qcom.PhysicalCardState) SIMState {
+func simStateFromPhysicalCardState(state qcom.PhysicalCardState) SIMState {
 	switch state {
 	case qcom.PhysicalCardStateAbsent:
 		return SIMStateAbsent
@@ -1101,7 +1107,7 @@ func qmiPhysicalSIMState(state qcom.PhysicalCardState) SIMState {
 	}
 }
 
-func qmiRegistrationState(serving qcom.NASServingSystem) RegistrationState {
+func registrationStateFromServingSystem(serving qcom.NASServingSystem) RegistrationState {
 	switch serving.RegistrationState {
 	case qcom.NASRegistrationNotRegistered:
 		return RegistrationIdle
@@ -1119,7 +1125,7 @@ func qmiRegistrationState(serving qcom.NASServingSystem) RegistrationState {
 	}
 }
 
-func qmiPacketService(state qcom.NASAttachState) PacketServiceState {
+func packetServiceStateFromAttachState(state qcom.NASAttachState) PacketServiceState {
 	switch state {
 	case qcom.NASAttachAttached:
 		return PacketServiceAttached
@@ -1130,7 +1136,7 @@ func qmiPacketService(state qcom.NASAttachState) PacketServiceState {
 	}
 }
 
-func qmiAccessTechnology(access qcom.NASPLMNAccessTechnology) Technology {
+func technologyFromPLMNAccess(access qcom.NASPLMNAccessTechnology) Technology {
 	var result Technology
 	if access&(qcom.NASPLMNAccessGSM|qcom.NASPLMNAccessGSMCompact) != 0 {
 		result |= TechnologyGSM
@@ -1147,7 +1153,7 @@ func qmiAccessTechnology(access qcom.NASPLMNAccessTechnology) Technology {
 	return result
 }
 
-func technologyToQMIAccess(technology Technology) qcom.NASPLMNAccessTechnology {
+func plmnAccessFromTechnology(technology Technology) qcom.NASPLMNAccessTechnology {
 	if technology == 0 || technology == TechnologyAny {
 		return qcom.NASPLMNAccessAll
 	}
@@ -1167,7 +1173,7 @@ func technologyToQMIAccess(technology Technology) qcom.NASPLMNAccessTechnology {
 	return result
 }
 
-func technologyToQMINASRadio(technology Technology) qcom.NASRadioInterface {
+func nasRadioFromTechnology(technology Technology) qcom.NASRadioInterface {
 	switch {
 	case technology&TechnologyNR5GSA != 0:
 		return qcom.NASRadioInterfaceNR5G
@@ -1182,7 +1188,7 @@ func technologyToQMINASRadio(technology Technology) qcom.NASRadioInterface {
 	}
 }
 
-func ipFamilyToQMIPDP(family IPFamily) qcom.WDSPDPType {
+func pdpTypeFromIPFamily(family IPFamily) qcom.WDSPDPType {
 	switch family {
 	case IPFamilyIPv6:
 		return qcom.WDSPDPTypeIPv6
@@ -1193,7 +1199,7 @@ func ipFamilyToQMIPDP(family IPFamily) qcom.WDSPDPType {
 	}
 }
 
-func qmiPDPToIPFamily(pdp qcom.WDSPDPType) IPFamily {
+func ipFamilyFromPDPType(pdp qcom.WDSPDPType) IPFamily {
 	switch pdp {
 	case qcom.WDSPDPTypeIPv6:
 		return IPFamilyIPv6
@@ -1206,7 +1212,7 @@ func qmiPDPToIPFamily(pdp qcom.WDSPDPType) IPFamily {
 	}
 }
 
-func authenticationToQMI(authentication Authentication) qcom.WDSAuthenticationMask {
+func authenticationMask(authentication Authentication) qcom.WDSAuthenticationMask {
 	var result qcom.WDSAuthenticationMask
 	if authentication&AuthenticationPAP != 0 {
 		result |= qcom.WDSAuthenticationPAP
@@ -1217,31 +1223,31 @@ func authenticationToQMI(authentication Authentication) qcom.WDSAuthenticationMa
 	return result
 }
 
-func qmiAuthentication(authentication qcom.WDSAuthenticationMask) Authentication {
+func authenticationFromMask(mask qcom.WDSAuthenticationMask) Authentication {
 	var result Authentication
-	if authentication&qcom.WDSAuthenticationPAP != 0 {
+	if mask&qcom.WDSAuthenticationPAP != 0 {
 		result |= AuthenticationPAP
 	}
-	if authentication&qcom.WDSAuthenticationCHAP != 0 {
+	if mask&qcom.WDSAuthenticationCHAP != 0 {
 		result |= AuthenticationCHAP
 	}
 	return result
 }
 
-func qmiProfile(settings qcom.WDSProfileSettings) Profile {
+func profileFromSettings(settings qcom.WDSProfileSettings) Profile {
 	return Profile{
 		ID:             int32(settings.ID.Index),
 		APN:            settings.APN,
-		IPFamily:       qmiPDPToIPFamily(settings.PDPType),
-		Authentication: qmiAuthentication(settings.Authentication),
+		IPFamily:       ipFamilyFromPDPType(settings.PDPType),
+		Authentication: authenticationFromMask(settings.Authentication),
 		Username:       settings.Username,
 		Password:       settings.Password,
-		APNType:        qmiAPNType(settings.APNType),
+		APNType:        apnTypeFromMask(settings.APNType),
 		Enabled:        !settings.APNDisabled,
 	}
 }
 
-func apnTypeToQMI(value APNType) qcom.WDSAPNTypeMask {
+func apnTypeMask(value APNType) qcom.WDSAPNTypeMask {
 	var result qcom.WDSAPNTypeMask
 	if value&APNTypeDefault != 0 {
 		result |= qcom.WDSAPNTypeDefault
@@ -1264,7 +1270,7 @@ func apnTypeToQMI(value APNType) qcom.WDSAPNTypeMask {
 	return result
 }
 
-func qmiAPNType(value qcom.WDSAPNTypeMask) APNType {
+func apnTypeFromMask(value qcom.WDSAPNTypeMask) APNType {
 	var result APNType
 	if value&qcom.WDSAPNTypeDefault != 0 {
 		result |= APNTypeDefault

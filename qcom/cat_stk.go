@@ -45,6 +45,19 @@ type CATEventConfirmation struct {
 	IconDisplayed *bool
 }
 
+// CATCachedCommandID identifies a proactive command retained by the modem for
+// recovery after the host STK service restarts.
+type CATCachedCommandID uint32
+
+const (
+	// CATCachedCommandSetupMenu identifies a cached SET UP MENU command.
+	CATCachedCommandSetupMenu CATCachedCommandID = iota + 1
+	// CATCachedCommandSetupEventList identifies a cached SET UP EVENT LIST command.
+	CATCachedCommandSetupEventList
+	// CATCachedCommandSetupIdleModeText identifies a cached SET UP IDLE MODE TEXT command.
+	CATCachedCommandSetupIdleModeText
+)
+
 func (c CATCommand) MarshalBinary() ([]byte, error) {
 	if len(c.Data) > 0xffff {
 		return nil, fmt.Errorf("building QMI CAT command: data length %d exceeds uint16 length field", len(c.Data))
@@ -159,32 +172,55 @@ func (c *CAT) SetConfiguration(ctx context.Context, config CATConfiguration) err
 }
 
 func (c *CAT) Commands(ctx context.Context, eventMask, fullFunctionMask uint32) (<-chan CATCommand, error) {
+	commands, _, err := c.commands(ctx, CATEventClaimConfig{
+		RawMask:          eventMask,
+		FullFunctionMask: fullFunctionMask,
+	}, false)
+	return commands, err
+}
+
+// ForceClaimCommands installs the indication watch before force-claiming the
+// requested events, so cached commands replayed during registration are not
+// lost. Releasing another CAT client is disruptive and must be explicitly
+// requested by the caller.
+func (c *CAT) ForceClaimCommands(ctx context.Context, config CATEventClaimConfig) (<-chan CATCommand, CATEventClaim, error) {
+	return c.commands(ctx, config, true)
+}
+
+func (c *CAT) commands(ctx context.Context, config CATEventClaimConfig, forceClaim bool) (<-chan CATCommand, CATEventClaim, error) {
 	transport, err := c.client.indicationTransport()
 	if err != nil {
-		return nil, fmt.Errorf("watching QMI CAT commands: %w", err)
+		return nil, CATEventClaim{}, fmt.Errorf("watching QMI CAT commands: %w", err)
 	}
 	service, clientID, err := c.client.catClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("watching QMI CAT commands: %w", err)
+		return nil, CATEventClaim{}, fmt.Errorf("watching QMI CAT commands: %w", err)
 	}
 
 	watchCtx, cancel := context.WithCancel(ctx)
 	indications, err := transport.Indications(watchCtx, service, clientID, MessageCATEventReport)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("watching QMI CAT commands: %w", err)
+		return nil, CATEventClaim{}, fmt.Errorf("watching QMI CAT commands: %w", err)
 	}
-	if err := c.setEventReport(ctx, service, clientID, eventMask, fullFunctionMask); err != nil {
+
+	var claim CATEventClaim
+	if forceClaim {
+		claim, err = c.ForceClaimEvents(ctx, config)
+	} else {
+		err = c.setEventReport(ctx, service, clientID, config.RawMask, config.FullFunctionMask)
+	}
+	if err != nil {
 		cancel()
 		c.releaseCATClient(service, clientID)
-		return nil, err
+		return nil, CATEventClaim{}, err
 	}
 
 	out := make(chan CATCommand, 8)
 	go func() {
+		defer close(out)
 		defer c.releaseCATClient(service, clientID)
 		defer cancel()
-		defer close(out)
 
 		for ind := range indications {
 			var command CATCommand
@@ -198,7 +234,7 @@ func (c *CAT) Commands(ctx context.Context, eventMask, fullFunctionMask uint32) 
 			}
 		}
 	}()
-	return out, nil
+	return out, claim, nil
 }
 
 func (c *CAT) TerminalResponse(ctx context.Context, ref uint32, response []byte) error {
@@ -284,6 +320,54 @@ func (c *CAT) TerminalProfile(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("reading QMI CAT terminal profile: profile TLV length %d, want %d", len(value), 1+length)
 	}
 	return slices.Clone(value[1 : 1+length]), nil
+}
+
+// CachedProactiveCommand retrieves a recovery copy of a persistent proactive
+// command. The returned command is historical state and must not receive a
+// terminal response.
+func (c *CAT) CachedProactiveCommand(ctx context.Context, commandID CATCachedCommandID) (CATCommand, error) {
+	tag, ok := cachedCommandTLV(commandID)
+	if !ok {
+		return CATCommand{}, fmt.Errorf("reading cached QMI CAT command: command ID %d is unsupported", commandID)
+	}
+
+	service, clientID, err := c.client.catClient(ctx)
+	if err != nil {
+		return CATCommand{}, err
+	}
+	resp, err := c.client.requestService(ctx, service, clientID, MessageCATGetCachedProactiveCommand, tlv.TLVs{
+		tlv.Uint(0x01, uint32(commandID)),
+		tlv.Uint(0x10, c.client.slot),
+	})
+	if err != nil {
+		return CATCommand{}, fmt.Errorf("reading cached QMI CAT command %d: %w", commandID, err)
+	}
+	if err := resultOK(resp); err != nil {
+		return CATCommand{}, fmt.Errorf("reading cached QMI CAT command %d: %w", commandID, err)
+	}
+
+	value, ok := tlv.Value(resp.TLVs, tag)
+	if !ok {
+		return CATCommand{}, fmt.Errorf("reading cached QMI CAT command %d: command TLV missing", commandID)
+	}
+	var command CATCommand
+	if err := command.UnmarshalBinary(value); err != nil {
+		return CATCommand{}, fmt.Errorf("reading cached QMI CAT command %d: %w", commandID, err)
+	}
+	return command, nil
+}
+
+func cachedCommandTLV(commandID CATCachedCommandID) (byte, bool) {
+	switch commandID {
+	case CATCachedCommandSetupMenu:
+		return 0x10, true
+	case CATCachedCommandSetupEventList:
+		return 0x11, true
+	case CATCachedCommandSetupIdleModeText:
+		return 0x12, true
+	default:
+		return 0, false
+	}
 }
 
 func (c *CAT) setEventReport(ctx context.Context, service ServiceType, clientID uint8, mask, full uint32) error {

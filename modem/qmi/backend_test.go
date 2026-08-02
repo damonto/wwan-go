@@ -13,7 +13,7 @@ import (
 	"github.com/damonto/wwan-go/qcom/tlv"
 )
 
-func TestQMIErrorClassification(t *testing.T) {
+func TestErrorClassification(t *testing.T) {
 	tests := []struct {
 		name               string
 		err                error
@@ -29,20 +29,20 @@ func TestQMIErrorClassification(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := qmiUnsupported(test.err); got != test.wantUnsupported {
-				t.Errorf("qmiUnsupported() = %t, want %t", got, test.wantUnsupported)
+			if got := isUnsupported(test.err); got != test.wantUnsupported {
+				t.Errorf("isUnsupported() = %t, want %t", got, test.wantUnsupported)
 			}
-			if got := qmiSARUnsupported(test.err); got != test.wantSARUnsupported {
-				t.Errorf("qmiSARUnsupported() = %t, want %t", got, test.wantSARUnsupported)
+			if got := isSARUnsupported(test.err); got != test.wantSARUnsupported {
+				t.Errorf("isSARUnsupported() = %t, want %t", got, test.wantSARUnsupported)
 			}
-			if got := qmiSignalUnavailable(test.err); got != test.wantNoSignal {
-				t.Errorf("qmiSignalUnavailable() = %t, want %t", got, test.wantNoSignal)
+			if got := isSignalUnavailable(test.err); got != test.wantNoSignal {
+				t.Errorf("isSignalUnavailable() = %t, want %t", got, test.wantNoSignal)
 			}
 		})
 	}
 }
 
-func TestQMIPowerState(t *testing.T) {
+func TestPowerState(t *testing.T) {
 	tests := []struct {
 		name string
 		mode qcom.DMSOperatingMode
@@ -59,14 +59,14 @@ func TestQMIPowerState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := qmiPowerState(tt.mode); got != tt.want {
-				t.Errorf("qmiPowerState(%d) = %d, want %d", tt.mode, got, tt.want)
+			if got := powerState(tt.mode); got != tt.want {
+				t.Errorf("powerState(%d) = %d, want %d", tt.mode, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestApplyQMICellLocation(t *testing.T) {
+func TestApplyCellLocation(t *testing.T) {
 	tests := []struct {
 		name     string
 		location qcom.NASCellLocationInfo
@@ -78,7 +78,7 @@ func TestApplyQMICellLocation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cell := CellInfo{ARFCN: 900}
-			applyQMICellLocation(&cell, tt.location)
+			applyCellLocation(&cell, tt.location)
 			if cell.ARFCN != tt.want {
 				t.Errorf("CellInfo.ARFCN = %d, want %d", cell.ARFCN, tt.want)
 			}
@@ -149,7 +149,7 @@ func TestNetworkStatusFromServing(t *testing.T) {
 	}
 }
 
-func TestQMINetworkDescription(t *testing.T) {
+func TestDecodeNetworkDescription(t *testing.T) {
 	tests := []struct {
 		name  string
 		value []byte
@@ -170,8 +170,8 @@ func TestQMINetworkDescription(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := decodeQMINetworkDescription(string(tt.value)); got != tt.want {
-				t.Errorf("decodeQMINetworkDescription() = %q, want %q", got, tt.want)
+			if got := decodeNetworkDescription(string(tt.value)); got != tt.want {
+				t.Errorf("decodeNetworkDescription() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -251,8 +251,8 @@ func TestNetworkConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := qmiNetworkConfig("wwan0", tt.info); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("qmiNetworkConfig() = %#v, want %#v", got, tt.want)
+			if got := networkConfig("wwan0", tt.info); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("networkConfig() = %#v, want %#v", got, tt.want)
 			}
 		})
 	}
@@ -285,7 +285,7 @@ func TestMergeSIMIdentity(t *testing.T) {
 	}
 }
 
-func TestQMIIPPreferences(t *testing.T) {
+func TestIPPreferences(t *testing.T) {
 	tests := []struct {
 		name   string
 		family IPFamily
@@ -298,14 +298,14 @@ func TestQMIIPPreferences(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := qmiIPPreferences(tt.family); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("qmiIPPreferences() = %v, want %v", got, tt.want)
+			if got := ipPreferences(tt.family); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ipPreferences() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestMergeQMINetworkConfigs(t *testing.T) {
+func TestMergeNetworkConfigs(t *testing.T) {
 	tests := []struct {
 		name  string
 		infos []qcom.PDNInfo
@@ -334,14 +334,14 @@ func TestMergeQMINetworkConfigs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := mergeQMINetworkConfigs("wwan0", tt.infos); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("mergeQMINetworkConfigs() = %#v, want %#v", got, tt.want)
+			if got := mergeNetworkConfigs("wwan0", tt.infos); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("mergeNetworkConfigs() = %#v, want %#v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestQMIFeatures(t *testing.T) {
+func TestFeaturesFromVersions(t *testing.T) {
 	tests := []struct {
 		name     string
 		services []qcom.ServiceVersion
@@ -361,8 +361,8 @@ func TestQMIFeatures(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := qmiFeatures(tt.services); got != tt.want {
-				t.Errorf("qmiFeatures() = %#x, want %#x", got, tt.want)
+			if got := featuresFromVersions(tt.services); got != tt.want {
+				t.Errorf("featuresFromVersions() = %#x, want %#x", got, tt.want)
 			}
 		})
 	}
@@ -426,12 +426,12 @@ func TestAPNTypeMapping(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			value := apnTypeToQMI(tt.value)
+			value := apnTypeMask(tt.value)
 			if value != tt.want {
-				t.Errorf("apnTypeToQMI() = %#x, want %#x", value, tt.want)
+				t.Errorf("apnTypeMask() = %#x, want %#x", value, tt.want)
 			}
-			if got := qmiAPNType(value); got != tt.value {
-				t.Errorf("qmiAPNType() = %#x, want %#x", got, tt.value)
+			if got := apnTypeFromMask(value); got != tt.value {
+				t.Errorf("apnTypeFromMask() = %#x, want %#x", got, tt.value)
 			}
 		})
 	}
@@ -455,21 +455,21 @@ func TestSignalReportConfigs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lte, nr5g, err := qmiSignalReportConfigs(tt.interval)
+			lte, nr5g, err := signalReportConfigs(tt.interval)
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("qmiSignalReportConfigs() error = %v, wantErr %t", err, tt.wantErr)
+				t.Fatalf("signalReportConfigs() error = %v, wantErr %t", err, tt.wantErr)
 			}
 			if tt.wantErr {
 				return
 			}
 			if tt.wantNil {
 				if lte != nil || nr5g != nil {
-					t.Fatalf("qmiSignalReportConfigs() = (%v, %v), want nil", lte, nr5g)
+					t.Fatalf("signalReportConfigs() = (%v, %v), want nil", lte, nr5g)
 				}
 				return
 			}
 			if lte == nil || nr5g == nil || uint8(lte.Rate) != tt.wantRate || uint8(nr5g.Rate) != tt.wantRate {
-				t.Errorf("qmiSignalReportConfigs() = (%v, %v), want rate %d", lte, nr5g, tt.wantRate)
+				t.Errorf("signalReportConfigs() = (%v, %v), want rate %d", lte, nr5g, tt.wantRate)
 			}
 		})
 	}

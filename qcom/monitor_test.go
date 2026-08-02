@@ -515,9 +515,13 @@ func TestWatchRefreshFilesCompletesWhenConsumerIsSlow(t *testing.T) {
 type fakeIndicationTransport struct {
 	fakeTransport
 	indications chan Indication
+	onSubscribe func()
 }
 
 func (t *fakeIndicationTransport) Indications(ctx context.Context, _ ServiceType, _ uint8, _ MessageID) (<-chan Indication, error) {
+	if t.onSubscribe != nil {
+		t.onSubscribe()
+	}
 	t.indications = make(chan Indication, 8)
 	go func() {
 		<-ctx.Done()

@@ -683,6 +683,13 @@ func TestOpenIMSPDNRejectsConflictingDataPorts(t *testing.T) {
 			},
 			want: "opening IMS PDN: mux data port and legacy mux data port are mutually exclusive",
 		},
+		{
+			name: "fallback without legacy",
+			cfg: IMSPDNConfig{
+				LegacyMuxFallback: &WDSMuxDataPort{},
+			},
+			want: "opening IMS PDN: legacy mux fallback requires a legacy mux data port",
+		},
 	}
 
 	for _, tt := range tests {

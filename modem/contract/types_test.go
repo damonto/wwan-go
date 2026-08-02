@@ -13,6 +13,10 @@ func TestPortProtocol(t *testing.T) {
 		{name: "unknown", port: Port{Type: PortUnknown}, want: ProtocolUnknown},
 		{name: "AT", port: Port{Type: PortAT}, want: ProtocolUnknown},
 		{name: "network", port: Port{Type: PortNetwork}, want: ProtocolUnknown},
+		{name: "GPS", port: Port{Type: PortGPS}, want: ProtocolUnknown},
+		{name: "QCDM", port: Port{Type: PortQCDM}, want: ProtocolUnknown},
+		{name: "debug", port: Port{Type: PortDebug}, want: ProtocolUnknown},
+		{name: "audio", port: Port{Type: PortAudio}, want: ProtocolUnknown},
 	}
 
 	for _, tt := range tests {

@@ -93,7 +93,7 @@ func (b *Backend) SetBands(ctx context.Context, bands []Band) error {
 			return err
 		}
 	}
-	legacy, lte, nr, err := qmiBandMasks(bands)
+	legacy, lte, nr, err := bandMasks(bands)
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (b *Backend) SetBands(ctx context.Context, bands []Band) error {
 	return nil
 }
 
-func qmiBandMasks(bands []Band) (qcom.NASBandPreference, qcom.NASLTEBandPreferenceExtended, qcom.NASNR5GBandPreference, error) {
+func bandMasks(bands []Band) (qcom.NASBandPreference, qcom.NASLTEBandPreferenceExtended, qcom.NASNR5GBandPreference, error) {
 	var legacy qcom.NASBandPreference
 	var lte qcom.NASLTEBandPreferenceExtended
 	var nr qcom.NASNR5GBandPreference

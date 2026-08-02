@@ -200,7 +200,33 @@ const (
 	USSDStateTerminated
 )
 
-// PortType identifies the role of one modem port.
+// BusType identifies the kernel bus which owns a modem.
+type BusType uint8
+
+const (
+	BusUnknown BusType = iota
+	BusUSB
+	BusPlatform
+)
+
+// USBIdentity identifies one USB product. The zero value means that the modem
+// is not backed by a USB device or its identity is unavailable.
+type USBIdentity struct {
+	VendorID  uint16
+	ProductID uint16
+}
+
+// USBInterface describes one USB interface. Valid distinguishes interface
+// zero from a port which is not backed by a USB interface.
+type USBInterface struct {
+	Valid    bool
+	Number   uint8
+	Class    uint8
+	Subclass uint8
+	Protocol uint8
+}
+
+// PortType identifies the function or control protocol of one modem port.
 type PortType uint8
 
 const (
@@ -209,15 +235,54 @@ const (
 	PortMBIM
 	PortAT
 	PortNetwork
+	PortGPS
+	PortQCDM
+	PortDebug
+	PortAudio
 )
+
+// PortRole distinguishes ports with the same function.
+type PortRole uint8
+
+const (
+	PortRoleUnknown PortRole = iota
+	PortRolePrimary
+	PortRoleSecondary
+	PortRolePPP
+)
+
+// QMIEndpointType identifies the physical data transport used by a QMI
+// network port.
+type QMIEndpointType uint8
+
+const (
+	QMIEndpointUnknown QMIEndpointType = iota
+	QMIEndpointHSIC
+	QMIEndpointHSUSB
+	QMIEndpointPCIe
+	QMIEndpointEmbedded
+	QMIEndpointBAMDMUX
+)
+
+// QMIEndpoint contains the information needed to bind a WDS client to a data
+// port. SIOPort is set only for legacy BAM-DMUX data ports.
+type QMIEndpoint struct {
+	Type            QMIEndpointType
+	InterfaceNumber uint32
+	SIOPort         uint16
+}
 
 // Port describes one endpoint exposed by a physical modem.
 type Port struct {
-	Type    PortType
-	Name    string
-	Path    string
-	SysPath string
-	Driver  string
+	Type        PortType
+	Role        PortRole
+	Name        string
+	Path        string
+	SysPath     string
+	Subsystem   string
+	Driver      string
+	USB         USBInterface
+	QMIEndpoint QMIEndpoint
 	// ControlPath identifies the QMI or MBIM device node owning a network port.
 	ControlPath string
 }
@@ -237,6 +302,8 @@ func (p Port) Protocol() Protocol {
 // Device groups all ports exposed by one physical modem.
 type Device struct {
 	PhysicalPath string
+	Bus          BusType
+	USB          USBIdentity
 	Ports        []Port
 }
 

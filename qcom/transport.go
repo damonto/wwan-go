@@ -226,7 +226,7 @@ func (c *Client) releaseServiceClientIDLocked(ctx context.Context, service Servi
 	if err != nil {
 		return err
 	}
-	if err := resultOK(resp); err != nil {
+	if err := resultOK(resp); err != nil && !errors.Is(err, QMIErrorInvalidClientId) {
 		return err
 	}
 	c.forgetAllocatedClientIDLocked(service, clientID)
@@ -260,7 +260,11 @@ func (c *Client) releaseServiceClientIDForCloseLocked(
 	if err != nil {
 		return err
 	}
-	return resultOK(resp)
+	err = resultOK(resp)
+	if errors.Is(err, QMIErrorInvalidClientId) {
+		return nil
+	}
+	return err
 }
 
 func (c *Client) request(
