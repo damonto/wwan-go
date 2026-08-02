@@ -143,6 +143,26 @@ type allocationCloseTransport struct {
 	closeCalls         int
 }
 
+type serializedRequestTransport struct {
+	requestStarted chan struct{}
+	releaseRequest chan struct{}
+	startOnce      sync.Once
+}
+
+func (t *serializedRequestTransport) Do(ctx context.Context, req Request) (Response, error) {
+	t.startOnce.Do(func() {
+		close(t.requestStarted)
+	})
+	select {
+	case <-t.releaseRequest:
+		return successResponse(req.MessageID, tlv.Bytes(0x10, encodeCardStatus(true))), nil
+	case <-ctx.Done():
+		return Response{}, ctx.Err()
+	}
+}
+
+func (*serializedRequestTransport) Close() error { return nil }
+
 func (t *allocationCloseTransport) Do(ctx context.Context, req Request) (Response, error) {
 	t.mu.Lock()
 	t.requests = append(t.requests, req)
@@ -418,6 +438,76 @@ func TestWithServiceClientSerializesEverySend(t *testing.T) {
 			}
 			if transport.calls != 3 {
 				t.Fatalf("Do() calls = %d, want 3", transport.calls)
+			}
+		})
+	}
+}
+
+func TestRequestContextStopsWaitingForClientLock(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(context.Context, *Client) error
+	}{
+		{
+			name: "UIM request",
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.CardStatus(ctx)
+				return err
+			},
+		},
+		{
+			name: "service request",
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.MSISDN(ctx)
+				return err
+			},
+		},
+		{
+			name: "indication transport",
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.indicationTransportContext(ctx)
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &serializedRequestTransport{
+				requestStarted: make(chan struct{}),
+				releaseRequest: make(chan struct{}),
+			}
+			client := &Client{
+				transport: transport,
+				slot:      1,
+				clientIDs: map[ServiceType]uint8{ServiceUIM: 7, ServiceDMS: 8},
+			}
+			firstDone := make(chan error, 1)
+			go func() {
+				_, err := client.CardStatus(t.Context())
+				firstDone <- err
+			}()
+
+			select {
+			case <-transport.requestStarted:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for first request")
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+			defer cancel()
+			if err := tt.call(ctx, client); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("call() error = %v, want context deadline exceeded", err)
+			}
+
+			close(transport.releaseRequest)
+			select {
+			case err := <-firstDone:
+				if err != nil {
+					t.Fatalf("first CardStatus() error = %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for first request to finish")
 			}
 		})
 	}

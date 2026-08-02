@@ -1,7 +1,10 @@
 package qmi
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -229,6 +232,129 @@ func (*capabilityTransport) ClientID(context.Context, qcom.ServiceType) (uint8, 
 }
 
 func (*capabilityTransport) Close() error { return nil }
+
+type simIdentityTransport struct {
+	t        *testing.T
+	requests []qcom.Request
+	data     []byte
+}
+
+func (t *simIdentityTransport) Do(ctx context.Context, req qcom.Request) (qcom.Response, error) {
+	t.requests = append(t.requests, req)
+	if req.Service != qcom.ServiceUIM || req.MessageID != qcom.MessageReadTransparent {
+		t.t.Fatalf("request = service 0x%02X message 0x%04X, want UIM read transparent", req.Service, req.MessageID)
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > qmiSIMICCIDTimeout {
+		t.t.Fatalf("ICCID request deadline = %v, want at most %v", deadline, qmiSIMICCIDTimeout)
+	}
+	data := binary.LittleEndian.AppendUint16(nil, uint16(len(t.data)))
+	data = append(data, t.data...)
+	return qcom.Response{
+		Service: req.Service, ClientID: req.ClientID, TransactionID: req.TransactionID, MessageID: req.MessageID,
+		TLVs: tlv.TLVs{
+			tlv.Bytes(0x02, []byte{0, 0, 0, 0}),
+			tlv.Bytes(0x10, []byte{0x90, 0x00}),
+			tlv.Bytes(0x11, data),
+		},
+	}, nil
+}
+
+func (*simIdentityTransport) ClientID(context.Context, qcom.ServiceType) (uint8, error) {
+	return 7, nil
+}
+
+func (*simIdentityTransport) Close() error { return nil }
+
+func TestSIMInfoFromCardStatus(t *testing.T) {
+	rawICCID := []byte{0x98, 0x68, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0}
+	tests := []struct {
+		name       string
+		appState   qcom.ApplicationState
+		metadata   SIMInfo
+		metadataID string
+		want       SIMInfo
+		wantRead   bool
+	}{
+		{
+			name:     "refreshing USIM does not read files",
+			appState: qcom.ApplicationStateDetected,
+			want:     SIMInfo{State: SIMStateUnknown, Slot: 1, PINRetries: 3, PUKRetries: 10},
+		},
+		{
+			name:     "ready USIM reads only ICCID",
+			appState: qcom.ApplicationStateReady,
+			want:     SIMInfo{State: SIMStateReady, Slot: 1, ICCID: "8986000000000000000", PINRetries: 3, PUKRetries: 10},
+			wantRead: true,
+		},
+		{
+			name:       "ready USIM applies cached metadata",
+			appState:   qcom.ApplicationStateReady,
+			metadataID: "8986000000000000000",
+			metadata: SIMInfo{
+				ICCID: "8986000000000000000", IMSI: "310260000000000",
+				OperatorID: "310260", OperatorName: "Example", GID1: "AB", SPN: "Example", ATR: []byte{0x3B, 0x00},
+			},
+			want: SIMInfo{
+				State: SIMStateReady, Slot: 1, ICCID: "8986000000000000000", IMSI: "310260000000000",
+				OperatorID: "310260", OperatorName: "Example", GID1: "AB", SPN: "Example", ATR: []byte{0x3B, 0x00},
+				PINRetries: 3, PUKRetries: 10,
+			},
+			wantRead: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &simIdentityTransport{t: t, data: rawICCID}
+			client, err := qcom.NewClient(transport)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			backend := New(client, "/dev/test")
+			backend.metadataKey = tt.metadataID
+			backend.metadata = tt.metadata
+			status := qcom.CardStatus{Cards: []qcom.Card{{
+				State: qcom.CardStatePresent,
+				Applications: []qcom.CardApplication{{
+					Type: qcom.ApplicationTypeUSIM, State: tt.appState, PIN1Retries: 3, PUK1Retries: 10,
+				}},
+			}}}
+
+			got := backend.simInfoFromCardStatus(context.Background(), status)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("simInfoFromCardStatus() = %+v, want %+v", got, tt.want)
+			}
+			if (len(transport.requests) == 1) != tt.wantRead {
+				t.Fatalf("read count = %d, wantRead %t", len(transport.requests), tt.wantRead)
+			}
+			if tt.wantRead {
+				fileValue, ok := tlv.Value(transport.requests[0].TLVs, 0x02)
+				if !ok || !bytes.Equal(fileValue, []byte{0xE2, 0x2F, 0x02, 0x00, 0x3F}) {
+					t.Fatalf("ICCID file TLV = % X, want EF_ICCID", fileValue)
+				}
+			}
+		})
+	}
+}
+
+func TestMetadataLoadLockHonorsContext(t *testing.T) {
+	backend := &Backend{}
+	if err := backend.lockMetadata(context.Background()); err != nil {
+		t.Fatalf("lockMetadata() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	if err := backend.lockMetadata(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lockMetadata() error = %v, want context deadline exceeded", err)
+	}
+
+	backend.unlockMetadata()
+	if err := backend.lockMetadata(t.Context()); err != nil {
+		t.Fatalf("lockMetadata() after release error = %v", err)
+	}
+	backend.unlockMetadata()
+}
 
 func TestNetworkConfig(t *testing.T) {
 	tests := []struct {

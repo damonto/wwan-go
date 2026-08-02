@@ -113,7 +113,9 @@ func (c *Client) startNASIncrementalNetworkScan(
 	clientID uint8,
 	tlvs tlv.TLVs,
 ) (uint16, Response, error) {
-	c.mu.Lock()
+	if err := c.mu.LockContext(ctx); err != nil {
+		return 0, Response{}, err
+	}
 	defer c.mu.Unlock()
 	if !c.isOpenLocked() {
 		return 0, Response{}, errClientClosed

@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	watchPollInterval   = 2 * time.Second
-	watchResyncInterval = time.Minute
+	watchPollInterval         = 2 * time.Second
+	watchResyncInterval       = time.Minute
+	defaultSIMEnrichmentDelay = 2 * time.Second
 )
 
 func pollStream[T any](ctx context.Context, query func(context.Context) (T, error)) <-chan Result[T] {
@@ -142,22 +143,55 @@ func (b *Backend) WatchSIM(ctx context.Context) (<-chan Result[SIMInfo], error) 
 	go func() {
 		defer close(out)
 		defer cancel()
-		if !queryAndSend(watchCtx, out, b.SIMInfo) {
+		initial, err := b.simInfo(watchCtx)
+		if watchCtx.Err() != nil {
+			return
+		}
+		if !contract.SendStreamResult(watchCtx, out, Result[SIMInfo]{Value: initial, Err: err}) || err != nil {
 			return
 		}
 
 		resync := time.NewTimer(watchResyncInterval)
 		defer resync.Stop()
+		var enrichment *time.Timer
+		var enrichmentC <-chan time.Time
+		type enrichmentResult struct {
+			generation uint64
+			result     Result[SIMInfo]
+		}
+		enrichmentResults := make(chan enrichmentResult, 1)
+		var enrichmentCancel context.CancelFunc
+		var enrichmentGeneration uint64
+		scheduleEnrichment := func(delay time.Duration) {
+			enrichmentGeneration++
+			if enrichmentCancel != nil {
+				enrichmentCancel()
+				enrichmentCancel = nil
+			}
+			enrichment, enrichmentC = resetTimer(enrichment, delay)
+		}
+		if initial.State != SIMStateAbsent {
+			scheduleEnrichment(b.enrichDelay)
+		}
+		defer func() {
+			if enrichmentCancel != nil {
+				enrichmentCancel()
+			}
+			if enrichment != nil {
+				enrichment.Stop()
+			}
+		}()
 		for {
 			select {
 			case <-watchCtx.Done():
 				return
-			case _, ok := <-cardEvents:
+			case status, ok := <-cardEvents:
 				if !ok {
 					cardEvents = nil
 					break
 				}
-				if !queryAndSend(watchCtx, out, b.SIMInfo) {
+				scheduleEnrichment(b.enrichDelay)
+				if !contract.SendStreamResult(watchCtx, out, Result[SIMInfo]{Value: b.simInfoFromCardStatus(watchCtx, status)}) {
 					return
 				}
 			case _, ok := <-slotEvents:
@@ -165,13 +199,36 @@ func (b *Backend) WatchSIM(ctx context.Context) (<-chan Result[SIMInfo], error) 
 					slotEvents = nil
 					break
 				}
-				if !queryAndSend(watchCtx, out, b.SIMInfo) {
+				scheduleEnrichment(b.enrichDelay)
+				if !queryAndSend(watchCtx, out, b.simInfo) {
+					return
+				}
+			case <-enrichmentC:
+				enrichmentC = nil
+				generation := enrichmentGeneration
+				enrichmentCtx, cancelEnrichment := context.WithCancel(watchCtx)
+				enrichmentCancel = cancelEnrichment
+				go func() {
+					defer cancelEnrichment()
+					value, readErr := b.SIMInfo(enrichmentCtx)
+					if enrichmentCtx.Err() != nil {
+						return
+					}
+					select {
+					case enrichmentResults <- enrichmentResult{generation: generation, result: Result[SIMInfo]{Value: value, Err: readErr}}:
+					case <-enrichmentCtx.Done():
+					}
+				}()
+			case result := <-enrichmentResults:
+				if result.generation != enrichmentGeneration {
+					continue
+				}
+				enrichmentCancel = nil
+				if !contract.SendStreamResult(watchCtx, out, result.result) || result.result.Err != nil {
 					return
 				}
 			case <-resync.C:
-				if !queryAndSend(watchCtx, out, b.SIMInfo) {
-					return
-				}
+				scheduleEnrichment(0)
 				resync.Reset(watchResyncInterval)
 			}
 
@@ -183,6 +240,21 @@ func (b *Backend) WatchSIM(ctx context.Context) (<-chan Result[SIMInfo], error) 
 		}
 	}()
 	return out, nil
+}
+
+func resetTimer(timer *time.Timer, delay time.Duration) (*time.Timer, <-chan time.Time) {
+	if timer == nil {
+		timer = time.NewTimer(delay)
+		return timer, timer.C
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(delay)
+	return timer, timer.C
 }
 
 func (b *Backend) WatchNetwork(ctx context.Context) (<-chan Result[NetworkStatus], error) {

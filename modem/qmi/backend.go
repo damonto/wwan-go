@@ -20,18 +20,32 @@ import (
 )
 
 type Backend struct {
-	client       *qcom.Client
-	device       string
-	metadataMu   sync.Mutex
-	metadataKey  string
-	metadata     SIMInfo
-	ipaMu        sync.Mutex
-	ipaReady     map[string]struct{}
-	newRMNetLink func(context.Context, string, uint32) (*rmnetLink, error)
+	client           *qcom.Client
+	device           string
+	metadataMu       sync.RWMutex
+	metadataLoadOnce sync.Once
+	metadataLoad     chan struct{}
+	metadataKey      string
+	metadata         SIMInfo
+	enrichDelay      time.Duration
+	ipaMu            sync.Mutex
+	ipaReady         map[string]struct{}
+	newRMNetLink     func(context.Context, string, uint32) (*rmnetLink, error)
 }
 
+var qmiSIMICCIDFile = qcom.File{
+	Session: qcom.SessionPrimaryGWProvisioning,
+	Path:    []byte{0x3F, 0x00, 0x2F, 0xE2},
+}
+
+const (
+	qmiSIMICCIDFileSize     = 10
+	qmiSIMICCIDTimeout      = 2 * time.Second
+	qmiSIMEnrichmentTimeout = 5 * time.Second
+)
+
 func New(client *qcom.Client, device string) *Backend {
-	return &Backend{client: client, device: device}
+	return &Backend{client: client, device: device, enrichDelay: defaultSIMEnrichmentDelay}
 }
 
 func (b *Backend) Close() error { return b.client.Close() }
@@ -269,43 +283,103 @@ func (b *Backend) Status(ctx context.Context) (Status, error) {
 }
 
 func (b *Backend) SIMInfo(ctx context.Context) (SIMInfo, error) {
-	cardStatus, err := b.client.CardStatus(ctx)
+	result, err := b.simInfo(ctx)
+	if err != nil {
+		return SIMInfo{}, err
+	}
+	if result.State == SIMStateAbsent {
+		return result, nil
+	}
+	enrichmentCtx, cancel := context.WithTimeout(ctx, qmiSIMEnrichmentTimeout)
+	defer cancel()
+	if result.ICCID == "" {
+		if value, readErr := b.client.ICCID(enrichmentCtx); readErr == nil {
+			result.ICCID = value
+		}
+	}
+	if result.State != SIMStateReady || result.ICCID == "" {
+		return result, nil
+	}
+	if value, readErr := b.client.IMSI(enrichmentCtx); readErr == nil {
+		result.IMSI = value
+	}
+	if value, readErr := b.client.MSISDN(enrichmentCtx); readErr == nil && value.VoiceNumber != "" {
+		result.OwnNumbers = []string{value.VoiceNumber}
+	}
+	applySIMMetadata(&result, b.simMetadata(enrichmentCtx, result.ICCID))
+	return result, nil
+}
+
+func (b *Backend) simInfo(ctx context.Context) (SIMInfo, error) {
+	status, err := b.client.CardStatus(ctx)
 	if err != nil {
 		return SIMInfo{}, fmt.Errorf("reading QMI card status: %w", err)
 	}
-	result := SIMInfo{Slot: b.client.Slot(), State: simStateFromCardStatus(cardStatus)}
-	if len(cardStatus.Cards) > 0 {
-		card := cardStatus.Cards[0]
-		result.PINRetries = card.UPINRetries
-		result.PUKRetries = card.UPUKRetries
-		for _, app := range card.Applications {
-			if app.Type != qcom.ApplicationTypeSIM && app.Type != qcom.ApplicationTypeUSIM {
-				continue
-			}
-			result.PINRetries = app.PIN1Retries
-			result.PUKRetries = app.PUK1Retries
-			break
+	return b.simInfoFromCardStatus(ctx, status), nil
+}
+
+func (b *Backend) simInfoFromCardStatus(ctx context.Context, status qcom.CardStatus) SIMInfo {
+	result := basicSIMInfo(status, b.client.Slot())
+	if !simIdentityReady(status) {
+		return result
+	}
+	iccid, err := b.readSIMICCID(ctx)
+	if err != nil {
+		return result
+	}
+	result.ICCID = iccid
+	if metadata, ok := b.cachedSIMMetadata(iccid); ok {
+		applySIMMetadata(&result, metadata)
+	}
+	return result
+}
+
+func simIdentityReady(status qcom.CardStatus) bool {
+	if len(status.Cards) == 0 || status.Cards[0].State != qcom.CardStatePresent {
+		return false
+	}
+	for _, app := range status.Cards[0].Applications {
+		if (app.Type == qcom.ApplicationTypeSIM || app.Type == qcom.ApplicationTypeUSIM) && app.State == qcom.ApplicationStateReady {
+			return true
 		}
 	}
-	if result.State != SIMStateAbsent {
-		if value, readErr := b.client.ICCID(ctx); readErr == nil {
-			result.ICCID = value
-		}
-		if value, readErr := b.client.IMSI(ctx); readErr == nil {
-			result.IMSI = value
-		}
-		if value, readErr := b.client.MSISDN(ctx); readErr == nil && value.VoiceNumber != "" {
-			result.OwnNumbers = []string{value.VoiceNumber}
-		}
-		metadata := b.simMetadata(ctx, result.ICCID)
-		mergeSIMIdentity(&result, metadata)
-		result.OperatorID = metadata.OperatorID
-		result.OperatorName = metadata.OperatorName
-		result.GID1 = metadata.GID1
-		result.SPN = metadata.SPN
-		result.ATR = slices.Clone(metadata.ATR)
+	return false
+}
+
+func basicSIMInfo(status qcom.CardStatus, slot uint8) SIMInfo {
+	result := SIMInfo{Slot: slot, State: simStateFromCardStatus(status)}
+	if len(status.Cards) == 0 {
+		return result
 	}
-	return result, nil
+	card := status.Cards[0]
+	result.PINRetries = card.UPINRetries
+	result.PUKRetries = card.UPUKRetries
+	for _, app := range card.Applications {
+		if app.Type != qcom.ApplicationTypeSIM && app.Type != qcom.ApplicationTypeUSIM {
+			continue
+		}
+		result.PINRetries = app.PIN1Retries
+		result.PUKRetries = app.PUK1Retries
+		break
+	}
+	return result
+}
+
+func (b *Backend) readSIMICCID(ctx context.Context) (string, error) {
+	readCtx, cancel := context.WithTimeout(ctx, qmiSIMICCIDTimeout)
+	defer cancel()
+	raw, err := b.client.ReadTransparent(readCtx, qcom.TransparentRead{
+		File:   qmiSIMICCIDFile,
+		Length: qmiSIMICCIDFileSize,
+	})
+	if err != nil {
+		return "", fmt.Errorf("reading QMI UIM EF_ICCID: %w", err)
+	}
+	var iccid simfile.ICCID
+	if err := iccid.UnmarshalBinary(raw); err != nil {
+		return "", fmt.Errorf("decoding QMI UIM EF_ICCID: %w", err)
+	}
+	return iccid.String(), nil
 }
 
 func (b *Backend) SIMSlots(ctx context.Context) ([]SIMSlot, error) {
@@ -330,11 +404,17 @@ type nonClosingSIMReader struct{ simcard.Reader }
 func (nonClosingSIMReader) Close() error { return nil }
 
 func (b *Backend) simMetadata(ctx context.Context, iccid string) SIMInfo {
-	b.metadataMu.Lock()
-	defer b.metadataMu.Unlock()
-	if iccid != "" && b.metadataKey == iccid {
-		return b.metadata
+	if metadata, ok := b.cachedSIMMetadata(iccid); ok {
+		return metadata
 	}
+	if err := b.lockMetadata(ctx); err != nil {
+		return SIMInfo{}
+	}
+	defer b.unlockMetadata()
+	if metadata, ok := b.cachedSIMMetadata(iccid); ok {
+		return metadata
+	}
+
 	metadata := SIMInfo{}
 	if atr, err := b.client.ATR(ctx); err == nil {
 		metadata.ATR = atr
@@ -352,9 +432,52 @@ func (b *Backend) simMetadata(ctx context.Context, iccid string) SIMInfo {
 			_ = card.Close()
 		}
 	}
+	if metadata.ICCID == "" || metadata.ICCID != iccid {
+		return SIMInfo{}
+	}
+	b.metadataMu.Lock()
 	b.metadataKey = iccid
 	b.metadata = metadata
+	b.metadataMu.Unlock()
 	return metadata
+}
+
+func (b *Backend) lockMetadata(ctx context.Context) error {
+	b.metadataLoadOnce.Do(func() {
+		b.metadataLoad = make(chan struct{}, 1)
+		b.metadataLoad <- struct{}{}
+	})
+	select {
+	case <-b.metadataLoad:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *Backend) unlockMetadata() {
+	b.metadataLoad <- struct{}{}
+}
+
+func (b *Backend) cachedSIMMetadata(iccid string) (SIMInfo, bool) {
+	if iccid == "" {
+		return SIMInfo{}, false
+	}
+	b.metadataMu.RLock()
+	defer b.metadataMu.RUnlock()
+	if b.metadataKey != iccid {
+		return SIMInfo{}, false
+	}
+	return b.metadata, true
+}
+
+func applySIMMetadata(result *SIMInfo, metadata SIMInfo) {
+	mergeSIMIdentity(result, metadata)
+	result.OperatorID = metadata.OperatorID
+	result.OperatorName = metadata.OperatorName
+	result.GID1 = metadata.GID1
+	result.SPN = metadata.SPN
+	result.ATR = slices.Clone(metadata.ATR)
 }
 
 func mergeSIMIdentity(result *SIMInfo, metadata SIMInfo) {

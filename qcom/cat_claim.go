@@ -135,7 +135,9 @@ func (c *CAT) eventOwner(ctx context.Context, service ServiceType, ownClientID u
 }
 
 func (c *CAT) serviceStateForClient(ctx context.Context, service ServiceType, clientID uint8, timeout time.Duration) (CATServiceState, error) {
-	c.client.mu.Lock()
+	if err := c.client.mu.LockContext(ctx); err != nil {
+		return CATServiceState{}, err
+	}
 	defer c.client.mu.Unlock()
 	if !c.client.isOpenLocked() {
 		return CATServiceState{}, errClientClosed
@@ -155,7 +157,9 @@ func (c *CAT) serviceStateForClient(ctx context.Context, service ServiceType, cl
 }
 
 func (c *CAT) releaseServiceClientID(ctx context.Context, service ServiceType, clientID uint8) error {
-	c.client.mu.Lock()
+	if err := c.client.mu.LockContext(ctx); err != nil {
+		return err
+	}
 	defer c.client.mu.Unlock()
 	if !c.client.isOpenLocked() {
 		return errClientClosed

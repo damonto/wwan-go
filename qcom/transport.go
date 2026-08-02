@@ -44,7 +44,7 @@ func (c *Client) withServiceClient(ctx context.Context, service ServiceType, fn 
 
 	// A modem reset invalidates allocated CIDs. Forget only the stale CID and
 	// retry once; resetting the whole shared QMI endpoint would disrupt peers.
-	if !c.forgetServiceClientID(service, clientID) {
+	if !c.forgetServiceClientID(ctx, service, clientID) {
 		return err
 	}
 	clientID, allocateErr := c.serviceClientID(ctx, service)
@@ -55,7 +55,9 @@ func (c *Client) withServiceClient(ctx context.Context, service ServiceType, fn 
 }
 
 func (c *Client) serviceClientID(ctx context.Context, service ServiceType) (uint8, error) {
-	c.mu.Lock()
+	if err := c.mu.LockContext(ctx); err != nil {
+		return 0, err
+	}
 	defer c.mu.Unlock()
 	if !c.isOpenLocked() {
 		return 0, errClientClosed
@@ -107,8 +109,10 @@ func (c *Client) transportClientIDLocked(
 	return transport.ClientID(requestCtx, service)
 }
 
-func (c *Client) forgetServiceClientID(service ServiceType, clientID uint8) bool {
-	c.mu.Lock()
+func (c *Client) forgetServiceClientID(ctx context.Context, service ServiceType, clientID uint8) bool {
+	if err := c.mu.LockContext(ctx); err != nil {
+		return false
+	}
 	defer c.mu.Unlock()
 	if transportManagesClientIDs(c.transport) {
 		return false
@@ -125,7 +129,9 @@ func (c *Client) uimClientID(ctx context.Context) (uint8, error) {
 }
 
 func (c *Client) allocateServiceClientID(ctx context.Context, service ServiceType) (uint8, error) {
-	c.mu.Lock()
+	if err := c.mu.LockContext(ctx); err != nil {
+		return 0, err
+	}
 	defer c.mu.Unlock()
 	if !c.isOpenLocked() {
 		return 0, errClientClosed
@@ -137,7 +143,9 @@ func (c *Client) allocateServiceClientID(ctx context.Context, service ServiceTyp
 // session. QMUX sessions receive a dedicated CID that the session must
 // release; QRTR sessions are identified by their service socket instead.
 func (c *Client) sessionServiceClientID(ctx context.Context, service ServiceType) (uint8, bool, error) {
-	c.mu.Lock()
+	if err := c.mu.LockContext(ctx); err != nil {
+		return 0, false, err
+	}
 	defer c.mu.Unlock()
 	if !c.isOpenLocked() {
 		return 0, false, errClientClosed
@@ -208,7 +216,9 @@ func (c *Client) allocateServiceClientIDLocked(ctx context.Context, service Serv
 }
 
 func (c *Client) releaseServiceClientID(ctx context.Context, service ServiceType, clientID uint8) error {
-	c.mu.Lock()
+	if err := c.mu.LockContext(ctx); err != nil {
+		return err
+	}
 	defer c.mu.Unlock()
 	if !c.isOpenLocked() {
 		return errClientClosed
@@ -281,7 +291,9 @@ func (c *Client) requestWithTimeout(
 	tlvs tlv.TLVs,
 	timeout time.Duration,
 ) (Response, error) {
-	c.mu.Lock()
+	if err := c.mu.LockContext(ctx); err != nil {
+		return Response{}, err
+	}
 	defer c.mu.Unlock()
 	if !c.isOpenLocked() {
 		return Response{}, errClientClosed
@@ -311,7 +323,9 @@ func (c *Client) requestServiceWithTimeout(
 	tlvs tlv.TLVs,
 	timeout time.Duration,
 ) (Response, error) {
-	c.mu.Lock()
+	if err := c.mu.LockContext(ctx); err != nil {
+		return Response{}, err
+	}
 	defer c.mu.Unlock()
 	if !c.isOpenLocked() {
 		return Response{}, errClientClosed

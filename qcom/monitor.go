@@ -20,7 +20,7 @@ const (
 
 // WatchCardStatus subscribes to logical UIM card and application changes.
 func (c *Client) WatchCardStatus(ctx context.Context) (<-chan CardStatus, error) {
-	transport, err := c.indicationTransport()
+	transport, err := c.indicationTransportContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +62,7 @@ func (c *Client) WatchCardStatus(ctx context.Context) (<-chan CardStatus, error)
 }
 
 func (c *Client) WatchSlotStatus(ctx context.Context) (<-chan SlotStatus, error) {
-	transport, err := c.indicationTransport()
+	transport, err := c.indicationTransportContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +184,13 @@ func (c *Client) WatchRefreshAll(ctx context.Context, session Session, aid []byt
 }
 
 func (c *Client) indicationTransport() (IndicationTransport, error) {
-	c.mu.Lock()
+	return c.indicationTransportContext(context.Background())
+}
+
+func (c *Client) indicationTransportContext(ctx context.Context) (IndicationTransport, error) {
+	if err := c.mu.LockContext(ctx); err != nil {
+		return nil, err
+	}
 	defer c.mu.Unlock()
 	if !c.isOpenLocked() {
 		return nil, errClientClosed

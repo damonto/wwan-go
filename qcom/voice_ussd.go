@@ -58,7 +58,7 @@ func (c *Client) voiceOriginateUSSDNoWait(ctx context.Context, value []byte, ret
 	}
 	if err != nil {
 		cancel()
-		if retry && errors.Is(err, QMIErrorInvalidClientId) && c.forgetServiceClientID(ServiceVoice, clientID) {
+		if retry && errors.Is(err, QMIErrorInvalidClientId) && c.forgetServiceClientID(ctx, ServiceVoice, clientID) {
 			return c.voiceOriginateUSSDNoWait(ctx, value, false)
 		}
 		return nil, fmt.Errorf("originating QMI Voice USSD without waiting: %w", err)

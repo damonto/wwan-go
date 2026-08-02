@@ -11,7 +11,9 @@ func (c *Client) SendEnvelope(ctx context.Context, envelope []byte) (EnvelopeRes
 }
 
 func (c *Client) catClient(ctx context.Context) (ServiceType, uint8, error) {
-	c.mu.Lock()
+	if err := c.mu.LockContext(ctx); err != nil {
+		return 0, 0, err
+	}
 	defer c.mu.Unlock()
 	if !c.isOpenLocked() {
 		return 0, 0, errClientClosed
@@ -42,7 +44,9 @@ func (c *Client) catClient(ctx context.Context) (ServiceType, uint8, error) {
 }
 
 func (c *Client) releaseCATClient(ctx context.Context, service ServiceType, clientID uint8) error {
-	c.mu.Lock()
+	if err := c.mu.LockContext(ctx); err != nil {
+		return err
+	}
 	defer c.mu.Unlock()
 	if !c.isOpenLocked() {
 		return nil
@@ -90,7 +94,9 @@ func (c *Client) catServiceType(ctx context.Context) (ServiceType, error) {
 
 // ServiceVersions returns the QMI services advertised by the device.
 func (c *Client) ServiceVersions(ctx context.Context) ([]ServiceVersion, error) {
-	c.mu.Lock()
+	if err := c.mu.LockContext(ctx); err != nil {
+		return nil, err
+	}
 	defer c.mu.Unlock()
 	if !c.isOpenLocked() {
 		return nil, errClientClosed

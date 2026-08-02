@@ -18,7 +18,7 @@ const (
 // Client owns a QMI transport and every QMUX client ID allocated through it.
 // Closing Client invalidates any stateful session created from it.
 type Client struct {
-	mu                 sync.Mutex
+	mu                 contextMutex
 	lifecycleMu        sync.Mutex
 	watchMu            sync.Mutex
 	pdcMu              sync.Mutex
