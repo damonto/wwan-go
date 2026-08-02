@@ -74,6 +74,7 @@ func TestApplyCellLocation(t *testing.T) {
 	}{
 		{name: "unknown frequency keeps existing value", location: qcom.NASCellLocationInfo{LTEIntraEARFCN: 1800}, want: 900},
 		{name: "known LTE frequency updates ARFCN", location: qcom.NASCellLocationInfo{LTEIntraEARFCN: 1800, LTEIntraEARFCNKnown: true}, want: 1800},
+		{name: "embedded LTE frequency updates ARFCN", location: qcom.NASCellLocationInfo{LTEIntra: qcom.NASLTEIntraFrequency{EARFCN: 1650}, LTEIntraKnown: true}, want: 1650},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

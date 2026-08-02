@@ -956,10 +956,18 @@ func (b *Backend) CellInfo(ctx context.Context) ([]CellInfo, error) {
 }
 
 func applyCellLocation(cell *CellInfo, location qcom.NASCellLocationInfo) {
-	if cell == nil || !location.LTEIntraEARFCNKnown {
+	if cell == nil {
 		return
 	}
-	cell.ARFCN = location.LTEIntraEARFCN
+	if location.LTEIntraEARFCNKnown {
+		cell.ARFCN = location.LTEIntraEARFCN
+		return
+	}
+	// Older Qualcomm firmware reports the serving EARFCN in the standard
+	// LTE intrafrequency TLV but omits the newer standalone EARFCN TLV.
+	if location.LTEIntraKnown {
+		cell.ARFCN = uint32(location.LTEIntra.EARFCN)
+	}
 }
 
 func (b *Backend) SAR(ctx context.Context) (SARState, error) {
