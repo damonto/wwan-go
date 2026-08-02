@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/damonto/wwan-go/qcom"
 	stkpkg "github.com/damonto/wwan-go/sim/stk"
 	"github.com/damonto/wwan-go/sim/tlv"
 )
@@ -47,14 +48,6 @@ func TestSTKHandle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalBinary() partial error = %v", err)
 	}
-	var bipStatusCmd stkpkg.ProactiveCommand
-	err = bipStatusCmd.UnmarshalBinary(proactive(t,
-		tlv.NewComprehension(0x01, []byte{0x03, byte(stkpkg.CommandGetChannelStatus), 0x00}),
-		tlv.NewComprehension(0x02, []byte{byte(stkpkg.DeviceUICC), byte(stkpkg.DeviceTerminal)}),
-	))
-	if err != nil {
-		t.Fatalf("UnmarshalBinary() BIP status error = %v", err)
-	}
 	var setupEventCmd stkpkg.ProactiveCommand
 	err = setupEventCmd.UnmarshalBinary(proactive(t,
 		tlv.NewComprehension(0x01, []byte{0x04, byte(stkpkg.CommandSetupEventList), 0x00}),
@@ -80,12 +73,7 @@ func TestSTKHandle(t *testing.T) {
 			want: stkpkg.ResultCommandPerformed,
 		},
 		{
-			name:    "built-in BIP",
-			command: bipStatusCmd.Command,
-			want:    stkpkg.ResultCommandPerformed,
-		},
-		{
-			name:    "built-in setup event list",
+			name:    "setup event list",
 			command: setupEventCmd.Command,
 			want:    stkpkg.ResultCommandPerformed,
 		},
@@ -154,7 +142,7 @@ func TestSTKHandle(t *testing.T) {
 	}
 }
 
-func TestProfileFromCallbacksAdvertisesBuiltInBIP(t *testing.T) {
+func TestProfileFromCallbacksAdvertisesModemOwnedBIP(t *testing.T) {
 	profile := ProfileFromCallbacks(STKCallbacks{})
 	commands := profile.ProactiveCommandTypes()
 
@@ -286,29 +274,6 @@ func TestProvideLocalInfoDefaultResponses(t *testing.T) {
 	}
 }
 
-func TestSTKUsesEnvelopeForBuiltInBIPEvents(t *testing.T) {
-	transport := &fakeSTKTransport{}
-	stk, err := newSTK(transport)
-	if err != nil {
-		t.Fatalf("newSTK() error = %v", err)
-	}
-
-	status := stkpkg.NewChannelStatus(2, true, stkpkg.ChannelStatusNoInfo)
-	if err := stk.bip.SendDataAvailable(context.Background(), status, []byte("pong"), 4, 1); err != nil {
-		t.Fatalf("SendDataAvailable() error = %v", err)
-	}
-	if len(transport.envelopes) != 1 || transport.envelopes[0][0] != stkpkg.TagEventDownload {
-		t.Fatalf("DataAvailable envelope = % X, want event download", transport.envelopes)
-	}
-
-	if err := stk.bip.SendChannelStatus(context.Background(), status); err != nil {
-		t.Fatalf("SendChannelStatus() error = %v", err)
-	}
-	if len(transport.envelopes) != 2 || transport.envelopes[1][0] != stkpkg.TagEventDownload {
-		t.Fatalf("ChannelStatus envelope = % X, want event download", transport.envelopes)
-	}
-}
-
 func TestSTKRunCancelsTransportContextOnHandleError(t *testing.T) {
 	var cmd stkpkg.ProactiveCommand
 	err := cmd.UnmarshalBinary(proactive(t,
@@ -421,6 +386,15 @@ func TestQCOMEventConfirmation(t *testing.T) {
 			wantIcon: &no,
 		},
 		{
+			name: "modem handled simple commands confirm icon",
+			command: stkpkg.SimpleCommand{CommandFrame: stkpkg.CommandFrame{
+				Details: stkpkg.CommandDetails{Type: stkpkg.CommandSendSMS},
+			}},
+			response: stkpkg.OK(),
+			wantOK:   true,
+			wantIcon: &no,
+		},
+		{
 			name:     "display text uses terminal response",
 			command:  stkpkg.DisplayTextCommand{},
 			response: stkpkg.OK(),
@@ -439,9 +413,89 @@ func TestQCOMEventConfirmation(t *testing.T) {
 	}
 }
 
+func TestQCOMResponseKind(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  qcom.CATCommand
+		want stkResponseKind
+	}{
+		{name: "missing metadata", want: stkResponseDefault},
+		{
+			name: "terminal response",
+			cmd: qcom.CATCommand{
+				ExpectedResponse:      qcom.CATExpectedResponseTerminalResponse,
+				ExpectedResponseKnown: true,
+			},
+			want: stkResponseTerminal,
+		},
+		{
+			name: "event confirmation",
+			cmd: qcom.CATCommand{
+				ExpectedResponse:      qcom.CATExpectedResponseEventConfirmation,
+				ExpectedResponseKnown: true,
+			},
+			want: stkResponseEventConfirmation,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := qcomResponseKind(tt.cmd); got != tt.want {
+				t.Fatalf("qcomResponseKind() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSTKHandlesModemOwnedBIP(t *testing.T) {
+	tests := []struct {
+		name    string
+		command stkpkg.Command
+	}{
+		{
+			name: "open channel",
+			command: stkpkg.OpenChannelCommand{
+				CommandFrame: stkpkg.CommandFrame{
+					Details: stkpkg.CommandDetails{Number: 1, Type: stkpkg.CommandOpenChannel},
+					Devices: stkpkg.DeviceIdentities{Source: stkpkg.DeviceUICC, Destination: stkpkg.DeviceTerminal},
+				},
+				Immediate:          true,
+				TransportLevel:     &stkpkg.TransportLevel{Protocol: stkpkg.TransportTCPClientRemote, Port: 443},
+				DestinationAddress: &stkpkg.OtherAddress{Type: stkpkg.AddressTypeIPv4, Address: []byte{192, 0, 2, 1}},
+			},
+		},
+		{name: "close channel", command: stkpkg.CloseChannelCommand{ChannelID: 1}},
+		{name: "send data", command: stkpkg.SendDataCommand{ChannelID: 1, Data: []byte("x")}},
+		{name: "receive data", command: stkpkg.ReceiveDataCommand{ChannelID: 1, Length: 1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeSTKTransport{}
+			toolkit, err := newSTK(transport)
+			if err != nil {
+				t.Fatalf("newSTK() error = %v", err)
+			}
+
+			err = toolkit.Handle(context.Background(), STKSession{
+				Command:      tt.command,
+				responseKind: stkResponseEventConfirmation,
+			}, STKCallbacks{})
+			if err != nil {
+				t.Fatalf("Handle() error = %v", err)
+			}
+			if len(transport.responses) != 1 {
+				t.Fatalf("responses = %d, want 1", len(transport.responses))
+			}
+			if got := transport.responses[0][len(transport.responses[0])-1]; got != byte(stkpkg.ResultCommandPerformed) {
+				t.Fatalf("result = 0x%02X, want success", got)
+			}
+		})
+	}
+}
+
 type fakeSTKTransport struct {
 	responses [][]byte
-	envelopes [][]byte
 }
 
 func (t *fakeSTKTransport) Commands(context.Context, stkpkg.Profile) (<-chan STKSession, error) {
@@ -459,8 +513,7 @@ func (t *fakeSTKTransport) Respond(_ context.Context, session STKSession, respon
 	return nil
 }
 
-func (t *fakeSTKTransport) Envelope(_ context.Context, envelope []byte) (stkpkg.EnvelopeResponse, error) {
-	t.envelopes = append(t.envelopes, slices.Clone(envelope))
+func (t *fakeSTKTransport) Envelope(context.Context, []byte) (stkpkg.EnvelopeResponse, error) {
 	return stkpkg.EnvelopeResponse{SW1: 0x90, SW2: 0x00}, nil
 }
 

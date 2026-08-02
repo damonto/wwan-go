@@ -57,7 +57,7 @@ sim                          SIM/USIM/ISIM card loading and high-level operation
 sim/card                     Card-facing interfaces consumed by sim
 sim/command                  APDU command helpers used by sim
 sim/simfile                  SIM file parsers
-sim/stk                      SIM Toolkit commands, envelopes, terminal profile, and BIP
+sim/stk                      SIM Toolkit commands, envelopes, terminal profile, and BIP protocol types
 sim/tlv                      BER-TLV helpers
 ```
 
@@ -470,7 +470,7 @@ Menu selection and other envelopes are sent through the same STK instance:
 _, err = toolkit.SendEnvelope(ctx, stk.MenuSelection(itemID, false))
 ```
 
-Bearer Independent Protocol is built in for TCP and UDP client channels. The STK runtime opens channels, sends and receives data, reports channel status, and closes active channels when the runtime exits. Application callbacks only need to handle user-visible behavior such as text, menu, SMS, calls, and browser launches.
+On Qualcomm CAT, Bearer Independent Protocol channels are modem-owned. The host parses the BIP commands and sends the requested alpha/icon event confirmations, but it does not open TCP or UDP sockets. APDU and MBIM transports still support the shared STK command API, but no Host-owned BIP runtime is provided.
 
 Transport notes:
 

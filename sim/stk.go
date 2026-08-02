@@ -13,7 +13,17 @@ type STKSession struct {
 	Ref     uint32
 	Command stk.Command
 	Err     error
+
+	responseKind stkResponseKind
 }
+
+type stkResponseKind byte
+
+const (
+	stkResponseDefault stkResponseKind = iota
+	stkResponseTerminal
+	stkResponseEventConfirmation
+)
 
 type STKCallback[T stk.Command] func(context.Context, T) (stk.TerminalResponse, error)
 
@@ -48,27 +58,13 @@ type stkTransport interface {
 
 type STK struct {
 	transport stkTransport
-	bip       *stk.BIP
 }
 
 func newSTK(transport stkTransport) (*STK, error) {
 	if transport == nil {
 		return nil, errors.New("creating USIM STK: transport is nil")
 	}
-	s := &STK{transport: transport}
-	s.bip = &stk.BIP{
-		SendEnvelope: func(ctx context.Context, envelope stk.Envelope) error {
-			_, err := s.SendEnvelope(ctx, envelope)
-			return err
-		},
-	}
-	s.bip.SendDataAvailable = func(ctx context.Context, status stk.ChannelStatus, _ []byte, available byte, _ uint16) error {
-		return s.bip.SendEnvelope(ctx, stk.DataAvailable(status, available))
-	}
-	s.bip.SendChannelStatus = func(ctx context.Context, status stk.ChannelStatus) error {
-		return s.bip.SendEnvelope(ctx, stk.ChannelStatusEvent(status, nil, nil))
-	}
-	return s, nil
+	return &STK{transport: transport}, nil
 }
 
 func (u *Card) STK() (*STK, error) {
@@ -86,9 +82,6 @@ func (s *STK) Run(ctx context.Context, callbacks STKCallbacks) error {
 	profile := ProfileFromCallbacks(callbacks)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	defer func() {
-		_ = s.Close()
-	}()
 
 	commands, err := s.transport.Commands(runCtx, profile)
 	if err != nil {
@@ -116,6 +109,10 @@ func (s *STK) Handle(ctx context.Context, session STKSession, callbacks STKCallb
 	if session.Command == nil {
 		return errors.New("handling STK command: command is nil")
 	}
+	if session.responseKind == stkResponseEventConfirmation && isModemOwnedBIPCommand(session.Command) {
+		// QMI CAT exposes modem-owned BIP commands only for alpha/icon confirmation.
+		return s.sendResponse(ctx, session, stk.OK())
+	}
 	response, err := s.dispatch(ctx, callbacks, session.Command)
 	if err != nil {
 		fallback := stk.Result(stk.ResultTerminalUnableToProcess)
@@ -125,6 +122,15 @@ func (s *STK) Handle(ctx context.Context, session STKSession, callbacks STKCallb
 		return err
 	}
 	return s.sendResponse(ctx, session, responseForCommand(session.Command, response))
+}
+
+func isModemOwnedBIPCommand(cmd stk.Command) bool {
+	switch cmd.(type) {
+	case stk.OpenChannelCommand, stk.CloseChannelCommand, stk.ReceiveDataCommand, stk.SendDataCommand:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *STK) SendEnvelope(ctx context.Context, envelope stk.Envelope) (stk.EnvelopeResponse, error) {
@@ -137,10 +143,6 @@ func (s *STK) SendEnvelope(ctx context.Context, envelope stk.Envelope) (stk.Enve
 
 func (s *STK) SendRawEnvelope(ctx context.Context, envelope []byte) (stk.EnvelopeResponse, error) {
 	return s.transport.Envelope(ctx, envelope)
-}
-
-func (s *STK) Close() error {
-	return s.bip.Close()
 }
 
 func (s *STK) sendResponse(ctx context.Context, session STKSession, response stk.TerminalResponse) error {
@@ -174,21 +176,10 @@ func (s *STK) dispatch(ctx context.Context, callbacks STKCallbacks, cmd stk.Comm
 			return callbacks.SelectItem(ctx, command)
 		}
 	case stk.SetupEventListCommand:
-		s.bip.SetEvents(command.Events)
 		if callbacks.SetupEventList != nil {
 			return callbacks.SetupEventList(ctx, command)
 		}
 		return stk.OK(), nil
-	case stk.OpenChannelCommand:
-		return s.bip.OpenChannel(ctx, command)
-	case stk.CloseChannelCommand:
-		return s.bip.CloseChannel(ctx, command)
-	case stk.SendDataCommand:
-		return s.bip.SendData(ctx, command)
-	case stk.ReceiveDataCommand:
-		return s.bip.ReceiveData(ctx, command)
-	case stk.GetChannelStatusCommand:
-		return s.bip.GetChannelStatus(ctx, command)
 	case stk.SimpleCommand:
 		return s.dispatchSimple(ctx, callbacks, command)
 	case stk.GenericCommand:

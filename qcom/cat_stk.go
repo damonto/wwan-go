@@ -24,6 +24,7 @@ const (
 
 	catSetEventReportRawErrorTLV          = 0x10
 	catSetEventReportFullFunctionErrorTLV = 0x12
+	catEventReportExpectedResponseTLV     = 0x68
 )
 
 type CAT struct {
@@ -35,9 +36,19 @@ type CATConfiguration struct {
 	CustomProfile []byte
 }
 
+// CATExpectedResponse identifies the response requested by a CAT indication.
+type CATExpectedResponse uint32
+
+const (
+	CATExpectedResponseTerminalResponse CATExpectedResponse = iota
+	CATExpectedResponseEventConfirmation
+)
+
 type CATCommand struct {
-	Ref  uint32
-	Data []byte
+	Ref                   uint32
+	Data                  []byte
+	ExpectedResponse      CATExpectedResponse
+	ExpectedResponseKnown bool
 }
 
 type CATEventConfirmation struct {
@@ -418,18 +429,36 @@ func (c *CAT) releaseCATClient(service ServiceType, clientID uint8) {
 
 // UnmarshalTLVs decodes a raw command from a QMI CAT indication.
 func (c *CATCommand) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	*c = CATCommand{}
+	commandFound := false
 	for _, item := range tlvs {
-		if !isRawCATCommandTLV(item.Type) {
-			continue
+		switch item.Type {
+		case catEventReportExpectedResponseTLV:
+			if len(item.Value) != 4 {
+				return fmt.Errorf("parsing QMI CAT indication: response type TLV length %d, want 4", len(item.Value))
+			}
+			expected := CATExpectedResponse(binary.LittleEndian.Uint32(item.Value))
+			if expected == CATExpectedResponseTerminalResponse || expected == CATExpectedResponseEventConfirmation {
+				c.ExpectedResponse = expected
+				c.ExpectedResponseKnown = true
+			}
+		default:
+			if !isRawCATCommandTLV(item.Type) {
+				continue
+			}
+			var command CATCommand
+			if err := command.UnmarshalBinary(item.Value); err != nil {
+				return fmt.Errorf("parsing QMI CAT indication: %w", err)
+			}
+			c.Ref = command.Ref
+			c.Data = command.Data
+			commandFound = true
 		}
-		var command CATCommand
-		if err := command.UnmarshalBinary(item.Value); err != nil {
-			return fmt.Errorf("parsing QMI CAT indication: %w", err)
-		}
-		*c = command
-		return nil
 	}
-	return errors.New("parsing QMI CAT indication: raw command TLV missing")
+	if !commandFound {
+		return errors.New("parsing QMI CAT indication: raw command TLV missing")
+	}
+	return nil
 }
 
 func isRawCATCommandTLV(tag byte) bool {

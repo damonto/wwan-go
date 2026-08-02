@@ -65,6 +65,79 @@ func TestCATCommandBinary(t *testing.T) {
 	}
 }
 
+func TestCATCommandUnmarshalTLVs(t *testing.T) {
+	raw := []byte{0xD0, 0x09, 0x81, 0x03, 0x01, 0x40, 0x01, 0x82, 0x02, 0x81, 0x82}
+	commandValue, err := (CATCommand{Ref: 0x01020304, Data: raw}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("CATCommand.MarshalBinary() error = %v", err)
+	}
+
+	tests := []struct {
+		name          string
+		tlvs          tlv.TLVs
+		wantResponse  CATExpectedResponse
+		responseKnown bool
+		wantErr       bool
+	}{
+		{
+			name: "terminal response",
+			tlvs: tlv.TLVs{
+				tlv.Uint(catEventReportExpectedResponseTLV, uint32(CATExpectedResponseTerminalResponse)),
+				tlv.Bytes(0x66, commandValue),
+			},
+			wantResponse:  CATExpectedResponseTerminalResponse,
+			responseKnown: true,
+		},
+		{
+			name: "event confirmation with extra metadata",
+			tlvs: tlv.TLVs{
+				tlv.Bytes(0x66, commandValue),
+				tlv.Uint(catEventReportExpectedResponseTLV, uint32(CATExpectedResponseEventConfirmation)),
+				tlv.Bytes(0x69, []byte{3, 1, 0, 0, 0}),
+			},
+			wantResponse:  CATExpectedResponseEventConfirmation,
+			responseKnown: true,
+		},
+		{
+			name: "reserved metadata ignored",
+			tlvs: tlv.TLVs{
+				tlv.Bytes(0x66, commandValue),
+				tlv.Uint(catEventReportExpectedResponseTLV, uint32(2)),
+				tlv.Bytes(0x69, []byte{3, 2, 0, 0, 0}),
+			},
+		},
+		{
+			name:    "malformed response type",
+			tlvs:    tlv.TLVs{tlv.Bytes(0x66, commandValue), tlv.Bytes(catEventReportExpectedResponseTLV, []byte{0})},
+			wantErr: true,
+		},
+		{
+			name:    "missing raw command",
+			tlvs:    tlv.TLVs{tlv.Uint(catEventReportExpectedResponseTLV, uint32(CATExpectedResponseTerminalResponse))},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got CATCommand
+			err := got.UnmarshalTLVs(tt.tlvs)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("CATCommand.UnmarshalTLVs() error = %v, wantErr %t", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if got.Ref != 0x01020304 || !bytes.Equal(got.Data, raw) {
+				t.Fatalf("CATCommand.UnmarshalTLVs() command = %+v, want ref 0x01020304 data % X", got, raw)
+			}
+			if got.ExpectedResponse != tt.wantResponse || got.ExpectedResponseKnown != tt.responseKnown {
+				t.Errorf("CATCommand.UnmarshalTLVs() response = %d, known %t; want %d, known %t", got.ExpectedResponse, got.ExpectedResponseKnown, tt.wantResponse, tt.responseKnown)
+			}
+		})
+	}
+}
+
 func TestCATTerminalResponse(t *testing.T) {
 	reader := &Client{
 		transport: &fakeTransport{

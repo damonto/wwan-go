@@ -193,7 +193,11 @@ func (r *QCOM) Commands(ctx context.Context, profile stk.Profile) (<-chan STKSes
 				continue
 			}
 			select {
-			case out <- STKSession{Ref: raw.Ref, Command: proactive.Command}:
+			case out <- STKSession{
+				Ref:          raw.Ref,
+				Command:      proactive.Command,
+				responseKind: qcomResponseKind(raw),
+			}:
 			case <-ctx.Done():
 				return
 			}
@@ -215,14 +219,33 @@ func (r *QCOM) Respond(ctx context.Context, session STKSession, response stk.Ter
 	if err != nil {
 		return err
 	}
-	if confirmation, ok := qcomEventConfirmation(session.Command, response); ok {
+	if session.responseKind == stkResponseEventConfirmation {
+		confirmation, ok := qcomEventConfirmation(session.Command, response)
+		if !ok {
+			return fmt.Errorf("sending QMI CAT event confirmation: command %T does not support event confirmation", session.Command)
+		}
 		return cat.EventConfirmation(ctx, confirmation)
+	}
+	if session.responseKind == stkResponseDefault {
+		if confirmation, ok := qcomEventConfirmation(session.Command, response); ok {
+			return cat.EventConfirmation(ctx, confirmation)
+		}
 	}
 	data, err := response.MarshalFor(session.Command)
 	if err != nil {
 		return err
 	}
 	return cat.TerminalResponse(ctx, session.Ref, data)
+}
+
+func qcomResponseKind(command qc.CATCommand) stkResponseKind {
+	if !command.ExpectedResponseKnown {
+		return stkResponseDefault
+	}
+	if command.ExpectedResponse == qc.CATExpectedResponseEventConfirmation {
+		return stkResponseEventConfirmation
+	}
+	return stkResponseTerminal
 }
 
 func (r *QCOM) Envelope(ctx context.Context, envelope []byte) (stk.EnvelopeResponse, error) {
@@ -261,7 +284,15 @@ func qcomEventConfirmation(command stk.Command, response stk.TerminalResponse) (
 	case stk.CloseChannelCommand, stk.ReceiveDataCommand, stk.SendDataCommand:
 		return qc.CATEventConfirmation{IconDisplayed: &notDisplayed}, true
 	case stk.SimpleCommand:
-		if cmd.Details.Type == stk.CommandRefresh {
+		// Qualcomm performs these commands in the modem; the
+		// control point only confirms whether their alpha/icon was displayed.
+		switch cmd.Details.Type {
+		case stk.CommandRefresh,
+			stk.CommandSendSS,
+			stk.CommandSendUSSD,
+			stk.CommandSendSMS,
+			stk.CommandSendDTMF,
+			stk.CommandRunATCommand:
 			return qc.CATEventConfirmation{IconDisplayed: &notDisplayed}, true
 		}
 	}
