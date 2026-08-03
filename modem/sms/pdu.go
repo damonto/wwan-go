@@ -19,8 +19,8 @@ const (
 	smsMaxUserDataOctets = 140
 	smsGSM7SingleSeptets = 160
 	smsGSM7PartSeptets   = 153
-	smsUCS2SingleUnits   = 70
-	smsUCS2PartUnits     = 67
+	smsUTF16SingleUnits  = 70
+	smsUTF16PartUnits    = 67
 	smsBinaryPartOctets  = 134
 )
 
@@ -67,16 +67,23 @@ func encodeGSM7PDUs(cfg MessageConfig) ([][]byte, error) {
 }
 
 func encodeUCS2PDUs(cfg MessageConfig) ([][]byte, error) {
-	payload, err := UCS2(cfg.Text).MarshalBinary()
+	// Real networks commonly carry UTF-16BE under the UCS-2 data coding scheme.
+	payload, err := UTF16(cfg.Text).MarshalBinary()
 	if err != nil {
 		return nil, err
 	}
-	if len(payload)/2 <= smsUCS2SingleUnits {
+	if len(payload)/2 <= smsUTF16SingleUnits {
 		return [][]byte{buildSubmitPDU(cfg, smsAlphabetUCS2, payload, nil)}, nil
 	}
-	chunks := make([][]byte, 0, (len(payload)+smsUCS2PartUnits*2-1)/(smsUCS2PartUnits*2))
+	chunks := make([][]byte, 0, (len(payload)+smsUTF16PartUnits*2-1)/(smsUTF16PartUnits*2))
 	for len(payload) > 0 {
-		length := min(len(payload), smsUCS2PartUnits*2)
+		length := min(len(payload), smsUTF16PartUnits*2)
+		if length < len(payload) {
+			lastUnit := binary.BigEndian.Uint16(payload[length-2 : length])
+			if lastUnit >= 0xd800 && lastUnit <= 0xdbff {
+				length -= 2
+			}
+		}
 		chunks = append(chunks, slices.Clone(payload[:length]))
 		payload = payload[length:]
 	}
@@ -304,7 +311,7 @@ func decodeUserData(pdu []byte, offset int, hasHeader bool, dcs byte, part Part)
 	if len(payload)%2 != 0 {
 		return Part{}, errors.New("decoding SMS PDU: UCS-2 user data has odd length")
 	}
-	var text UCS2
+	var text UTF16
 	if err := text.UnmarshalBinary(payload); err != nil {
 		return Part{}, err
 	}

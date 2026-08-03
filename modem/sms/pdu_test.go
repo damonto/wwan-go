@@ -18,6 +18,10 @@ func TestSMSPDUBoundaries(t *testing.T) {
 		{name: "GSM7 extension multipart", config: MessageConfig{Number: "+15551234", Text: strings.Repeat("^", 81)}, wantParts: 2},
 		{name: "UCS2 single", config: MessageConfig{Number: "+15551234", Text: strings.Repeat("界", 70)}, wantParts: 1},
 		{name: "UCS2 multipart", config: MessageConfig{Number: "+15551234", Text: strings.Repeat("界", 71)}, wantParts: 2},
+		{name: "UTF16 emoji single", config: MessageConfig{Number: "+15551234", Text: strings.Repeat("🙏", 35)}, wantParts: 1},
+		{name: "UTF16 emoji multipart", config: MessageConfig{Number: "+15551234", Text: strings.Repeat("🙏", 36)}, wantParts: 2},
+		{name: "UTF16 surrogate at multipart boundary", config: MessageConfig{Number: "+15551234", Text: strings.Repeat("界", 66) + "🙏" + strings.Repeat("界", 3)}, wantParts: 2},
+		{name: "UTF16 emoji modifier", config: MessageConfig{Number: "+15551234", Text: "麻煩你了🙏🏻"}, wantParts: 1},
 		{name: "binary single", config: MessageConfig{Number: "+15551234", Data: bytes.Repeat([]byte{0xaa}, 140)}, wantParts: 1},
 		{name: "binary multipart", config: MessageConfig{Number: "+15551234", Data: bytes.Repeat([]byte{0xaa}, 141)}, wantParts: 2},
 	}

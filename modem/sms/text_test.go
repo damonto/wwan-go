@@ -21,9 +21,19 @@ var (
 	_ encoding.BinaryUnmarshaler = (*UCS2LE)(nil)
 	_ encoding.TextMarshaler     = UCS2LE("")
 	_ encoding.TextUnmarshaler   = (*UCS2LE)(nil)
+	_ encoding.BinaryMarshaler   = UTF16("")
+	_ encoding.BinaryUnmarshaler = (*UTF16)(nil)
+	_ encoding.TextMarshaler     = UTF16("")
+	_ encoding.TextUnmarshaler   = (*UTF16)(nil)
+	_ encoding.BinaryMarshaler   = UTF16LE("")
+	_ encoding.BinaryUnmarshaler = (*UTF16LE)(nil)
+	_ encoding.TextMarshaler     = UTF16LE("")
+	_ encoding.TextUnmarshaler   = (*UTF16LE)(nil)
 	_ fmt.Stringer               = GSM7("")
 	_ fmt.Stringer               = UCS2("")
 	_ fmt.Stringer               = UCS2LE("")
+	_ fmt.Stringer               = UTF16("")
+	_ fmt.Stringer               = UTF16LE("")
 )
 
 func TestGSM7BinaryAndTextRoundTrip(t *testing.T) {
@@ -190,6 +200,111 @@ func TestUCS2TextErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := tt.run(); err == nil {
 				t.Fatal("codec error = nil, want non-nil")
+			}
+		})
+	}
+}
+
+func TestUTF16BinaryAndTextRoundTrip(t *testing.T) {
+	tests := []struct {
+		name            string
+		marshalBinary   func() ([]byte, error)
+		unmarshalBinary func([]byte) (string, error)
+		marshalText     func() ([]byte, error)
+		unmarshalText   func([]byte) (string, error)
+		want            []byte
+		wantText        string
+	}{
+		{
+			name:          "big endian",
+			marshalBinary: func() ([]byte, error) { return UTF16("A界🙏🏻").MarshalBinary() },
+			unmarshalBinary: func(data []byte) (string, error) {
+				var text UTF16
+				err := text.UnmarshalBinary(data)
+				return text.String(), err
+			},
+			marshalText: func() ([]byte, error) { return UTF16("A界🙏🏻").MarshalText() },
+			unmarshalText: func(data []byte) (string, error) {
+				var text UTF16
+				err := text.UnmarshalText(data)
+				return text.String(), err
+			},
+			want:     []byte{0x00, 0x41, 0x75, 0x4C, 0xD8, 0x3D, 0xDE, 0x4F, 0xD8, 0x3C, 0xDF, 0xFB},
+			wantText: "A界🙏🏻",
+		},
+		{
+			name:          "little endian",
+			marshalBinary: func() ([]byte, error) { return UTF16LE("A界🙏🏻").MarshalBinary() },
+			unmarshalBinary: func(data []byte) (string, error) {
+				var text UTF16LE
+				err := text.UnmarshalBinary(data)
+				return text.String(), err
+			},
+			marshalText: func() ([]byte, error) { return UTF16LE("A界🙏🏻").MarshalText() },
+			unmarshalText: func(data []byte) (string, error) {
+				var text UTF16LE
+				err := text.UnmarshalText(data)
+				return text.String(), err
+			},
+			want:     []byte{0x41, 0x00, 0x4C, 0x75, 0x3D, 0xD8, 0x4F, 0xDE, 0x3C, 0xD8, 0xFB, 0xDF},
+			wantText: "A界🙏🏻",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encoded, err := tt.marshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(encoded, tt.want) {
+				t.Fatalf("MarshalBinary() = % X, want % X", encoded, tt.want)
+			}
+			decoded, err := tt.unmarshalBinary(encoded)
+			if err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if decoded != tt.wantText {
+				t.Fatalf("String() = %q, want %q", decoded, tt.wantText)
+			}
+
+			text, err := tt.marshalText()
+			if err != nil {
+				t.Fatalf("MarshalText() error = %v", err)
+			}
+			if string(text) != tt.wantText {
+				t.Fatalf("MarshalText() = %q, want %q", text, tt.wantText)
+			}
+			decoded, err = tt.unmarshalText(text)
+			if err != nil {
+				t.Fatalf("UnmarshalText() error = %v", err)
+			}
+			if decoded != tt.wantText {
+				t.Fatalf("String() = %q, want %q", decoded, tt.wantText)
+			}
+		})
+	}
+}
+
+func TestUTF16TextErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "binary invalid UTF-8", run: func() error { _, err := UTF16(string([]byte{0xff})).MarshalBinary(); return err }},
+		{name: "text invalid UTF-8", run: func() error { _, err := UTF16(string([]byte{0xff})).MarshalText(); return err }},
+		{name: "unmarshal invalid UTF-8 text", run: func() error { return new(UTF16).UnmarshalText([]byte{0xff}) }},
+		{name: "odd big-endian payload", run: func() error { return new(UTF16).UnmarshalBinary([]byte{0x00}) }},
+		{name: "odd little-endian payload", run: func() error { return new(UTF16LE).UnmarshalBinary([]byte{0x00}) }},
+		{name: "trailing high surrogate", run: func() error { return new(UTF16).UnmarshalBinary([]byte{0xD8, 0x3D}) }},
+		{name: "high surrogate before BMP", run: func() error { return new(UTF16).UnmarshalBinary([]byte{0xD8, 0x3D, 0x00, 0x41}) }},
+		{name: "unpaired low surrogate", run: func() error { return new(UTF16).UnmarshalBinary([]byte{0xDE, 0x4F}) }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.run(); err == nil {
+				t.Fatal("UTF-16 codec error = nil, want non-nil")
 			}
 		})
 	}

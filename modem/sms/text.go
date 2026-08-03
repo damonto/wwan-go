@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -161,6 +162,84 @@ func (text *UCS2LE) UnmarshalText(data []byte) error {
 	return nil
 }
 
+// UTF16 is text represented with big-endian UTF-16 code units.
+type UTF16 string
+
+func (text UTF16) String() string {
+	return string(text)
+}
+
+// MarshalBinary encodes text as big-endian UTF-16 code units.
+func (text UTF16) MarshalBinary() ([]byte, error) {
+	return marshalUTF16(string(text), binary.BigEndian)
+}
+
+// UnmarshalBinary decodes big-endian UTF-16 code units.
+func (text *UTF16) UnmarshalBinary(data []byte) error {
+	value, err := unmarshalUTF16(data, binary.BigEndian)
+	if err != nil {
+		return err
+	}
+	*text = UTF16(value)
+	return nil
+}
+
+// MarshalText returns the UTF-8 textual form after validating UTF-16 support.
+func (text UTF16) MarshalText() ([]byte, error) {
+	if !utf8.ValidString(string(text)) {
+		return nil, errors.New("encoding UTF16 text: value is not valid UTF-8")
+	}
+	return []byte(text), nil
+}
+
+// UnmarshalText decodes UTF-8 text and validates that UTF-16 can represent it.
+func (text *UTF16) UnmarshalText(data []byte) error {
+	if !utf8.Valid(data) {
+		return errors.New("decoding UTF16 text: value is not valid UTF-8")
+	}
+	*text = UTF16(string(data))
+	return nil
+}
+
+// UTF16LE is text represented with little-endian UTF-16 code units.
+type UTF16LE string
+
+func (text UTF16LE) String() string {
+	return string(text)
+}
+
+// MarshalBinary encodes text as little-endian UTF-16 code units.
+func (text UTF16LE) MarshalBinary() ([]byte, error) {
+	return marshalUTF16(string(text), binary.LittleEndian)
+}
+
+// UnmarshalBinary decodes little-endian UTF-16 code units.
+func (text *UTF16LE) UnmarshalBinary(data []byte) error {
+	value, err := unmarshalUTF16(data, binary.LittleEndian)
+	if err != nil {
+		return err
+	}
+	*text = UTF16LE(value)
+	return nil
+}
+
+// MarshalText returns the UTF-8 textual form after validating UTF-16 support.
+func (text UTF16LE) MarshalText() ([]byte, error) {
+	if !utf8.ValidString(string(text)) {
+		return nil, errors.New("encoding UTF16LE text: value is not valid UTF-8")
+	}
+	return []byte(text), nil
+}
+
+// UnmarshalText decodes UTF-8 text and validates that UTF-16 can represent it.
+func (text *UTF16LE) UnmarshalText(data []byte) error {
+	if !utf8.Valid(data) {
+		return errors.New("decoding UTF16LE text: value is not valid UTF-8")
+	}
+	*text = UTF16LE(string(data))
+	return nil
+}
+
 func marshalUCS2(value string, order binary.ByteOrder) ([]byte, error) {
 	if !utf8.ValidString(value) {
 		return nil, errors.New("encoding UCS2: value is not valid UTF-8")
@@ -189,4 +268,39 @@ func unmarshalUCS2(data []byte, order binary.ByteOrder) (string, error) {
 		runes[i] = rune(unit)
 	}
 	return string(runes), nil
+}
+
+func marshalUTF16(value string, order binary.ByteOrder) ([]byte, error) {
+	if !utf8.ValidString(value) {
+		return nil, errors.New("encoding UTF16: value is not valid UTF-8")
+	}
+	units := utf16.Encode([]rune(value))
+	result := make([]byte, len(units)*2)
+	for i, unit := range units {
+		order.PutUint16(result[i*2:], unit)
+	}
+	return result, nil
+}
+
+func unmarshalUTF16(data []byte, order binary.ByteOrder) (string, error) {
+	if len(data)%2 != 0 {
+		return "", errors.New("decoding UTF16: payload has odd byte length")
+	}
+	units := make([]uint16, len(data)/2)
+	for i := range units {
+		units[i] = order.Uint16(data[i*2:])
+	}
+	for i := 0; i < len(units); i++ {
+		unit := units[i]
+		switch {
+		case unit >= 0xd800 && unit <= 0xdbff:
+			if i+1 >= len(units) || units[i+1] < 0xdc00 || units[i+1] > 0xdfff {
+				return "", errors.New("decoding UTF16: payload contains an unpaired high surrogate")
+			}
+			i++
+		case unit >= 0xdc00 && unit <= 0xdfff:
+			return "", errors.New("decoding UTF16: payload contains an unpaired low surrogate")
+		}
+	}
+	return string(utf16.Decode(units)), nil
 }
