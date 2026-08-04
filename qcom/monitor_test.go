@@ -91,6 +91,17 @@ func TestMonitorTLVEncoding(t *testing.T) {
 			},
 		},
 		{
+			name: "refresh ok",
+			build: func() (tlv.TLVs, error) {
+				return refreshOKTLVs(SessionCardSlot1, nil, true)
+			},
+			check: func(t *testing.T, tlvs tlv.TLVs) {
+				t.Helper()
+				assertTLV(t, tlvs, 0x01, []byte{byte(SessionCardSlot1), 0x00})
+				assertTLV(t, tlvs, 0x02, []byte{0x01})
+			},
+		},
+		{
 			name: "refresh complete",
 			build: func() (tlv.TLVs, error) {
 				return refreshCompleteTLVs(SessionCardSlot1, []byte{0xA0, 0x00}, true)
@@ -152,6 +163,89 @@ func TestMonitorTLVEncoding(t *testing.T) {
 				t.Fatalf("build() error = %v", err)
 			}
 			tt.check(t, got)
+		})
+	}
+}
+
+func TestRefreshNeedsImmediateCompletion(t *testing.T) {
+	tests := []struct {
+		name  string
+		event RefreshEvent
+		want  bool
+	}{
+		{
+			name:  "FCN provisioning",
+			event: RefreshEvent{Stage: RefreshStageStart, Mode: RefreshModeFCN, Session: SessionPrimaryGWProvisioning},
+			want:  true,
+		},
+		{
+			name:  "init non-provisioning",
+			event: RefreshEvent{Stage: RefreshStageStart, Mode: RefreshModeInit, Session: SessionNonProvisioningSlot1},
+			want:  true,
+		},
+		{
+			name:  "init FCN non-provisioning",
+			event: RefreshEvent{Stage: RefreshStageStart, Mode: RefreshModeInitFCN, Session: SessionNonProvisioningSlot2},
+			want:  true,
+		},
+		{
+			name:  "init full FCN non-provisioning",
+			event: RefreshEvent{Stage: RefreshStageStart, Mode: RefreshModeInitFullFCN, Session: SessionNonProvisioningSlot3},
+			want:  true,
+		},
+		{
+			name:  "application reset non-provisioning",
+			event: RefreshEvent{Stage: RefreshStageStart, Mode: RefreshModeApplicationReset, Session: SessionNonProvisioningSlot4},
+			want:  true,
+		},
+		{
+			name:  "3G reset non-provisioning",
+			event: RefreshEvent{Stage: RefreshStageStart, Mode: RefreshMode3GReset, Session: SessionNonProvisioningSlot5},
+			want:  true,
+		},
+		{
+			name:  "init provisioning",
+			event: RefreshEvent{Stage: RefreshStageStart, Mode: RefreshModeInit, Session: SessionPrimaryGWProvisioning},
+		},
+		{
+			name:  "init FCN provisioning",
+			event: RefreshEvent{Stage: RefreshStageStart, Mode: RefreshModeInitFCN, Session: SessionPrimaryGWProvisioning},
+		},
+		{
+			name:  "init full FCN provisioning",
+			event: RefreshEvent{Stage: RefreshStageStart, Mode: RefreshModeInitFullFCN, Session: SessionPrimaryGWProvisioning},
+		},
+		{
+			name:  "application reset provisioning",
+			event: RefreshEvent{Stage: RefreshStageStart, Mode: RefreshModeApplicationReset, Session: SessionPrimaryGWProvisioning},
+		},
+		{
+			name:  "3G reset provisioning",
+			event: RefreshEvent{Stage: RefreshStageStart, Mode: RefreshMode3GReset, Session: SessionPrimaryGWProvisioning},
+		},
+		{
+			name:  "reset non-provisioning",
+			event: RefreshEvent{Stage: RefreshStageStart, Mode: RefreshModeReset, Session: SessionNonProvisioningSlot1},
+		},
+		{
+			name:  "end FCN",
+			event: RefreshEvent{Stage: RefreshStageEndWithSuccess, Mode: RefreshModeFCN, Session: SessionPrimaryGWProvisioning},
+		},
+		{
+			name:  "wait for OK",
+			event: RefreshEvent{Stage: RefreshStageWaitForOK, Mode: RefreshModeFCN, Session: SessionPrimaryGWProvisioning},
+		},
+		{
+			name:  "unknown mode",
+			event: RefreshEvent{Stage: RefreshStageStart, Mode: RefreshMode(0xff), Session: SessionNonProvisioningSlot1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := refreshNeedsImmediateCompletion(tt.event); got != tt.want {
+				t.Fatalf("refreshNeedsImmediateCompletion(%+v) = %t, want %t", tt.event, got, tt.want)
+			}
 		})
 	}
 }
@@ -353,92 +447,208 @@ func TestUIMEventRegistrationReferences(t *testing.T) {
 	}
 }
 
-func TestWatchRefreshFilesCompletesStartEvent(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	eventValue := []byte{
-		byte(RefreshStageStart),
-		byte(RefreshModeFCN),
-		byte(SessionCardSlot1),
-		0x00,
-		0x01, 0x00,
-		0xAD, 0x6F,
-		0x04, 0x00, 0x3F, 0xFF, 0x7F,
-	}
-	transport := &fakeIndicationTransport{
-		fakeTransport: fakeTransport{
-			t: t,
-			calls: []transportCall{
-				{
-					check: func(req Request) {
-						if req.MessageID != MessageRefreshRegister {
-							t.Fatalf("MessageID = 0x%04X, want refresh register", req.MessageID)
-						}
-						assertTLV(t, req.TLVs, 0x02, []byte{
-							0x01, 0x00,
-							0x01, 0x00,
-							0xAD, 0x6F,
-							0x04, 0x00, 0x3F, 0xFF, 0x7F,
-						})
-					},
-					resp: successResponse(MessageRefreshRegister),
-				},
-				{
-					check: func(req Request) {
-						if req.MessageID != MessageRefreshComplete {
-							t.Fatalf("MessageID = 0x%04X, want refresh complete", req.MessageID)
-						}
-						assertTLV(t, req.TLVs, 0x01, []byte{byte(SessionCardSlot1), 0x00})
-						assertTLV(t, req.TLVs, 0x02, []byte{0x01})
-					},
-					resp: successResponse(MessageRefreshComplete),
-				},
-				{
-					check: func(req Request) {
-						if req.MessageID != MessageRefreshRegister {
-							t.Fatalf("MessageID = 0x%04X, want refresh unregister", req.MessageID)
-						}
-						value, ok := tlv.Value(req.TLVs, 0x02)
-						if !ok || len(value) == 0 || value[0] != 0 {
-							t.Fatalf("unregister info TLV = % X, want register flag 0", value)
-						}
-					},
-					resp: successResponse(MessageRefreshRegister),
-				},
-			},
+func TestWatchRefreshFilesRespondsToProtocolEvents(t *testing.T) {
+	tests := []struct {
+		name        string
+		stage       RefreshStage
+		mode        RefreshMode
+		session     Session
+		wantMessage MessageID
+	}{
+		{
+			name:        "allows refresh waiting for OK",
+			stage:       RefreshStageWaitForOK,
+			mode:        RefreshModeInit,
+			session:     SessionNonProvisioningSlot1,
+			wantMessage: MessageRefreshOK,
+		},
+		{
+			name:        "completes FCN start",
+			stage:       RefreshStageStart,
+			mode:        RefreshModeFCN,
+			session:     SessionCardSlot1,
+			wantMessage: MessageRefreshComplete,
+		},
+		{
+			name:    "leaves provisioning init to modem",
+			stage:   RefreshStageStart,
+			mode:    RefreshModeInit,
+			session: SessionPrimaryGWProvisioning,
 		},
 	}
-	reader := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceUIM: 7}}
 
-	events, err := reader.WatchRefreshFiles(ctx, RefreshRegisterRequest{
-		Session: SessionCardSlot1,
-		Files: []RefreshFile{{
-			Path: []byte{0x3F, 0x00, 0x7F, 0xFF, 0x6F, 0xAD},
-		}},
-	})
-	if err != nil {
-		t.Fatalf("WatchRefreshFiles() error = %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := []transportCall{{
+				check: func(req Request) {
+					if req.MessageID != MessageRefreshRegister {
+						t.Fatalf("MessageID = 0x%04X, want refresh register", req.MessageID)
+					}
+				},
+				resp: successResponse(MessageRefreshRegister),
+			}}
+			if tt.wantMessage != 0 {
+				calls = append(calls, transportCall{
+					check: func(req Request) {
+						if req.MessageID != tt.wantMessage {
+							t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, tt.wantMessage)
+						}
+						assertTLV(t, req.TLVs, 0x01, []byte{byte(tt.session), 0x00})
+						assertTLV(t, req.TLVs, 0x02, []byte{0x01})
+					},
+					resp: successResponse(tt.wantMessage),
+				})
+			}
+			calls = append(calls, transportCall{
+				check: func(req Request) {
+					if req.MessageID != MessageRefreshRegister {
+						t.Fatalf("MessageID = 0x%04X, want refresh unregister", req.MessageID)
+					}
+				},
+				resp: successResponse(MessageRefreshRegister),
+			})
+
+			transport := &fakeIndicationTransport{
+				fakeTransport: fakeTransport{t: t, calls: calls},
+			}
+			client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceUIM: 7}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			events, err := client.WatchRefreshFiles(ctx, RefreshRegisterRequest{
+				Session: tt.session,
+				Files:   []RefreshFile{{Path: []byte{0x3F, 0x00, 0x2F, 0xE2}}},
+			})
+			if err != nil {
+				t.Fatalf("WatchRefreshFiles() error = %v", err)
+			}
+			transport.emit(refreshIndication(tt.stage, tt.mode, tt.session))
+
+			select {
+			case event := <-events:
+				if event.Stage != tt.stage || event.Mode != tt.mode || event.Session != tt.session {
+					t.Fatalf("event = %+v", event)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for refresh event")
+			}
+
+			wantCalls := 1
+			if tt.wantMessage != 0 {
+				wantCalls++
+			}
+			if got := transport.callCount(); got != wantCalls {
+				t.Fatalf("Do() calls before cancellation = %d, want %d", got, wantCalls)
+			}
+			cancel()
+			transport.waitCalls(t, wantCalls+1)
+		})
 	}
-	transport.emit(Indication{
-		Service:   ServiceUIM,
-		ClientID:  7,
-		MessageID: MessageRefresh,
-		TLVs:      tlv.TLVs{tlv.Bytes(0x10, eventValue)},
-	})
+}
 
-	select {
-	case event := <-events:
-		if event.Stage != RefreshStageStart || event.Mode != RefreshModeFCN {
-			t.Fatalf("event = %+v", event)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for refresh event")
+func TestWatchRefreshFilesStopsWhenProtocolResponseFails(t *testing.T) {
+	tests := []struct {
+		name     string
+		response transportCall
+	}{
+		{
+			name:     "transport error",
+			response: transportCall{err: context.DeadlineExceeded},
+		},
+		{
+			name:     "QMI error",
+			response: transportCall{resp: errorResponse(MessageRefreshOK, QMIErrorInternal)},
+		},
 	}
 
-	transport.waitCalls(t, 2)
-	cancel()
-	transport.waitCalls(t, 3)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.response.check = func(req Request) {
+				if req.MessageID != MessageRefreshOK {
+					t.Fatalf("MessageID = 0x%04X, want refresh OK", req.MessageID)
+				}
+			}
+			transport := &fakeIndicationTransport{
+				fakeTransport: fakeTransport{t: t, calls: []transportCall{
+					{resp: successResponse(MessageRefreshRegister)},
+					tt.response,
+					{resp: successResponse(MessageRefreshRegister)},
+				}},
+			}
+			client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceUIM: 7}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			events, err := client.WatchRefreshFiles(ctx, RefreshRegisterRequest{
+				Session: SessionNonProvisioningSlot1,
+				Files:   []RefreshFile{{Path: []byte{0x3F, 0x00, 0x2F, 0xE2}}},
+			})
+			if err != nil {
+				t.Fatalf("WatchRefreshFiles() error = %v", err)
+			}
+			transport.emit(refreshIndication(
+				RefreshStageWaitForOK,
+				RefreshModeInit,
+				SessionNonProvisioningSlot1,
+			))
+
+			select {
+			case event, ok := <-events:
+				if ok {
+					t.Fatalf("event = %+v, want closed channel", event)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for refresh watcher to stop")
+			}
+			transport.waitCalls(t, 3)
+		})
+	}
+}
+
+func TestRefreshWatcherIsExclusive(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "rejects concurrent watcher and allows replacement"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeIndicationTransport{
+				fakeTransport: fakeTransport{t: t, calls: []transportCall{
+					{resp: successResponse(MessageRefreshRegister)},
+					{resp: successResponse(MessageRefreshRegister)},
+					{resp: successResponse(MessageRefreshRegister)},
+					{resp: successResponse(MessageRefreshRegister)},
+				}},
+			}
+			client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceUIM: 7}}
+			ctx, cancel := context.WithCancel(context.Background())
+
+			events, err := client.WatchRefreshFiles(ctx, RefreshRegisterRequest{
+				Session: SessionCardSlot1,
+				Files:   []RefreshFile{{Path: []byte{0x3F, 0x00, 0x2F, 0xE2}}},
+			})
+			if err != nil {
+				t.Fatalf("first WatchRefreshFiles() error = %v", err)
+			}
+			if _, err := client.WatchRefreshAll(context.Background(), SessionCardSlot1, nil); err == nil {
+				t.Fatal("concurrent WatchRefreshAll() error = nil, want active watcher error")
+			}
+
+			cancel()
+			waitClosed(t, events)
+
+			replacementCtx, replacementCancel := context.WithCancel(context.Background())
+			replacement, err := client.WatchRefreshAll(replacementCtx, SessionCardSlot1, nil)
+			if err != nil {
+				t.Fatalf("replacement WatchRefreshAll() error = %v", err)
+			}
+			replacementCancel()
+			waitClosed(t, replacement)
+			transport.waitCalls(t, 4)
+		})
+	}
 }
 
 func TestWatchRefreshFilesCompletesWhenConsumerIsSlow(t *testing.T) {
@@ -544,4 +754,29 @@ func (t *fakeIndicationTransport) waitCalls(tb testing.TB, want int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	tb.Fatalf("Do() calls = %d, want at least %d", t.callCount(), want)
+}
+
+func refreshIndication(stage RefreshStage, mode RefreshMode, session Session) Indication {
+	return Indication{
+		Service:   ServiceUIM,
+		ClientID:  7,
+		MessageID: MessageRefresh,
+		TLVs: tlv.TLVs{tlv.Bytes(0x10, []byte{
+			byte(stage), byte(mode), byte(session),
+			0x00,
+			0x00, 0x00,
+		})},
+	}
+}
+
+func waitClosed(t *testing.T, events <-chan RefreshEvent) {
+	t.Helper()
+	select {
+	case _, ok := <-events:
+		if ok {
+			t.Fatal("refresh event channel remains open")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for refresh event channel to close")
+	}
 }

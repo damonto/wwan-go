@@ -41,6 +41,7 @@ type Client struct {
 	closeErr           error
 
 	uimEventRefs              map[uint32]int
+	uimRefreshWatcherActive   bool
 	dmsEventRefs              int
 	pdsEventRefs              int
 	omaEventRefs              int

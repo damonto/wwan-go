@@ -618,6 +618,7 @@ const (
 	MessageChangePIN                 MessageID = 0x0028
 	MessageDepersonalization         MessageID = 0x0029
 	MessageRefreshRegister           MessageID = 0x002A
+	MessageRefreshOK                 MessageID = 0x002B
 	MessageRefreshComplete           MessageID = 0x002C
 	MessageRegisterEvents            MessageID = 0x002E
 	MessagePowerOffSIM               MessageID = 0x0030

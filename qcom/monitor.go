@@ -104,19 +104,14 @@ func (c *Client) WatchSlotStatus(ctx context.Context) (<-chan SlotStatus, error)
 	return out, nil
 }
 
+// WatchRefreshFiles watches refresh events for specific UIM files. Only one
+// refresh watcher may be active on a Client at a time. The returned channel
+// closes if a required refresh protocol response fails.
 func (c *Client) WatchRefreshFiles(ctx context.Context, req RefreshRegisterRequest) (<-chan RefreshEvent, error) {
-	transport, err := c.indicationTransport()
-	if err != nil {
-		return nil, err
-	}
 	if len(req.Files) == 0 {
 		return nil, errors.New("watching QMI UIM refresh files: file list is empty")
 	}
 	if err := validateUIMAIDLength(req.AID); err != nil {
-		return nil, fmt.Errorf("watching QMI UIM refresh files: %w", err)
-	}
-	clientID, err := c.uimClientID(ctx)
-	if err != nil {
 		return nil, fmt.Errorf("watching QMI UIM refresh files: %w", err)
 	}
 
@@ -124,16 +119,29 @@ func (c *Client) WatchRefreshFiles(ctx context.Context, req RefreshRegisterReque
 	if err != nil {
 		return nil, fmt.Errorf("watching QMI UIM refresh files: %w", err)
 	}
+	transport, err := c.indicationTransportContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("watching QMI UIM refresh files: %w", err)
+	}
+	clientID, err := c.uimClientID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("watching QMI UIM refresh files: %w", err)
+	}
+	if err := c.acquireRefreshWatcher(); err != nil {
+		return nil, fmt.Errorf("watching QMI UIM refresh files: %w", err)
+	}
 
 	watchCtx, cancel := context.WithCancel(ctx)
 	indications, err := transport.Indications(watchCtx, ServiceUIM, clientID, MessageRefresh)
 	if err != nil {
 		cancel()
+		c.releaseRefreshWatcher()
 		return nil, fmt.Errorf("watching QMI UIM refresh files: %w", err)
 	}
 
 	if err := c.sendMonitorRequest(ctx, MessageRefreshRegister, tlvs); err != nil {
 		cancel()
+		c.releaseRefreshWatcher()
 		return nil, fmt.Errorf("watching QMI UIM refresh files: %w", err)
 	}
 
@@ -141,20 +149,16 @@ func (c *Client) WatchRefreshFiles(ctx context.Context, req RefreshRegisterReque
 	out := make(chan RefreshEvent, 8)
 	go c.forwardRefreshEvents(ctx, cancel, indications, out, func() {
 		c.unregisterRefreshFiles(cleanupReq)
+		c.releaseRefreshWatcher()
 	})
 	return out, nil
 }
 
+// WatchRefreshAll watches all refresh events for a UIM session. Only one
+// refresh watcher may be active on a Client at a time. The returned channel
+// closes if a required refresh protocol response fails.
 func (c *Client) WatchRefreshAll(ctx context.Context, session Session, aid []byte) (<-chan RefreshEvent, error) {
-	transport, err := c.indicationTransport()
-	if err != nil {
-		return nil, err
-	}
 	if err := validateUIMAIDLength(aid); err != nil {
-		return nil, fmt.Errorf("watching all QMI UIM refresh files: %w", err)
-	}
-	clientID, err := c.uimClientID(ctx)
-	if err != nil {
 		return nil, fmt.Errorf("watching all QMI UIM refresh files: %w", err)
 	}
 
@@ -162,16 +166,29 @@ func (c *Client) WatchRefreshAll(ctx context.Context, session Session, aid []byt
 	if err != nil {
 		return nil, fmt.Errorf("watching all QMI UIM refresh files: %w", err)
 	}
+	transport, err := c.indicationTransportContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("watching all QMI UIM refresh files: %w", err)
+	}
+	clientID, err := c.uimClientID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("watching all QMI UIM refresh files: %w", err)
+	}
+	if err := c.acquireRefreshWatcher(); err != nil {
+		return nil, fmt.Errorf("watching all QMI UIM refresh files: %w", err)
+	}
 
 	watchCtx, cancel := context.WithCancel(ctx)
 	indications, err := transport.Indications(watchCtx, ServiceUIM, clientID, MessageRefresh)
 	if err != nil {
 		cancel()
+		c.releaseRefreshWatcher()
 		return nil, fmt.Errorf("watching all QMI UIM refresh files: %w", err)
 	}
 
 	if err := c.sendMonitorRequest(ctx, MessageRefreshRegisterAll, tlvs); err != nil {
 		cancel()
+		c.releaseRefreshWatcher()
 		return nil, fmt.Errorf("watching all QMI UIM refresh files: %w", err)
 	}
 
@@ -179,8 +196,25 @@ func (c *Client) WatchRefreshAll(ctx context.Context, session Session, aid []byt
 	out := make(chan RefreshEvent, 8)
 	go c.forwardRefreshEvents(ctx, cancel, indications, out, func() {
 		c.unregisterRefreshAll(session, cleanupAID)
+		c.releaseRefreshWatcher()
 	})
 	return out, nil
+}
+
+func (c *Client) acquireRefreshWatcher() error {
+	c.watchMu.Lock()
+	defer c.watchMu.Unlock()
+	if c.uimRefreshWatcherActive {
+		return errors.New("another QMI UIM refresh watcher is active")
+	}
+	c.uimRefreshWatcherActive = true
+	return nil
+}
+
+func (c *Client) releaseRefreshWatcher() {
+	c.watchMu.Lock()
+	c.uimRefreshWatcherActive = false
+	c.watchMu.Unlock()
 }
 
 func (c *Client) indicationTransport() (IndicationTransport, error) {
@@ -305,8 +339,15 @@ func (c *Client) forwardRefreshEvents(
 		if err := event.UnmarshalTLVs(ind.TLVs); err != nil {
 			return
 		}
-		if event.Stage == RefreshStageStart && event.Mode != RefreshModeReset {
-			c.completeRefresh(event)
+		switch {
+		case event.Stage == RefreshStageWaitForOK:
+			if err := c.allowRefresh(ctx, event); err != nil {
+				return
+			}
+		case refreshNeedsImmediateCompletion(event):
+			if err := c.completeRefresh(ctx, event); err != nil {
+				return
+			}
 		}
 
 		if !trySendRefreshEvent(ctx, out, event) {
@@ -333,15 +374,61 @@ func trySendRefreshEvent(ctx context.Context, out chan<- RefreshEvent, event Ref
 	return true
 }
 
-func (c *Client) completeRefresh(event RefreshEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), DefaultRequestTimeout)
-	defer cancel()
+func refreshNeedsImmediateCompletion(event RefreshEvent) bool {
+	if event.Stage != RefreshStageStart {
+		return false
+	}
+	if event.Mode == RefreshModeFCN {
+		return true
+	}
+	if !isNonProvisioningSession(event.Session) {
+		return false
+	}
+	switch event.Mode {
+	case RefreshModeInit,
+		RefreshModeInitFCN,
+		RefreshModeInitFullFCN,
+		RefreshModeApplicationReset,
+		RefreshMode3GReset:
+		return true
+	default:
+		return false
+	}
+}
 
+func isNonProvisioningSession(session Session) bool {
+	switch session {
+	case SessionNonProvisioningSlot1,
+		SessionNonProvisioningSlot2,
+		SessionNonProvisioningSlot3,
+		SessionNonProvisioningSlot4,
+		SessionNonProvisioningSlot5:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Client) allowRefresh(ctx context.Context, event RefreshEvent) error {
+	tlvs, err := refreshOKTLVs(event.Session, event.AID, true)
+	if err != nil {
+		return fmt.Errorf("encoding QMI UIM refresh OK request: %w", err)
+	}
+	if err := c.sendMonitorRequest(ctx, MessageRefreshOK, tlvs); err != nil {
+		return fmt.Errorf("sending QMI UIM refresh OK request: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) completeRefresh(ctx context.Context, event RefreshEvent) error {
 	tlvs, err := refreshCompleteTLVs(event.Session, event.AID, true)
 	if err != nil {
-		return
+		return fmt.Errorf("encoding QMI UIM refresh complete request: %w", err)
 	}
-	_ = c.sendMonitorRequest(ctx, MessageRefreshComplete, tlvs)
+	if err := c.sendMonitorRequest(ctx, MessageRefreshComplete, tlvs); err != nil {
+		return fmt.Errorf("sending QMI UIM refresh complete request: %w", err)
+	}
+	return nil
 }
 
 func registerEventsTLVs(mask uint32) tlv.TLVs {
@@ -350,18 +437,25 @@ func registerEventsTLVs(mask uint32) tlv.TLVs {
 	}
 }
 
+func refreshOKTLVs(session Session, aid []byte, allowed bool) (tlv.TLVs, error) {
+	sessionValue, err := putSessionValue(session, aid)
+	if err != nil {
+		return nil, err
+	}
+	return tlv.TLVs{
+		tlv.Bytes(0x01, sessionValue),
+		tlv.Bytes(0x02, []byte{boolByte(allowed)}),
+	}, nil
+}
+
 func refreshCompleteTLVs(session Session, aid []byte, success bool) (tlv.TLVs, error) {
 	sessionValue, err := putSessionValue(session, aid)
 	if err != nil {
 		return nil, err
 	}
-	flag := uint8(0)
-	if success {
-		flag = 1
-	}
 	return tlv.TLVs{
 		tlv.Bytes(0x01, sessionValue),
-		tlv.Bytes(0x02, []byte{flag}),
+		tlv.Bytes(0x02, []byte{boolByte(success)}),
 	}, nil
 }
 
