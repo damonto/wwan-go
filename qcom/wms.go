@@ -402,25 +402,26 @@ type WMSPLMN struct {
 // Stored messages are read before delivery; ReadError preserves the original
 // storage reference when the follow-up read fails.
 type WMSIncomingMessage struct {
-	Stored           bool
-	Reference        WMSMessageReference
-	Tag              WMSTag
-	Format           WMSMessageFormat
-	Data             []byte
-	AckIndicator     WMSAckIndicator
-	TransactionID    uint32
-	SMSOnIMS         bool
-	SMSOnIMSKnown    bool
-	MessageMode      WMSMessageMode
-	MessageModeKnown bool
-	ETWSNotification WMSETWSNotificationType
-	ETWSData         []byte
-	ETWSKnown        bool
-	ETWSPLMN         WMSPLMN
-	ETWSPLMNKnown    bool
-	SMSCAddress      string
-	SMSCAddressKnown bool
-	ReadError        error
+	Stored            bool
+	Reference         WMSMessageReference
+	Tag               WMSTag
+	Format            WMSMessageFormat
+	Data              []byte
+	AckIndicator      WMSAckIndicator
+	AckIndicatorKnown bool
+	TransactionID     uint32
+	SMSOnIMS          bool
+	SMSOnIMSKnown     bool
+	MessageMode       WMSMessageMode
+	MessageModeKnown  bool
+	ETWSNotification  WMSETWSNotificationType
+	ETWSData          []byte
+	ETWSKnown         bool
+	ETWSPLMN          WMSPLMN
+	ETWSPLMNKnown     bool
+	SMSCAddress       string
+	SMSCAddressKnown  bool
+	ReadError         error
 }
 
 // WMSSMSCAddress is the SMS service-center address configured in EF-SMSP.
@@ -1031,13 +1032,9 @@ func (m *WMSIncomingMessage) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	*m = WMSIncomingMessage{}
 	message := WMSIncomingMessage{}
 	found := false
-	if value, ok := tlv.Value(tlvs, 0x10); ok {
-		if err := message.Reference.UnmarshalBinary(value); err != nil {
-			return fmt.Errorf("parsing QMI WMS MT message: %w", err)
-		}
-		found = true
-		message.Stored = true
-	} else if value, ok := tlv.Value(tlvs, 0x11); ok {
+	// Transfer-route messages carry the ACK context. Prefer that TLV if a
+	// modem includes both message variants in one indication.
+	if value, ok := tlv.Value(tlvs, 0x11); ok {
 		if len(value) < 8 {
 			return errors.New("parsing QMI WMS transfer message: header is truncated")
 		}
@@ -1047,9 +1044,16 @@ func (m *WMSIncomingMessage) UnmarshalTLVs(tlvs tlv.TLVs) error {
 		}
 		found = true
 		message.AckIndicator = WMSAckIndicator(value[0])
+		message.AckIndicatorKnown = true
 		message.TransactionID = binary.LittleEndian.Uint32(value[1:5])
 		message.Format = WMSMessageFormat(value[5])
 		message.Data = slices.Clone(value[8 : 8+length])
+	} else if value, ok := tlv.Value(tlvs, 0x10); ok {
+		if err := message.Reference.UnmarshalBinary(value); err != nil {
+			return fmt.Errorf("parsing QMI WMS MT message: %w", err)
+		}
+		found = true
+		message.Stored = true
 	}
 	if value, ok := tlv.Value(tlvs, 0x12); ok {
 		if len(value) != 1 {

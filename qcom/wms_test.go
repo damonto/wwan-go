@@ -569,7 +569,7 @@ func TestWMSDecodeIncomingVariants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stored decode error = %v", err)
 	}
-	if !stored.Stored || stored.Reference != (WMSMessageReference{Storage: WMSStorageNV, Index: 1}) || !stored.SMSOnIMS || !stored.SMSOnIMSKnown {
+	if !stored.Stored || stored.AckIndicatorKnown || stored.Reference != (WMSMessageReference{Storage: WMSStorageNV, Index: 1}) || !stored.SMSOnIMS || !stored.SMSOnIMSKnown {
 		t.Fatalf("stored = %+v", stored)
 	}
 
@@ -579,8 +579,22 @@ func TestWMSDecodeIncomingVariants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("transfer decode error = %v", err)
 	}
-	if transfer.Stored || transfer.AckIndicator != WMSAckRequired || transfer.TransactionID != 1 || !bytes.Equal(transfer.Data, []byte{0xAA, 0xBB}) {
+	if transfer.Stored || !transfer.AckIndicatorKnown || transfer.AckIndicator != WMSAckRequired || transfer.TransactionID != 1 || !bytes.Equal(transfer.Data, []byte{0xAA, 0xBB}) {
 		t.Fatalf("transfer = %+v", transfer)
+	}
+}
+
+func TestWMSDecodeIncomingPrefersTransferRoute(t *testing.T) {
+	var message WMSIncomingMessage
+	err := message.UnmarshalTLVs(tlv.TLVs{
+		tlv.Bytes(0x10, []byte{byte(WMSStorageNV), 1, 0, 0, 0}),
+		tlv.Bytes(0x11, []byte{byte(WMSAckRequired), 2, 0, 0, 0, byte(WMSMessageFormatGWPointToPoint), 1, 0, 0xAA}),
+	})
+	if err != nil {
+		t.Fatalf("decode error = %v", err)
+	}
+	if message.Stored || !message.AckIndicatorKnown || message.TransactionID != 2 || !bytes.Equal(message.Data, []byte{0xAA}) {
+		t.Fatalf("message = %+v", message)
 	}
 }
 

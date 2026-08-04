@@ -177,9 +177,10 @@ func (b *Backend) WatchMessages(ctx context.Context) (<-chan Result[Message], er
 			if raw.Format != qcom.WMSMessageFormatGWPointToPoint {
 				continue
 			}
+			needsACK := raw.AckIndicatorKnown && raw.AckIndicator == qcom.WMSAckRequired
 			var part sms.Part
 			if err := part.UnmarshalBinary(raw.Data); err != nil {
-				if raw.AckIndicator == qcom.WMSAckRequired {
+				if needsACK {
 					_ = b.client.WMSAcknowledge(ctx, qcom.WMSAckRequest{TransactionID: raw.TransactionID, Protocol: qcom.WMSMessageProtocolWCDMA, Success: false})
 				}
 				sendStreamResult(ctx, out, Result[Message]{Err: err})
@@ -191,7 +192,7 @@ func (b *Backend) WatchMessages(ctx context.Context) (<-chan Result[Message], er
 				part.Message.Refs = []MessageRef{storedMessageRef(raw.Reference)}
 			}
 			part.Message.State = messageState(raw.Tag)
-			if raw.AckIndicator == qcom.WMSAckRequired {
+			if needsACK {
 				if err := b.client.WMSAcknowledge(ctx, qcom.WMSAckRequest{TransactionID: raw.TransactionID, Protocol: qcom.WMSMessageProtocolWCDMA, Success: true}); err != nil {
 					sendStreamResult(ctx, out, Result[Message]{Err: err})
 					return
