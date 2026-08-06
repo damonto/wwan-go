@@ -1017,13 +1017,14 @@ func (b *Bearer) Disconnect(ctx context.Context) error {
 	if b.closed || b.session == nil {
 		return nil
 	}
-	if err := b.session.Disconnect(ctx); err != nil {
-		return err
+	disconnectErr := b.session.Disconnect(ctx)
+	if disconnectErr != nil && b.session.Info().Connected {
+		return disconnectErr
 	}
 	b.closed = true
 	b.closeDone()
 	b.modem.removeBearer(b.id)
-	return nil
+	return disconnectErr
 }
 
 func (b *Bearer) Close() error {

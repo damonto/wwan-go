@@ -509,7 +509,9 @@ func (s *PDNSession) stop(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("stop WDS network: %w", err)
 	}
-	if err := resultOK(resp); err != nil {
+	// Some modems end the packet-data call before the host sends Stop Network.
+	// NoEffect therefore means the requested stopped state is already reached.
+	if err := resultOK(resp); err != nil && !errors.Is(err, QMIErrorNoEffect) {
 		return fmt.Errorf("stop WDS network: %w", err)
 	}
 	s.mu.Lock()

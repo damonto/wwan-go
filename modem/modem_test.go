@@ -35,9 +35,11 @@ func (b *lifecycleBackend) Close() error {
 }
 
 type lifecycleSession struct {
-	mu         sync.Mutex
-	value      BearerInfo
-	closeCount int
+	mu                       sync.Mutex
+	value                    BearerInfo
+	disconnectErr            error
+	disconnectKeepsConnected bool
+	closeCount               int
 }
 
 type connectBackend struct {
@@ -129,12 +131,21 @@ func (s *lifecycleSession) Watch(ctx context.Context) (<-chan Result[BearerEvent
 	return out, nil
 }
 
-func (s *lifecycleSession) Disconnect(context.Context) error { return s.Close() }
+func (s *lifecycleSession) Disconnect(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeCount++
+	if s.disconnectErr == nil || !s.disconnectKeepsConnected {
+		s.value.Connected = false
+	}
+	return s.disconnectErr
+}
 
 func (s *lifecycleSession) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closeCount++
+	s.value.Connected = false
 	return nil
 }
 
@@ -220,6 +231,53 @@ func TestBearerCloseStopsWatch(t *testing.T) {
 			}
 			if _, ok := <-stream; ok {
 				t.Fatal("watch stream remained open after Close()")
+			}
+		})
+	}
+}
+
+func TestBearerDisconnectFinalizesTerminalSessionError(t *testing.T) {
+	errDisconnect := errors.New("disconnect rejected")
+	tests := []struct {
+		name                     string
+		disconnectKeepsConnected bool
+		wantOwned                bool
+		wantClosed               bool
+	}{
+		{name: "retires disconnected session", wantClosed: true},
+		{name: "keeps connected session for retry", disconnectKeepsConnected: true, wantOwned: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := &lifecycleSession{
+				value:                    BearerInfo{Connected: true},
+				disconnectErr:            errDisconnect,
+				disconnectKeepsConnected: tt.disconnectKeepsConnected,
+			}
+			modem := newModem(Port{Type: PortQMI, Path: "/dev/test"}, AccessDirect, &lifecycleBackend{})
+			bearer := &Bearer{id: 1, modem: modem, session: session, done: make(chan struct{})}
+			modem.bearers[1] = bearer
+
+			err := bearer.Disconnect(t.Context())
+			if !errors.Is(err, errDisconnect) {
+				t.Fatalf("Disconnect() error = %v, want %v", err, errDisconnect)
+			}
+			if _, owned := modem.Bearer(1); owned != tt.wantOwned {
+				t.Fatalf("modem owns bearer = %t, want %t", owned, tt.wantOwned)
+			}
+			if bearer.closed != tt.wantClosed {
+				t.Fatalf("bearer closed = %t, want %t", bearer.closed, tt.wantClosed)
+			}
+			select {
+			case <-bearer.done:
+				if !tt.wantClosed {
+					t.Fatal("retryable bearer lifetime was closed")
+				}
+			default:
+				if tt.wantClosed {
+					t.Fatal("terminal bearer lifetime remains open")
+				}
 			}
 		})
 	}

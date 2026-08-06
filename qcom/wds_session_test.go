@@ -101,6 +101,54 @@ func TestOpenPDN(t *testing.T) {
 	}
 }
 
+func TestPDNSessionClose(t *testing.T) {
+	tests := []struct {
+		name     string
+		stopResp Response
+		wantErr  error
+	}{
+		{name: "stops active packet call", stopResp: successResponse(MessageWDSStopNetworkInterface)},
+		{name: "accepts already stopped packet call", stopResp: errorResponse(MessageWDSStopNetworkInterface, QMIErrorNoEffect)},
+		{name: "returns other stop error", stopResp: errorResponse(MessageWDSStopNetworkInterface, QMIErrorCallFailed), wantErr: QMIErrorCallFailed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &fakeTransport{t: t, calls: []transportCall{
+				{resp: tt.stopResp},
+				{resp: successResponse(MessageReleaseClientID)},
+			}}
+			done := make(chan struct{})
+			session := &PDNSession{
+				client:           &Client{transport: transport, slot: 1},
+				timeout:          DefaultRequestTimeout,
+				wdsClientID:      2,
+				wdsClientReady:   true,
+				releaseWDSClient: true,
+				packetDataHandle: 0x01020304,
+				connectionStatus: WDSConnectionStatusConnected,
+				done:             done,
+			}
+
+			err := session.Close()
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Close() error = %v, want %v", err, tt.wantErr)
+			}
+			if session.wdsClientID != 0 || session.wdsClientReady || session.releaseWDSClient || session.packetDataHandle != 0 {
+				t.Fatalf("closed session state = client %d ready %t release %t handle %d", session.wdsClientID, session.wdsClientReady, session.releaseWDSClient, session.packetDataHandle)
+			}
+			select {
+			case <-done:
+			default:
+				t.Fatal("Close() did not close session lifetime")
+			}
+			if got := transport.callCount(); got != len(transport.calls) {
+				t.Fatalf("Do() calls = %d, want %d", got, len(transport.calls))
+			}
+		})
+	}
+}
+
 func TestOpenPDNLegacyMuxKeepsRequestedIPFamily(t *testing.T) {
 	tests := []struct {
 		name       string
