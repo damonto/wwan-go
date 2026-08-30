@@ -620,7 +620,15 @@ func printableString(value []byte) (string, bool) {
 	return string(value), true
 }
 
+// Register selects a network automatically or manually.
+//
+// System Selection Preference carries the selection because Initiate Network
+// Register is deprecated in the Qualcomm NAS definitions and is not implemented
+// consistently: MSM8916 firmware answers it with "device unsupported" while
+// accepting the equivalent selection preference. Initiate Network Register is
+// kept as the fallback for firmware that rejects the preference instead.
 func (b *Backend) Register(ctx context.Context, cfg RegisterConfig) error {
+	selection := qcom.NASNetworkSelection{Mode: qcom.NASNetworkSelectionAutomatic}
 	registration := qcom.NASNetworkRegistration{Action: qcom.NASRegisterAutomatically}
 	if cfg.OperatorID != "" {
 		var plmn qcom.NASPLMN
@@ -628,10 +636,23 @@ func (b *Backend) Register(ctx context.Context, cfg RegisterConfig) error {
 			return fmt.Errorf("registering network: %w", err)
 		}
 		radio := nasRadioFromTechnology(cfg.Technology)
+		selection.Mode = qcom.NASNetworkSelectionManual
+		selection.PLMN = plmn
 		registration.Action = qcom.NASRegisterManually
 		registration.Manual = &qcom.NASManualRegistration{PLMN: plmn, RadioInterface: radio}
+		// Constrain the radio interface only when the caller named one. An
+		// unconstrained request must leave the modem's own mode preference intact.
+		if radio != qcom.NASRadioInterfaceNoChange {
+			selection.RadioInterface = &radio
+		}
 	}
-	if err := b.client.RegisterNetwork(ctx, registration); err != nil {
+	err := b.client.SetSystemSelectionPreference(ctx, qcom.NASSystemSelectionConfig{NetworkSelection: &selection})
+	if isUnsupported(err) {
+		err = b.client.RegisterNetwork(ctx, registration)
+	}
+	// "No effect" reports that the modem already uses the requested selection,
+	// which is the state the caller asked for.
+	if err != nil && !errors.Is(err, qcom.QMIErrorNoEffect) {
 		return err
 	}
 	return nil
@@ -1264,6 +1285,10 @@ func plmnAccessFromTechnology(technology Technology) qcom.NASPLMNAccessTechnolog
 	return result
 }
 
+// nasRadioFromTechnology maps a requested technology onto the radio interface
+// accepted by manual registration. Registration takes GSM, UMTS, LTE, NR5G, or
+// "no change"; "no service" is not a selectable interface, so an unset or
+// unmappable technology becomes "no change" and leaves the choice to the modem.
 func nasRadioFromTechnology(technology Technology) qcom.NASRadioInterface {
 	switch {
 	case technology&TechnologyNR5GSA != 0:
@@ -1275,7 +1300,7 @@ func nasRadioFromTechnology(technology Technology) qcom.NASRadioInterface {
 	case technology&TechnologyGSM != 0:
 		return qcom.NASRadioInterfaceGSM
 	default:
-		return qcom.NASRadioInterfaceNoService
+		return qcom.NASRadioInterfaceNoChange
 	}
 }
 

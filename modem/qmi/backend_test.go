@@ -967,3 +967,149 @@ func TestSignalReportConfigs(t *testing.T) {
 		})
 	}
 }
+
+func TestNASRadioFromTechnology(t *testing.T) {
+	tests := []struct {
+		name       string
+		technology Technology
+		want       qcom.NASRadioInterface
+	}{
+		{name: "unset leaves the interface unchanged", technology: 0, want: qcom.NASRadioInterfaceNoChange},
+		{name: "GSM", technology: TechnologyGSM, want: qcom.NASRadioInterfaceGSM},
+		{name: "UMTS", technology: TechnologyUMTS, want: qcom.NASRadioInterfaceUMTS},
+		{name: "LTE", technology: TechnologyLTE, want: qcom.NASRadioInterfaceLTE},
+		{name: "5G SA", technology: TechnologyNR5GSA, want: qcom.NASRadioInterfaceNR5G},
+		{name: "5G NSA registers on LTE", technology: TechnologyLTE | TechnologyNR5GNSA, want: qcom.NASRadioInterfaceLTE},
+		{name: "unmappable leaves the interface unchanged", technology: TechnologyLTECatM, want: qcom.NASRadioInterfaceNoChange},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nasRadioFromTechnology(tt.technology); got != tt.want {
+				t.Errorf("nasRadioFromTechnology(%#x) = %#x, want %#x", tt.technology, got, tt.want)
+			}
+		})
+	}
+}
+
+// expectRegisterSelection asserts the network-selection fields of a System
+// Selection Preference write and reports err back to the caller.
+func expectRegisterSelection(t *testing.T, wantSelection []byte, wantRadio []byte, err qcom.QMIError) radioTestCall {
+	t.Helper()
+	return func(req qcom.Request) (qcom.Response, error) {
+		if req.Service != qcom.ServiceNAS || req.MessageID != qcom.MessageNASSetSystemSelectionPreference {
+			t.Fatalf("QMI request = service %#x message %#x, want NAS Set System Selection Preference", req.Service, req.MessageID)
+		}
+		selection, ok := tlv.Value(req.TLVs, 0x16)
+		if !ok {
+			t.Fatal("Set System Selection Preference is missing the network selection TLV")
+		}
+		if !bytes.Equal(selection, wantSelection) {
+			t.Errorf("network selection = %#v, want %#v", selection, wantSelection)
+		}
+		radio, hasRadio := tlv.Value(req.TLVs, 0x22)
+		if wantRadio == nil {
+			if hasRadio {
+				t.Errorf("radio interface = %#v, want no TLV", radio)
+			}
+		} else if !bytes.Equal(radio, wantRadio) {
+			t.Errorf("radio interface = %#v, want %#v", radio, wantRadio)
+		}
+		if err != 0 {
+			return failedStatusResponse(req, err), nil
+		}
+		return successfulStatusResponse(req), nil
+	}
+}
+
+func TestBackendRegisterPrefersSystemSelectionPreference(t *testing.T) {
+	// Manual registration without a requested technology must not constrain the
+	// radio interface.
+	backend := newRadioTestBackend(t,
+		expectRegisterSelection(t, []byte{byte(qcom.NASNetworkSelectionManual), 0xCC, 0x01, 0x00, 0x00}, nil, 0),
+	)
+
+	if err := backend.Register(t.Context(), RegisterConfig{OperatorID: "46000"}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+}
+
+func TestBackendRegisterConstrainsRequestedTechnology(t *testing.T) {
+	backend := newRadioTestBackend(t,
+		expectRegisterSelection(t,
+			[]byte{byte(qcom.NASNetworkSelectionManual), 0xCC, 0x01, 0x01, 0x00},
+			[]byte{byte(qcom.NASRadioInterfaceLTE)}, 0),
+	)
+
+	if err := backend.Register(t.Context(), RegisterConfig{OperatorID: "46001", Technology: TechnologyLTE}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+}
+
+func TestBackendRegisterAutomaticClearsManualSelection(t *testing.T) {
+	backend := newRadioTestBackend(t,
+		expectRegisterSelection(t, []byte{byte(qcom.NASNetworkSelectionAutomatic), 0x00, 0x00, 0x00, 0x00}, nil, 0),
+	)
+
+	if err := backend.Register(t.Context(), RegisterConfig{}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+}
+
+func TestBackendRegisterFallsBackToInitiateNetworkRegister(t *testing.T) {
+	// Firmware without the network-selection field must still register, and the
+	// deprecated message must carry "no change" rather than "no service".
+	backend := newRadioTestBackend(t,
+		expectRegisterSelection(t,
+			[]byte{byte(qcom.NASNetworkSelectionManual), 0xCC, 0x01, 0x00, 0x00}, nil,
+			qcom.QMIErrorNotSupported),
+		func(req qcom.Request) (qcom.Response, error) {
+			if req.Service != qcom.ServiceNAS || req.MessageID != qcom.MessageNASInitiateNetworkRegister {
+				t.Fatalf("QMI request = service %#x message %#x, want NAS Initiate Network Register", req.Service, req.MessageID)
+			}
+			action, ok := tlv.Value(req.TLVs, 0x01)
+			if !ok || len(action) != 1 || action[0] != byte(qcom.NASRegisterManually) {
+				t.Errorf("register action = %#v, want manual", action)
+			}
+			manual, ok := tlv.Value(req.TLVs, 0x10)
+			if !ok {
+				t.Fatal("Initiate Network Register is missing the manual registration TLV")
+			}
+			want := []byte{0xCC, 0x01, 0x00, 0x00, byte(qcom.NASRadioInterfaceNoChange)}
+			if !bytes.Equal(manual, want) {
+				t.Errorf("manual registration = %#v, want %#v", manual, want)
+			}
+			return successfulStatusResponse(req), nil
+		},
+	)
+
+	if err := backend.Register(t.Context(), RegisterConfig{OperatorID: "46000"}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+}
+
+func TestBackendRegisterTreatsNoEffectAsRegistered(t *testing.T) {
+	// "No effect" means the modem already uses the requested selection, so it
+	// must not fall back and must not surface an error.
+	backend := newRadioTestBackend(t,
+		expectRegisterSelection(t,
+			[]byte{byte(qcom.NASNetworkSelectionManual), 0xCC, 0x01, 0x00, 0x00}, nil,
+			qcom.QMIErrorNoEffect),
+	)
+
+	if err := backend.Register(t.Context(), RegisterConfig{OperatorID: "46000"}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+}
+
+func TestBackendRegisterPropagatesRegistrationFailure(t *testing.T) {
+	backend := newRadioTestBackend(t,
+		expectRegisterSelection(t,
+			[]byte{byte(qcom.NASNetworkSelectionManual), 0xCC, 0x01, 0x00, 0x00}, nil,
+			qcom.QMIErrorNetworkUnsupported),
+	)
+
+	err := backend.Register(t.Context(), RegisterConfig{OperatorID: "46000"})
+	if !errors.Is(err, qcom.QMIErrorNetworkUnsupported) {
+		t.Fatalf("Register() error = %v, want %v", err, qcom.QMIErrorNetworkUnsupported)
+	}
+}
