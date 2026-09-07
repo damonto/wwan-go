@@ -49,14 +49,20 @@ func (r Request) WriteTo(w io.Writer) (int64, error) {
 	var written int64
 	for len(data) > 0 {
 		n, err := w.Write(data)
+		if n < 0 || n > len(data) {
+			if err == nil {
+				err = fmt.Errorf("invalid write count %d for buffer length %d", n, len(data))
+			}
+			return written, err
+		}
 		written += int64(n)
-		data = data[n:]
 		if err != nil {
 			return written, err
 		}
 		if n == 0 {
 			return written, io.ErrShortWrite
 		}
+		data = data[n:]
 	}
 	return written, nil
 }

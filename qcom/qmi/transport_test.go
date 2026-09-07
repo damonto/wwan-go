@@ -236,14 +236,18 @@ func TestTransportEOFPreservesCause(t *testing.T) {
 func TestTransportWriteFailureIsTerminal(t *testing.T) {
 	tests := []struct {
 		name string
+		n    int
 		err  error
 	}{
 		{name: "write disconnected", err: errors.New("device disconnected")},
+		{name: "negative write count", n: -1, err: io.ErrClosedPipe},
+		{name: "partial write with error", n: 1, err: io.ErrClosedPipe},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			conn := &writeErrorConn{
+				n:        tt.n,
 				err:      tt.err,
 				closed:   make(chan struct{}),
 				readDone: make(chan struct{}),
@@ -962,6 +966,7 @@ func (c *deadlineConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *deadlineConn) SetWriteDeadline(time.Time) error { return nil }
 
 type writeErrorConn struct {
+	n         int
 	err       error
 	closed    chan struct{}
 	readDone  chan struct{}
@@ -1015,7 +1020,7 @@ func (c *writeErrorConn) Read([]byte) (int, error) {
 	return 0, io.ErrClosedPipe
 }
 
-func (c *writeErrorConn) Write([]byte) (int, error)        { return 0, c.err }
+func (c *writeErrorConn) Write([]byte) (int, error)        { return c.n, c.err }
 func (c *writeErrorConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *writeErrorConn) SetWriteDeadline(time.Time) error { return nil }
 

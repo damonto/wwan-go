@@ -53,19 +53,8 @@ func (r Request) WriteTo(w io.Writer) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	var written int64
-	for len(data) > 0 {
-		n, err := w.Write(data)
-		written += int64(n)
-		data = data[n:]
-		if err != nil {
-			return written, err
-		}
-		if n == 0 {
-			return written, io.ErrShortWrite
-		}
-	}
-	return written, nil
+	written, err := writeFull(w, data)
+	return int64(written), err
 }
 
 type Transport struct {
@@ -747,14 +736,20 @@ func writeFull(w io.Writer, p []byte) (int, error) {
 	written := 0
 	for len(p) > 0 {
 		n, err := w.Write(p)
+		if n < 0 || n > len(p) {
+			if err == nil {
+				err = fmt.Errorf("invalid write count %d for buffer length %d", n, len(p))
+			}
+			return written, err
+		}
 		written += n
-		p = p[n:]
 		if err != nil {
 			return written, err
 		}
-		if n <= 0 {
+		if n == 0 {
 			return written, io.ErrShortWrite
 		}
+		p = p[n:]
 	}
 	return written, nil
 }

@@ -4,6 +4,7 @@ package cdcwdm
 
 import (
 	"errors"
+	"io"
 	"net"
 	"os"
 	"testing"
@@ -11,6 +12,44 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+func TestConnIOCounts(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		flags   int
+		run     func(*Conn, []byte) (int, error)
+		wantN   int
+		wantErr error
+	}{
+		{name: "read success", path: "/dev/zero", flags: unix.O_RDONLY, run: (*Conn).Read, wantN: 1},
+		{name: "read EOF", path: "/dev/null", flags: unix.O_RDONLY, run: (*Conn).Read, wantErr: io.EOF},
+		{name: "read syscall error", path: "/dev/null", flags: unix.O_WRONLY, run: (*Conn).Read, wantErr: unix.EBADF},
+		{name: "write success", path: "/dev/null", flags: unix.O_WRONLY, run: (*Conn).Write, wantN: 1},
+		{name: "write syscall error", path: "/dev/full", flags: unix.O_WRONLY, run: (*Conn).Write, wantErr: unix.ENOSPC},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// These devices pass poll, so errors exercise the syscall result path.
+			fd, err := unix.Open(tt.path, tt.flags|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+			if err != nil {
+				t.Fatalf("Open(%q): %v", tt.path, err)
+			}
+			conn := newTestConn(t, fd)
+			t.Cleanup(func() {
+				if err := conn.Close(); err != nil {
+					t.Errorf("Close(): %v", err)
+				}
+			})
+
+			n, err := tt.run(conn, make([]byte, 1))
+			if n != tt.wantN || !errors.Is(err, tt.wantErr) {
+				t.Errorf("I/O = (%d, %v), want (%d, %v)", n, err, tt.wantN, tt.wantErr)
+			}
+		})
+	}
+}
 
 func TestDisconnectError(t *testing.T) {
 	tests := []struct {

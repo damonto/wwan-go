@@ -116,7 +116,8 @@ func (c *Conn) Read(p []byte) (int, error) {
 		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EINTR) {
 			continue
 		}
-		return n, err
+		// Syscall errors use -1, but io.Reader requires a nonnegative count.
+		return max(n, 0), err
 	}
 }
 
@@ -144,7 +145,8 @@ func (c *Conn) Write(p []byte) (int, error) {
 		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EINTR) {
 			continue
 		}
-		return n, err
+		// Syscall errors use -1, but io.Writer requires a nonnegative count.
+		return max(n, 0), err
 	}
 }
 
