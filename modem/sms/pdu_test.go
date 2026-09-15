@@ -94,6 +94,42 @@ func TestDecodeSMSPDUUDH(t *testing.T) {
 	}
 }
 
+func TestDecodeSMSPDUUndefinedExtension(t *testing.T) {
+	tests := []struct {
+		name   string
+		header []byte
+	}{
+		{name: "single part"},
+		{name: "concatenated part with septet padding", header: []byte{5, 0, 3, 0x42, 2, 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			septets := []byte("<#> Code 123456. \x1b\x00 AbCdEf12345")
+			packed, headerSeptets := PackSeptets(septets, tt.header)
+			first := byte(0)
+			if len(tt.header) != 0 {
+				first = 0x40
+			}
+			pdu := []byte{0, first, 4, 0x91, 0x21, 0x43, 0, 0}
+			pdu = append(pdu, 0x62, 0x90, 0x51, 0x41, 0, 0, 0)
+			pdu = append(pdu, byte(headerSeptets+len(septets)))
+			pdu = append(pdu, packed...)
+
+			var part Part
+			if err := part.UnmarshalBinary(pdu); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			const want = "<#> Code 123456. @ AbCdEf12345"
+			if part.Message.Text != want {
+				t.Errorf("text = %q, want %q", part.Message.Text, want)
+			}
+			if !bytes.Equal(part.Message.PDU, pdu) {
+				t.Error("UnmarshalBinary() did not retain the original PDU")
+			}
+		})
+	}
+}
+
 func TestDecodeSMSPDUAlphanumericOrigin(t *testing.T) {
 	tests := []struct {
 		name       string

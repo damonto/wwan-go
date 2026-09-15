@@ -2,6 +2,7 @@ package mbim
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -13,16 +14,23 @@ func (*Backend) MessageStorages(context.Context) (MessageStorageInfo, error) {
 	return MessageStorageInfo{Supported: []MessageStorage{MessageStorageDevice}, Default: MessageStorageDevice}, nil
 }
 
+// ListMessages returns decodable messages and a MessageListError if any stored
+// PDUs are malformed. Transport errors abort the operation.
 func (b *Backend) ListMessages(ctx context.Context) ([]Message, error) {
 	read, err := b.client.ReadSMS(ctx, mbimproto.SMSFormatPDU, mbimproto.SMSReadFlagAll, 0)
 	if err != nil {
 		return nil, fmt.Errorf("listing messages: %w", err)
 	}
 	parts := make([]sms.Part, 0, len(read.PDURecords))
+	var decodeErrors []*MessageDecodeError
 	for _, record := range read.PDURecords {
 		var part sms.Part
 		if err := part.UnmarshalBinary(record.PDU); err != nil {
-			return nil, fmt.Errorf("decoding message %d: %w", record.MessageIndex, err)
+			decodeErrors = append(decodeErrors, &MessageDecodeError{
+				Ref: MessageRef{Storage: MessageStorageDevice, ID: record.MessageIndex},
+				PDU: slices.Clone(record.PDU), Err: err,
+			})
+			continue
 		}
 		part.Message.ID = record.MessageIndex
 		part.Message.Storage = MessageStorageDevice
@@ -30,7 +38,11 @@ func (b *Backend) ListMessages(ctx context.Context) ([]Message, error) {
 		part.Message.State = messageState(record.MessageStatus)
 		parts = append(parts, part)
 	}
-	return sms.Assemble(parts), nil
+	messages := sms.Assemble(parts)
+	if len(decodeErrors) != 0 {
+		return messages, &MessageListError{Errors: decodeErrors}
+	}
+	return messages, nil
 }
 
 func (b *Backend) ReadStoredMessage(ctx context.Context, ref MessageRef) (Message, error) {
@@ -41,23 +53,34 @@ func (b *Backend) ReadStoredMessage(ctx context.Context, ref MessageRef) (Messag
 }
 
 func (b *Backend) ReadMessage(ctx context.Context, id uint32) (Message, error) {
+	part, err := b.readMessagePart(ctx, id)
+	if err != nil {
+		return Message{}, err
+	}
+	return sms.CloneMessage(part.Message), nil
+}
+
+func (b *Backend) readMessagePart(ctx context.Context, id uint32) (sms.Part, error) {
 	read, err := b.client.ReadSMS(ctx, mbimproto.SMSFormatPDU, mbimproto.SMSReadFlagIndex, id)
 	if err != nil {
-		return Message{}, fmt.Errorf("reading message %d: %w", id, err)
+		return sms.Part{}, fmt.Errorf("reading message %d: %w", id, err)
 	}
 	if len(read.PDURecords) != 1 {
-		return Message{}, fmt.Errorf("reading message %d: modem returned %d records", id, len(read.PDURecords))
+		return sms.Part{}, fmt.Errorf("reading message %d: modem returned %d records", id, len(read.PDURecords))
 	}
 	record := read.PDURecords[0]
 	var part sms.Part
 	if err := part.UnmarshalBinary(record.PDU); err != nil {
-		return Message{}, fmt.Errorf("decoding message %d: %w", id, err)
+		return sms.Part{}, &MessageDecodeError{
+			Ref: MessageRef{Storage: MessageStorageDevice, ID: record.MessageIndex},
+			PDU: slices.Clone(record.PDU), Err: err,
+		}
 	}
 	part.Message.ID = record.MessageIndex
 	part.Message.Storage = MessageStorageDevice
 	part.Message.Refs = []MessageRef{{Storage: MessageStorageDevice, ID: record.MessageIndex}}
 	part.Message.State = messageState(record.MessageStatus)
-	return sms.CloneMessage(part.Message), nil
+	return part, nil
 }
 
 func (b *Backend) SendMessage(ctx context.Context, cfg MessageConfig) (SendResult, error) {
@@ -109,6 +132,8 @@ func (b *Backend) SendPDU(ctx context.Context, pdu []byte) (uint32, error) {
 	return result.MessageReference, nil
 }
 
+// WatchMessages reports malformed PDUs as MessageDecodeError results and keeps
+// watching. Transport and malformed notification errors are terminal.
 func (b *Backend) WatchMessages(ctx context.Context) (<-chan Result[Message], error) {
 	watchCtx, cancel := context.WithCancel(ctx)
 	storedMessages, err := b.client.WatchIndicationResults(watchCtx, mbimproto.ServiceSMS, mbimproto.CIDSMSMessageStoreStatus)
@@ -163,17 +188,17 @@ func (b *Backend) WatchMessages(ctx context.Context) (<-chan Result[Message], er
 				if status.Flags&mbimproto.SMSStatusFlagNewMessage == 0 {
 					continue
 				}
-				message, err := b.ReadMessage(watchCtx, status.MessageIndex)
+				part, err := b.readMessagePart(watchCtx, status.MessageIndex)
 				if err != nil {
+					if _, ok := errors.AsType[*MessageDecodeError](err); ok {
+						if !sendStreamResult(watchCtx, out, Result[Message]{Err: err}) {
+							return
+						}
+						continue
+					}
 					sendError(err)
 					return
 				}
-				var part sms.Part
-				if err := part.UnmarshalBinary(message.PDU); err != nil {
-					sendError(fmt.Errorf("decoding message %d: %w", status.MessageIndex, err))
-					return
-				}
-				part.Message = message
 				if !emitPart(part) {
 					return
 				}
@@ -193,8 +218,16 @@ func (b *Backend) WatchMessages(ctx context.Context) (<-chan Result[Message], er
 				}
 				parts, err := flashMessageParts(read)
 				if err != nil {
-					sendError(err)
-					return
+					listErr, ok := errors.AsType[*MessageListError](err)
+					if !ok {
+						sendError(err)
+						return
+					}
+					for _, decodeErr := range listErr.Errors {
+						if !sendStreamResult(watchCtx, out, Result[Message]{Err: decodeErr}) {
+							return
+						}
+					}
 				}
 				for _, part := range parts {
 					if !emitPart(part) {
@@ -212,13 +245,20 @@ func flashMessageParts(read mbimproto.SMSReadInfo) ([]sms.Part, error) {
 		return nil, fmt.Errorf("decoding flash messages: format %d is unsupported", read.Format)
 	}
 	parts := make([]sms.Part, 0, len(read.PDURecords))
+	var decodeErrors []*MessageDecodeError
 	for i, record := range read.PDURecords {
 		var part sms.Part
 		if err := part.UnmarshalBinary(record.PDU); err != nil {
-			return nil, fmt.Errorf("decoding flash message %d: %w", i+1, err)
+			decodeErrors = append(decodeErrors, &MessageDecodeError{
+				PDU: slices.Clone(record.PDU), Err: fmt.Errorf("record %d: %w", i+1, err),
+			})
+			continue
 		}
 		part.Message.State = messageState(record.MessageStatus)
 		parts = append(parts, part)
+	}
+	if len(decodeErrors) != 0 {
+		return parts, &MessageListError{Errors: decodeErrors}
 	}
 	return parts, nil
 }

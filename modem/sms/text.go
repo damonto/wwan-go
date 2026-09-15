@@ -30,26 +30,35 @@ func (t GSM7) MarshalBinary() ([]byte, error) {
 }
 
 // UnmarshalBinary decodes unpacked GSM 7-bit default-alphabet septets.
+// Undefined extension codes fall back to the default alphabet, and the
+// reserved double escape sequence becomes a space, per 3GPP TS 23.038, 6.2.1.1.
 func (t *GSM7) UnmarshalBinary(septets []byte) error {
 	var result strings.Builder
-	for i := 0; i < len(septets); i++ {
-		value := septets[i]
+	escaped := false
+	for _, value := range septets {
 		if value > 0x7f {
 			return fmt.Errorf("decoding GSM7: value %#x is not a septet", value)
 		}
-		if value == 0x1b {
-			i++
-			if i >= len(septets) {
-				return errors.New("decoding GSM7: trailing escape septet")
-			}
-			r, ok := gsm7ExtensionDecode[septets[i]]
+		if escaped {
+			r, ok := gsm7ExtensionDecode[value]
 			if !ok {
-				return fmt.Errorf("decoding GSM7: unknown extension %#x", septets[i])
+				r = gsm7DefaultDecode[value]
+			}
+			if value == 0x1b {
+				r = ' '
 			}
 			result.WriteRune(r)
+			escaped = false
 			continue
 		}
-		result.WriteRune(gsm7DefaultDecode[value&0x7f])
+		if value == 0x1b {
+			escaped = true
+			continue
+		}
+		result.WriteRune(gsm7DefaultDecode[value])
+	}
+	if escaped {
+		return errors.New("decoding GSM7: trailing escape septet")
 	}
 	*t = GSM7(result.String())
 	return nil

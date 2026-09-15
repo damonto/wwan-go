@@ -752,6 +752,9 @@ func (m *Modem) removeBearer(id uint64) {
 	m.mu.Unlock()
 }
 
+// ListMessages returns decodable stored messages. A MessageListError reports
+// malformed records omitted from the result; callers may use the returned
+// messages in that case. Other errors indicate an incomplete read operation.
 func (m *Modem) ListMessages(ctx context.Context) ([]Message, error) {
 	b, err := m.currentBackend()
 	if err != nil {
@@ -856,6 +859,8 @@ func (m *Modem) SendPDU(ctx context.Context, pdu []byte) (uint32, error) {
 	return b.SendPDU(ctx, pdu)
 }
 
+// WatchMessages streams incoming messages. A MessageDecodeError reports one
+// malformed message and does not end the stream. Other errors are terminal.
 func (m *Modem) WatchMessages(ctx context.Context) (<-chan Result[Message], error) {
 	b, err := m.currentBackend()
 	if err != nil {

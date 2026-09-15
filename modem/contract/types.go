@@ -6,7 +6,8 @@ import (
 	"time"
 )
 
-// Result is a streamed value or the terminal transport/decoding error.
+// Result is a streamed value or an error. Errors are terminal unless the
+// stream method documents otherwise.
 // Context cancellation closes a stream without an error result.
 type Result[T any] struct {
 	Value T

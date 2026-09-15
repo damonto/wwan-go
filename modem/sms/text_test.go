@@ -89,13 +89,44 @@ func TestGSM7TextErrors(t *testing.T) {
 		{name: "invalid UTF-8 text", run: func() error { return new(GSM7).UnmarshalText([]byte{0xff}) }},
 		{name: "binary value exceeds septet", run: func() error { return new(GSM7).UnmarshalBinary([]byte{0x80}) }},
 		{name: "trailing binary escape", run: func() error { return new(GSM7).UnmarshalBinary([]byte{0x1B}) }},
-		{name: "unknown binary extension", run: func() error { return new(GSM7).UnmarshalBinary([]byte{0x1B, 0x00}) }},
+		{name: "extension value exceeds septet", run: func() error { return new(GSM7).UnmarshalBinary([]byte{0x1B, 0x80}) }},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := tt.run(); err == nil {
 				t.Fatal("codec error = nil, want non-nil")
+			}
+		})
+	}
+}
+
+func TestGSM7UnmarshalBinaryExtensions(t *testing.T) {
+	tests := []struct {
+		name    string
+		septets []byte
+		want    string
+	}{
+		{name: "undefined zero falls back to at sign", septets: []byte{0x1b, 0x00}, want: "@"},
+		{name: "undefined letter falls back to default alphabet", septets: []byte{0x1b, 'A'}, want: "A"},
+		{name: "undefined control falls back to carriage return", septets: []byte{0x1b, 0x0d}, want: "\r"},
+		{name: "reserved double escape becomes space", septets: []byte{0x1b, 0x1b}, want: " "},
+		{name: "defined extensions", septets: []byte{0x1b, 0x0a, 0x1b, 0x14, 0x1b, 0x28, 0x1b, 0x29, 0x1b, 0x2f, 0x1b, 0x3c, 0x1b, 0x3d, 0x1b, 0x3e, 0x1b, 0x40, 0x1b, 0x65}, want: "\f^{}\\[~]|€"},
+		{name: "consecutive escapes preserve following text", septets: []byte{0x1b, 0x00, 0x1b, 0x1b, 0x1b, 0x65, 'X'}, want: "@ €X"},
+		{
+			name:    "verification message preserves body and app hash",
+			septets: []byte("<#> Your verification code is 123456. Never share it. \x1b\x00 AbCdEf12345"),
+			want:    "<#> Your verification code is 123456. Never share it. @ AbCdEf12345",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got GSM7
+			if err := got.UnmarshalBinary(tt.septets); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if got.String() != tt.want {
+				t.Errorf("UnmarshalBinary() = %q, want %q", got, tt.want)
 			}
 		})
 	}

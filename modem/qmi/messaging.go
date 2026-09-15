@@ -3,6 +3,7 @@ package qmi
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/damonto/wwan-go/modem/sms"
 	"github.com/damonto/wwan-go/qcom"
@@ -17,9 +18,12 @@ func (*Backend) MessageStorages(context.Context) (MessageStorageInfo, error) {
 	}, nil
 }
 
+// ListMessages returns decodable messages and a MessageListError if any stored
+// PDUs are malformed. Transport errors abort the operation.
 func (b *Backend) ListMessages(ctx context.Context) ([]Message, error) {
 	mode := qcom.WMSMessageModeGW
 	var parts []sms.Part
+	var decodeErrors []*MessageDecodeError
 	for _, storage := range []qcom.WMSStorage{qcom.WMSStorageUIM, qcom.WMSStorageNV} {
 		listed, err := b.client.WMSListMessages(ctx, qcom.WMSListRequest{Storage: storage, MessageMode: &mode})
 		if err != nil {
@@ -35,7 +39,10 @@ func (b *Backend) ListMessages(ctx context.Context) ([]Message, error) {
 			}
 			var part sms.Part
 			if err := part.UnmarshalBinary(raw.Data); err != nil {
-				return nil, fmt.Errorf("decoding message %d: %w", entry.Reference.Index, err)
+				decodeErrors = append(decodeErrors, &MessageDecodeError{
+					Ref: storedMessageRef(entry.Reference), PDU: slices.Clone(raw.Data), Err: err,
+				})
+				continue
 			}
 			part.Message.ID = messageID(entry.Reference)
 			part.Message.Storage = messageStorage(entry.Reference.Storage)
@@ -44,7 +51,11 @@ func (b *Backend) ListMessages(ctx context.Context) ([]Message, error) {
 			parts = append(parts, part)
 		}
 	}
-	return sms.Assemble(parts), nil
+	messages := sms.Assemble(parts)
+	if len(decodeErrors) != 0 {
+		return messages, &MessageListError{Errors: decodeErrors}
+	}
+	return messages, nil
 }
 
 func (b *Backend) ReadStoredMessage(ctx context.Context, ref MessageRef) (Message, error) {
@@ -70,7 +81,9 @@ func (b *Backend) readStoredMessage(ctx context.Context, reference qcom.WMSMessa
 	}
 	var part sms.Part
 	if err := part.UnmarshalBinary(raw.Data); err != nil {
-		return Message{}, fmt.Errorf("decoding message %d: %w", reference.Index, err)
+		return Message{}, &MessageDecodeError{
+			Ref: storedMessageRef(reference), PDU: slices.Clone(raw.Data), Err: err,
+		}
 	}
 	part.Message.ID = messageID(reference)
 	part.Message.Storage = messageStorage(reference.Storage)
@@ -160,6 +173,8 @@ func (b *Backend) SendPDU(ctx context.Context, pdu []byte) (uint32, error) {
 	return uint32(result.MessageID), nil
 }
 
+// WatchMessages reports malformed PDUs as MessageDecodeError results and keeps
+// watching. Transport errors and failed positive acknowledgements are terminal.
 func (b *Backend) WatchMessages(ctx context.Context) (<-chan Result[Message], error) {
 	incoming, err := b.client.WMSWatchIncoming(ctx)
 	if err != nil {
@@ -178,14 +193,30 @@ func (b *Backend) WatchMessages(ctx context.Context) (<-chan Result[Message], er
 				continue
 			}
 			needsACK := raw.ACKIndicatorKnown && raw.ACKIndicator == qcom.WMSACKRequired
+			ack := qcom.WMSACKRequest{TransactionID: raw.TransactionID, Protocol: qcom.WMSMessageProtocolWCDMA}
+			if raw.SMSOnIMSKnown {
+				ack.SMSOnIMS = &raw.SMSOnIMS
+			}
+			pdu := raw.Data
+			if !raw.Stored {
+				// Transfer-route data is a TPDU. The shared decoder expects the
+				// TS 27.005 PDU form, so prepend an absent SMSC, as QCRIL does.
+				pdu = append([]byte{0}, pdu...)
+			}
 			var part sms.Part
-			if err := part.UnmarshalBinary(raw.Data); err != nil {
+			if err := part.UnmarshalBinary(pdu); err != nil {
 				if needsACK {
 					// The decode error is authoritative; the negative ACK is best effort.
-					_ = b.client.WMSAcknowledge(ctx, qcom.WMSACKRequest{TransactionID: raw.TransactionID, Protocol: qcom.WMSMessageProtocolWCDMA, Success: false})
+					_ = b.client.WMSAcknowledge(ctx, ack)
 				}
-				sendStreamResult(ctx, out, Result[Message]{Err: err})
-				return
+				decodeErr := &MessageDecodeError{PDU: slices.Clone(raw.Data), Err: err}
+				if raw.Stored {
+					decodeErr.Ref = storedMessageRef(raw.Reference)
+				}
+				if !sendStreamResult(ctx, out, Result[Message]{Err: decodeErr}) {
+					return
+				}
+				continue
 			}
 			if raw.Stored {
 				part.Message.ID = messageID(raw.Reference)
@@ -194,7 +225,8 @@ func (b *Backend) WatchMessages(ctx context.Context) (<-chan Result[Message], er
 			}
 			part.Message.State = messageState(raw.Tag)
 			if needsACK {
-				if err := b.client.WMSAcknowledge(ctx, qcom.WMSACKRequest{TransactionID: raw.TransactionID, Protocol: qcom.WMSMessageProtocolWCDMA, Success: true}); err != nil {
+				ack.Success = true
+				if err := b.client.WMSAcknowledge(ctx, ack); err != nil {
 					sendStreamResult(ctx, out, Result[Message]{Err: err})
 					return
 				}

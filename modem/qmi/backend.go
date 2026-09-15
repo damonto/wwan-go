@@ -587,8 +587,13 @@ func decodeNetworkDescription(value string) string {
 	}
 	var gsm7 sms.GSM7
 	if err := gsm7.UnmarshalBinary(septets); err == nil {
-		if decoded, ok := printableString([]byte(gsm7.String())); ok {
-			return decoded
+		// Encoding detection needs canonical GSM7. Receive-side fallback must
+		// not make arbitrary UCS-2 bytes look like a valid operator name.
+		canonical, err := gsm7.MarshalBinary()
+		if err == nil && bytes.Equal(canonical, septets) {
+			if decoded, ok := printableString([]byte(gsm7.String())); ok {
+				return decoded
+			}
 		}
 	}
 
