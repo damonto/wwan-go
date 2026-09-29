@@ -18,11 +18,12 @@ type statusIndications struct {
 	power   <-chan qcom.DMSEvent
 	card    <-chan qcom.CardStatus
 	network <-chan qcom.NASServingSystem
+	system  <-chan qcom.NASSysInfo
 	signal  <-chan qcom.NASSignalInfo
 }
 
 func (i statusIndications) empty() bool {
-	return i.power == nil && i.card == nil && i.network == nil && i.signal == nil
+	return i.power == nil && i.card == nil && i.network == nil && i.system == nil && i.signal == nil
 }
 
 func pollStream[T any](ctx context.Context, query func(context.Context) (T, error)) <-chan Result[T] {
@@ -56,6 +57,7 @@ func (b *Backend) WatchStatus(ctx context.Context) (<-chan Result[Status], error
 	indications.power, _ = b.client.DMSWatchEvents(watchCtx)
 	indications.card, _ = b.client.WatchCardStatus(watchCtx)
 	indications.network, _ = b.client.NASWatchServingSystem(watchCtx)
+	indications.system, _ = b.client.NASWatchSystemInfo(watchCtx)
 	indications.signal, _ = b.client.NASWatchSignalInfo(watchCtx)
 	if indications.empty() {
 		cancel()
@@ -161,6 +163,20 @@ func (b *Backend) WatchStatus(ctx context.Context) (<-chan Result[Status], error
 				applyNetworkStatus(&current, networkStatusFromServing(serving))
 				normalizeRadioStatus(&current)
 				if !contract.SendStreamResult(watchCtx, out, Result[Status]{Value: current}) {
+					return
+				}
+			case _, ok := <-indications.system:
+				if !ok {
+					indications.system = nil
+					break
+				}
+				// System Info indications may contain only changed RAT fields.
+				// Query a coherent snapshot instead of clearing omitted fields.
+				value, readErr := b.Status(watchCtx)
+				if readErr == nil {
+					current = value
+				}
+				if !contract.SendStreamResult(watchCtx, out, Result[Status]{Value: current, Err: readErr}) {
 					return
 				}
 			case info, ok := <-indications.signal:

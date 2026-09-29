@@ -289,6 +289,7 @@ func TestNASWatchServingSystemDecodesIndication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NASWatchServingSystem() error = %v", err)
 	}
+	transport.emit(Indication{Service: ServiceNAS, MessageID: MessageNASGetServingSystem, TLVs: tlv.TLVs{{Type: 0x01, Value: []byte{1}}}})
 	transport.emit(Indication{
 		Service: ServiceNAS, ClientID: 7, MessageID: MessageNASGetServingSystem,
 		TLVs: tlv.TLVs{tlv.Bytes(nasTLVServingSystem, []byte{1, 1, 1, 2, 1, 8})},

@@ -509,3 +509,36 @@ func TestWatchStatusQueriesPowerWhenWirelessIsEnabled(t *testing.T) {
 		})
 	}
 }
+
+type systemInfoIndicationTransport struct {
+	*statusTransport
+	events chan qcom.Indication
+}
+
+func (t *systemInfoIndicationTransport) Indications(ctx context.Context, service qcom.ServiceType, _ uint8, message qcom.MessageID) (<-chan qcom.Indication, error) {
+	if service != qcom.ServiceNAS || message != qcom.MessageNASSysInfo {
+		return nil, errors.New("test: indication unavailable")
+	}
+	return t.events, nil
+}
+
+func TestWatchStatusRefreshesOnSystemInfo(t *testing.T) {
+	t.Run("registration changes without serving system indication", func(t *testing.T) {
+		transport := &systemInfoIndicationTransport{statusTransport: &statusTransport{}, events: make(chan qcom.Indication, 1)}
+		transport.setStatus(qcom.DMSOperatingModeOnline, true)
+		backend := newStatusTestBackend(t, transport)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		stream, err := backend.WatchStatus(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		initial := receiveStatus(ctx, t, stream)
+		transport.setStatus(qcom.DMSOperatingModeOnline, false)
+		transport.events <- qcom.Indication{Service: qcom.ServiceNAS, MessageID: qcom.MessageNASSysInfo}
+		next := receiveStatus(ctx, t, stream)
+		if next.Registration == initial.Registration {
+			t.Fatalf("registration did not change: %+v", next)
+		}
+	})
+}

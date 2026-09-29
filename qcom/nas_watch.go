@@ -3,6 +3,7 @@ package qcom
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/damonto/wwan-go/qcom/tlv"
@@ -139,7 +140,8 @@ func (c *Client) NASWatchServingSystem(ctx context.Context) (<-chan NASServingSy
 		for tlvs := range raw {
 			var parsed NASGetServingSystemResponse
 			if err := parsed.UnmarshalTLVs(tlvs); err != nil {
-				return
+				slog.Warn("decode QMI NAS indication", "error", err)
+				continue
 			}
 			select {
 			case out <- parsed.ServingSystem:
@@ -163,7 +165,8 @@ func (c *Client) NASWatchOperatorName(ctx context.Context) (<-chan NASOperatorNa
 		for tlvs := range raw {
 			var parsed NASOperatorNameData
 			if err := parsed.UnmarshalTLVs(tlvs); err != nil {
-				return
+				slog.Warn("decode QMI NAS indication", "error", err)
+				continue
 			}
 			select {
 			case out <- parsed:
@@ -187,7 +190,8 @@ func (c *Client) NASWatchSignalInfo(ctx context.Context) (<-chan NASSignalInfo, 
 		for tlvs := range raw {
 			var parsed NASSignalInfo
 			if err := parsed.UnmarshalTLVs(tlvs); err != nil {
-				return
+				slog.Warn("decode QMI NAS indication", "error", err)
+				continue
 			}
 			select {
 			case out <- parsed:
@@ -211,7 +215,8 @@ func (c *Client) NASWatchErrorRate(ctx context.Context) (<-chan NASErrorRateMeas
 		for tlvs := range raw {
 			var event NASEventReport
 			if err := event.UnmarshalTLVs(tlvs); err != nil {
-				return
+				slog.Warn("decode QMI NAS indication", "error", err)
+				continue
 			}
 			if !event.ErrorRateKnown {
 				continue
@@ -238,7 +243,8 @@ func (c *Client) NASWatchSystemInfo(ctx context.Context) (<-chan NASSysInfo, err
 		for tlvs := range raw {
 			var parsed NASSysInfo
 			if err := parsed.UnmarshalTLVs(tlvs); err != nil {
-				return
+				slog.Warn("decode QMI NAS indication", "error", err)
+				continue
 			}
 			select {
 			case out <- parsed:
@@ -262,7 +268,8 @@ func (c *Client) NASWatchNetworkTime(ctx context.Context) (<-chan NASNetworkTime
 		for tlvs := range raw {
 			var parsed NASNetworkTimeUpdate
 			if err := parsed.UnmarshalTLVs(tlvs); err != nil {
-				return
+				slog.Warn("decode QMI NAS indication", "error", err)
+				continue
 			}
 			select {
 			case out <- parsed:
@@ -286,7 +293,8 @@ func (c *Client) NASWatchSystemSelection(ctx context.Context) (<-chan NASSystemS
 		for tlvs := range raw {
 			var parsed NASSystemSelectionPreference
 			if err := parsed.UnmarshalTLVs(tlvs); err != nil {
-				return
+				slog.Warn("decode QMI NAS indication", "error", err)
+				continue
 			}
 			select {
 			case out <- parsed:
@@ -310,7 +318,8 @@ func (c *Client) NASWatchCurrentPLMNName(ctx context.Context) (<-chan NASCurrent
 		for tlvs := range raw {
 			var parsed NASCurrentPLMNName
 			if err := parsed.UnmarshalTLVs(tlvs); err != nil {
-				return
+				slog.Warn("decode QMI NAS indication", "error", err)
+				continue
 			}
 			select {
 			case out <- parsed:
@@ -358,7 +367,8 @@ func (c *Client) NASWatchEDRXParameters(ctx context.Context) (<-chan NASEDRXPara
 		for tlvs := range raw {
 			var parsed NASEDRXParameters
 			if err := parsed.UnmarshalTLVs(tlvs); err != nil {
-				return
+				slog.Warn("decode QMI NAS indication", "error", err)
+				continue
 			}
 			select {
 			case out <- parsed:
@@ -382,7 +392,8 @@ func (c *Client) NASWatchNetworkReject(ctx context.Context) (<-chan NASNetworkRe
 		for tlvs := range raw {
 			var parsed NASNetworkReject
 			if err := parsed.UnmarshalTLVs(tlvs); err != nil {
-				return
+				slog.Warn("decode QMI NAS indication", "error", err)
+				continue
 			}
 			select {
 			case out <- parsed:
