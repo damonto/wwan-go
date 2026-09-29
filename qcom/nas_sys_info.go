@@ -195,108 +195,127 @@ type NASSysInfo struct {
 	NRVoPSSupported bool
 }
 
-// UnmarshalTLVs parses both Get System Info responses and System Info indications.
+// UnmarshalTLVs parses QMI NAS Get System Info response TLVs.
 func (s *NASSysInfo) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	return s.unmarshalTLVs(tlvs, MessageTypeResponse)
+}
+
+// UnmarshalIndicationTLVs parses QMI NAS System Info indication TLVs.
+func (s *NASSysInfo) UnmarshalIndicationTLVs(tlvs tlv.TLVs) error {
+	return s.unmarshalTLVs(tlvs, MessageTypeIndication)
+}
+
+func (s *NASSysInfo) unmarshalTLVs(tlvs tlv.TLVs, messageType MessageType) error {
 	*s = NASSysInfo{}
+	// Each row lists the response and indication IDs from Qualcomm
+	// nas_get_sys_info_resp_msg_data_v01 and nas_sys_info_ind_msg_data_v01.
 	serviceTLVs := []struct {
-		tlvType  uint8
-		threeGPP bool
-		dst      *NASRadioSystemInfo
+		responseType   byte
+		indicationType byte
+		threeGPP       bool
+		dst            *NASRadioSystemInfo
 	}{
-		{nasTLVSysInfoCDMAService, false, &s.CDMA},
-		{nasTLVSysInfoHDRService, false, &s.HDR},
-		{nasTLVSysInfoGSMService, true, &s.GSM},
-		{nasTLVSysInfoWCDMAService, true, &s.WCDMA},
-		{nasTLVSysInfoLTEService, true, &s.LTE},
-		{nasTLVSysInfoTDSService, true, &s.TDSCDMA},
-		{nasTLVSysInfoNR5GService, true, &s.NR5G},
+		{nasTLVSysInfoCDMAService, 0x10, false, &s.CDMA},
+		{nasTLVSysInfoHDRService, 0x11, false, &s.HDR},
+		{nasTLVSysInfoGSMService, 0x12, true, &s.GSM},
+		{nasTLVSysInfoWCDMAService, 0x13, true, &s.WCDMA},
+		{nasTLVSysInfoLTEService, 0x14, true, &s.LTE},
+		{nasTLVSysInfoTDSService, 0x25, true, &s.TDSCDMA},
+		{nasTLVSysInfoNR5GService, 0x4C, true, &s.NR5G},
 	}
 	for _, item := range serviceTLVs {
-		value, ok := tlv.Value(tlvs, item.tlvType)
+		tlvType := nasTLVType(messageType, item.responseType, item.indicationType)
+		value, ok := tlv.Value(tlvs, tlvType)
 		if !ok {
 			continue
 		}
 		if err := parseNASServiceStatus(value, item.threeGPP, item.dst); err != nil {
-			return fmt.Errorf("parsing QMI NAS service status TLV 0x%02X: %w", item.tlvType, err)
+			return fmt.Errorf("parsing QMI NAS service status TLV 0x%02X: %w", tlvType, err)
 		}
 	}
 
 	systemTLVs := []struct {
-		tlvType      uint8
-		length       int
-		threeGPP     bool
-		trackingArea bool
-		dst          *NASRadioSystemInfo
+		responseType   byte
+		indicationType byte
+		length         int
+		threeGPP       bool
+		trackingArea   bool
+		dst            *NASRadioSystemInfo
 	}{
-		{nasTLVSysInfoCDMA, 42, false, false, &s.CDMA},
-		{nasTLVSysInfoHDR, 31, false, false, &s.HDR},
-		{nasTLVSysInfoGSM, 30, true, false, &s.GSM},
-		{nasTLVSysInfoWCDMA, 33, true, false, &s.WCDMA},
-		{nasTLVSysInfoLTE, 29, true, true, &s.LTE},
-		{nasTLVSysInfoTDS, 50, true, false, &s.TDSCDMA},
-		{nasTLVSysInfoNR5G, 29, true, true, &s.NR5G},
+		{nasTLVSysInfoCDMA, 0x15, 42, false, false, &s.CDMA},
+		{nasTLVSysInfoHDR, 0x16, 31, false, false, &s.HDR},
+		{nasTLVSysInfoGSM, 0x17, 30, true, false, &s.GSM},
+		{nasTLVSysInfoWCDMA, 0x18, 33, true, false, &s.WCDMA},
+		{nasTLVSysInfoLTE, 0x19, 29, true, true, &s.LTE},
+		{nasTLVSysInfoTDS, 0x26, 50, true, false, &s.TDSCDMA},
+		{nasTLVSysInfoNR5G, 0x4D, 29, true, true, &s.NR5G},
 	}
 	for _, item := range systemTLVs {
-		value, ok := tlv.Value(tlvs, item.tlvType)
+		tlvType := nasTLVType(messageType, item.responseType, item.indicationType)
+		value, ok := tlv.Value(tlvs, tlvType)
 		if !ok {
 			continue
 		}
 		if err := parseNASSystemInfo(value, item.length, item.threeGPP, item.trackingArea, item.dst); err != nil {
-			return fmt.Errorf("parsing QMI NAS system information TLV 0x%02X: %w", item.tlvType, err)
+			return fmt.Errorf("parsing QMI NAS system information TLV 0x%02X: %w", tlvType, err)
 		}
 	}
 
 	voiceDomains := []struct {
-		tlvType uint8
-		dst     *NASRadioSystemInfo
+		responseType   byte
+		indicationType byte
+		dst            *NASRadioSystemInfo
 	}{
-		{nasTLVSysInfoCDMAVoiceDomain, &s.CDMA},
-		{nasTLVSysInfoHDRVoiceDomain, &s.HDR},
-		{nasTLVSysInfoGSMVoiceDomain, &s.GSM},
-		{nasTLVSysInfoWCDMAVoiceDomain, &s.WCDMA},
-		{nasTLVSysInfoLTEVoiceDomain, &s.LTE},
-		{nasTLVSysInfoTDSVoiceDomain, &s.TDSCDMA},
-		{nasTLVSysInfoNR5GVoiceDomain, &s.NR5G},
+		{nasTLVSysInfoCDMAVoiceDomain, 0x40, &s.CDMA},
+		{nasTLVSysInfoHDRVoiceDomain, 0x37, &s.HDR},
+		{nasTLVSysInfoGSMVoiceDomain, 0x3B, &s.GSM},
+		{nasTLVSysInfoWCDMAVoiceDomain, 0x3D, &s.WCDMA},
+		{nasTLVSysInfoLTEVoiceDomain, 0x2B, &s.LTE},
+		{nasTLVSysInfoTDSVoiceDomain, 0x42, &s.TDSCDMA},
+		{nasTLVSysInfoNR5GVoiceDomain, 0x58, &s.NR5G},
 	}
 	for _, item := range voiceDomains {
-		value, ok := tlv.Value(tlvs, item.tlvType)
+		tlvType := nasTLVType(messageType, item.responseType, item.indicationType)
+		value, ok := tlv.Value(tlvs, tlvType)
 		if !ok {
 			continue
 		}
 		domain, err := parseNASUint32(value)
 		if err != nil {
-			return fmt.Errorf("parsing QMI NAS voice-domain TLV 0x%02X: %w", item.tlvType, err)
+			return fmt.Errorf("parsing QMI NAS voice-domain TLV 0x%02X: %w", tlvType, err)
 		}
 		item.dst.VoiceDomain = NASVoiceDomain(domain)
 		item.dst.VoiceDomainKnown = true
 	}
 
 	smsDomains := []struct {
-		tlvType uint8
-		dst     *NASRadioSystemInfo
+		responseType   byte
+		indicationType byte
+		dst            *NASRadioSystemInfo
 	}{
-		{nasTLVSysInfoCDMASMSDomain, &s.CDMA},
-		{nasTLVSysInfoHDRSMSDomain, &s.HDR},
-		{nasTLVSysInfoGSMSMSDomain, &s.GSM},
-		{nasTLVSysInfoWCDMASMSDomain, &s.WCDMA},
-		{nasTLVSysInfoLTESMSDomain, &s.LTE},
-		{nasTLVSysInfoTDSSMSDomain, &s.TDSCDMA},
-		{nasTLVSysInfoNR5GSMSDomain, &s.NR5G},
+		{nasTLVSysInfoCDMASMSDomain, 0x41, &s.CDMA},
+		{nasTLVSysInfoHDRSMSDomain, 0x38, &s.HDR},
+		{nasTLVSysInfoGSMSMSDomain, 0x3C, &s.GSM},
+		{nasTLVSysInfoWCDMASMSDomain, 0x3E, &s.WCDMA},
+		{nasTLVSysInfoLTESMSDomain, 0x39, &s.LTE},
+		{nasTLVSysInfoTDSSMSDomain, 0x43, &s.TDSCDMA},
+		{nasTLVSysInfoNR5GSMSDomain, 0x59, &s.NR5G},
 	}
 	for _, item := range smsDomains {
-		value, ok := tlv.Value(tlvs, item.tlvType)
+		tlvType := nasTLVType(messageType, item.responseType, item.indicationType)
+		value, ok := tlv.Value(tlvs, tlvType)
 		if !ok {
 			continue
 		}
 		domain, err := parseNASUint32(value)
 		if err != nil {
-			return fmt.Errorf("parsing QMI NAS SMS-domain TLV 0x%02X: %w", item.tlvType, err)
+			return fmt.Errorf("parsing QMI NAS SMS-domain TLV 0x%02X: %w", tlvType, err)
 		}
 		item.dst.SMSDomain = NASSMSDomain(domain)
 		item.dst.SMSDomainKnown = true
 	}
 
-	if err := s.parseCapabilities(tlvs); err != nil {
+	if err := s.parseCapabilities(tlvs, messageType); err != nil {
 		return err
 	}
 	return nil
@@ -317,29 +336,31 @@ func (c *Client) SystemInfo(ctx context.Context) (NASSysInfo, error) {
 	return result, nil
 }
 
-func (s *NASSysInfo) parseCapabilities(tlvs tlv.TLVs) error {
+func (s *NASSysInfo) parseCapabilities(tlvs tlv.TLVs, messageType MessageType) error {
 	boolTLVs := []struct {
-		tlvType uint8
-		value   *bool
-		known   *bool
+		responseType   byte
+		indicationType byte
+		value          *bool
+		known          *bool
 	}{
-		{nasTLVSysInfoLTEVoice, &s.LTE.VoiceSupported, &s.LTE.VoiceSupportedKnown},
-		{nasTLVSysInfoLTEVoPS, &s.LTE.IMSVoiceAvailable, &s.LTE.IMSVoiceKnown},
-		{nasTLVSysInfoENDC, &s.ENDCAvailable, &s.ENDCAvailableKnown},
-		{nasTLVSysInfoDCNRRestricted, &s.DCNRRestricted, &s.DCNRRestrictedKnown},
-		{nasTLVSysInfoTARestricted, &s.TrackingAreaRestricted, &s.TrackingAreaRestrictedKnown},
-		{nasTLVSysInfoN1SMS, &s.N1SMSRegistered, &s.N1SMSRegisteredKnown},
-		{nasTLVSysInfoNR5GVoice, &s.NR5G.VoiceSupported, &s.NR5G.VoiceSupportedKnown},
-		{nasTLVSysInfoNR5GVoPS, &s.NR5G.IMSVoiceAvailable, &s.NR5G.IMSVoiceKnown},
+		{nasTLVSysInfoLTEVoice, 0x21, &s.LTE.VoiceSupported, &s.LTE.VoiceSupportedKnown},
+		{nasTLVSysInfoLTEVoPS, 0x2A, &s.LTE.IMSVoiceAvailable, &s.LTE.IMSVoiceKnown},
+		{nasTLVSysInfoENDC, 0x50, &s.ENDCAvailable, &s.ENDCAvailableKnown},
+		{nasTLVSysInfoDCNRRestricted, 0x51, &s.DCNRRestricted, &s.DCNRRestrictedKnown},
+		{nasTLVSysInfoTARestricted, 0x53, &s.TrackingAreaRestricted, &s.TrackingAreaRestrictedKnown},
+		{nasTLVSysInfoN1SMS, 0x54, &s.N1SMSRegistered, &s.N1SMSRegisteredKnown},
+		{nasTLVSysInfoNR5GVoice, 0x5A, &s.NR5G.VoiceSupported, &s.NR5G.VoiceSupportedKnown},
+		{nasTLVSysInfoNR5GVoPS, 0x5B, &s.NR5G.IMSVoiceAvailable, &s.NR5G.IMSVoiceKnown},
 	}
 	for _, item := range boolTLVs {
-		value, ok := tlv.Value(tlvs, item.tlvType)
+		tlvType := nasTLVType(messageType, item.responseType, item.indicationType)
+		value, ok := tlv.Value(tlvs, tlvType)
 		if !ok {
 			continue
 		}
 		parsed, err := parseNASBool(value)
 		if err != nil {
-			return fmt.Errorf("parsing QMI NAS TLV 0x%02X: %w", item.tlvType, err)
+			return fmt.Errorf("parsing QMI NAS TLV 0x%02X: %w", tlvType, err)
 		}
 		*item.value = parsed
 		*item.known = true
@@ -349,7 +370,7 @@ func (s *NASSysInfo) parseCapabilities(tlvs tlv.TLVs) error {
 	s.NRVoPSKnown = s.NR5G.IMSVoiceKnown
 	s.NRVoPSSupported = s.NR5G.IMSVoiceAvailable
 
-	if value, ok := tlv.Value(tlvs, nasTLVSysInfoCPSMS); ok {
+	if value, ok := tlv.Value(tlvs, nasTLVType(messageType, nasTLVSysInfoCPSMS, 0x4F)); ok {
 		status, err := parseNASUint32(value)
 		if err != nil {
 			return fmt.Errorf("parsing QMI NAS control-plane SMS service status: %w", err)
@@ -357,14 +378,14 @@ func (s *NASSysInfo) parseCapabilities(tlvs tlv.TLVs) error {
 		s.CPSMSServiceStatus = NASCPSMSServiceStatus(status)
 		s.CPSMSServiceStatusKnown = true
 	}
-	if value, ok := tlv.Value(tlvs, nasTLVSysInfoNR5GTAC); ok {
+	if value, ok := tlv.Value(tlvs, nasTLVType(messageType, nasTLVSysInfoNR5GTAC, 0x52)); ok {
 		if len(value) != 3 {
 			return fmt.Errorf("parsing QMI NAS NR5G tracking area code: TLV length %d, want 3", len(value))
 		}
 		s.NR5G.TrackingAreaCode = uint32(value[0])<<16 | uint32(value[1])<<8 | uint32(value[2])
 		s.NR5G.TrackingAreaCodeKnown = true
 	}
-	if value, ok := tlv.Value(tlvs, nasTLVSysInfoNR5GPCI); ok {
+	if value, ok := tlv.Value(tlvs, nasTLVType(messageType, nasTLVSysInfoNR5GPCI, 0x56)); ok {
 		if len(value) != 2 {
 			return fmt.Errorf("parsing QMI NAS NR5G physical cell ID: TLV length %d, want 2", len(value))
 		}

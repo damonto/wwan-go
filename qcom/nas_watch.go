@@ -138,13 +138,13 @@ func (c *Client) NASWatchServingSystem(ctx context.Context) (<-chan NASServingSy
 	go func() {
 		defer close(out)
 		for tlvs := range raw {
-			var parsed NASGetServingSystemResponse
-			if err := parsed.UnmarshalTLVs(tlvs); err != nil {
-				slog.Warn("decode QMI NAS indication", "error", err)
+			var parsed NASServingSystem
+			if err := parsed.UnmarshalIndicationTLVs(tlvs); err != nil {
+				slog.Warn("decode QMI NAS indication", "message", "Serving System", "error", err)
 				continue
 			}
 			select {
-			case out <- parsed.ServingSystem:
+			case out <- parsed:
 			case <-ctx.Done():
 				return
 			}
@@ -242,8 +242,8 @@ func (c *Client) NASWatchSystemInfo(ctx context.Context) (<-chan NASSysInfo, err
 		defer close(out)
 		for tlvs := range raw {
 			var parsed NASSysInfo
-			if err := parsed.UnmarshalTLVs(tlvs); err != nil {
-				slog.Warn("decode QMI NAS indication", "error", err)
+			if err := parsed.UnmarshalIndicationTLVs(tlvs); err != nil {
+				slog.Warn("decode QMI NAS indication", "message", "System Info", "error", err)
 				continue
 			}
 			select {

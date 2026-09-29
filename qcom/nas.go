@@ -12,6 +12,15 @@ import (
 
 const nasTLVServingSystem = 0x01
 
+// Response and indication IDs are paired explicitly because their offsets vary
+// between fields, even within the same NAS message.
+func nasTLVType(messageType MessageType, response, indication byte) byte {
+	if messageType == MessageTypeIndication {
+		return indication
+	}
+	return response
+}
+
 // NASGetServingSystemRequest encodes QMI NAS Get Serving System.
 type NASGetServingSystemRequest struct {
 	ClientID      uint8
@@ -70,8 +79,17 @@ func (r *NASGetServingSystemResponse) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	return nil
 }
 
-// UnmarshalTLVs parses QMI NAS serving-system TLVs.
+// UnmarshalTLVs parses QMI NAS Get Serving System response TLVs.
 func (s *NASServingSystem) UnmarshalTLVs(tlvs tlv.TLVs) error {
+	return s.unmarshalTLVs(tlvs, MessageTypeResponse)
+}
+
+// UnmarshalIndicationTLVs parses QMI NAS Serving System indication TLVs.
+func (s *NASServingSystem) UnmarshalIndicationTLVs(tlvs tlv.TLVs) error {
+	return s.unmarshalTLVs(tlvs, MessageTypeIndication)
+}
+
+func (s *NASServingSystem) unmarshalTLVs(tlvs tlv.TLVs, messageType MessageType) error {
 	value, ok := tlv.Value(tlvs, nasTLVServingSystem)
 	if !ok {
 		return errors.New("parsing QMI NAS serving system: serving system TLV missing")
@@ -94,14 +112,14 @@ func (s *NASServingSystem) UnmarshalTLVs(tlvs tlv.TLVs) error {
 	for i, radio := range value[5 : 5+count] {
 		serving.RadioInterfaces[i] = NASRadioInterface(radio)
 	}
-	if err := serving.unmarshalOptionalTLVs(tlvs); err != nil {
+	if err := serving.unmarshalOptionalTLVs(tlvs, messageType); err != nil {
 		return err
 	}
 	*s = serving
 	return nil
 }
 
-func (s *NASServingSystem) unmarshalOptionalTLVs(tlvs tlv.TLVs) error {
+func (s *NASServingSystem) unmarshalOptionalTLVs(tlvs tlv.TLVs, messageType MessageType) error {
 	if value, ok := tlv.Value(tlvs, nasTLVRoamingIndicator); ok {
 		if len(value) != 1 {
 			return fmt.Errorf("parsing QMI NAS serving system: roaming indicator TLV length %d, want 1", len(value))
@@ -148,28 +166,30 @@ func (s *NASServingSystem) unmarshalOptionalTLVs(tlvs tlv.TLVs) error {
 		s.DaylightSavingHours = value[0]
 		s.DaylightSavingKnown = true
 	}
-	if value, ok := tlv.Value(tlvs, nasTLVLocationAreaCode); ok {
+	// Qualcomm nas_serving_system_ind_msg_data_v01 adds time and no-change
+	// fields, so these response and indication IDs differ.
+	if value, ok := tlv.Value(tlvs, nasTLVType(messageType, nasTLVLocationAreaCode, 0x1D)); ok {
 		if len(value) != 2 {
 			return fmt.Errorf("parsing QMI NAS serving system: location area code TLV length %d, want 2", len(value))
 		}
 		s.LocationAreaCode = binary.LittleEndian.Uint16(value)
 		s.LocationAreaKnown = true
 	}
-	if value, ok := tlv.Value(tlvs, nasTLVCellID); ok {
+	if value, ok := tlv.Value(tlvs, nasTLVType(messageType, nasTLVCellID, 0x1E)); ok {
 		if len(value) != 4 {
 			return fmt.Errorf("parsing QMI NAS serving system: cell ID TLV length %d, want 4", len(value))
 		}
 		s.CellID = binary.LittleEndian.Uint32(value)
 		s.CellIDKnown = true
 	}
-	if value, ok := tlv.Value(tlvs, nasTLVTrackingAreaCode); ok {
+	if value, ok := tlv.Value(tlvs, nasTLVType(messageType, nasTLVTrackingAreaCode, 0x25)); ok {
 		if len(value) != 2 {
 			return fmt.Errorf("parsing QMI NAS serving system: tracking area code TLV length %d, want 2", len(value))
 		}
 		s.TrackingAreaCode = binary.LittleEndian.Uint16(value)
 		s.TrackingAreaKnown = true
 	}
-	if value, ok := tlv.Value(tlvs, nasTLVMNCIncludesPCSDigit); ok {
+	if value, ok := tlv.Value(tlvs, nasTLVType(messageType, nasTLVMNCIncludesPCSDigit, 0x29)); ok {
 		if len(value) != 5 {
 			return fmt.Errorf("parsing QMI NAS serving system: MNC digit TLV length %d, want 5", len(value))
 		}
@@ -180,7 +200,7 @@ func (s *NASServingSystem) unmarshalOptionalTLVs(tlvs tlv.TLVs) error {
 			s.PLMN.MNCThreeDigitsKnown = true
 		}
 	}
-	if value, ok := tlv.Value(tlvs, nasTLVNetworkNameSource); ok {
+	if value, ok := tlv.Value(tlvs, nasTLVType(messageType, nasTLVNetworkNameSource, 0x2B)); ok {
 		if len(value) != 4 {
 			return fmt.Errorf("parsing QMI NAS serving system: network name source TLV length %d, want 4", len(value))
 		}

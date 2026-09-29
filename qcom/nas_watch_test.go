@@ -276,35 +276,121 @@ func TestNASWatchersMessageMapping(t *testing.T) {
 }
 
 func TestNASWatchServingSystemDecodesIndication(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	transport := &nasIndicationTransport{
-		fakeTransport: fakeTransport{t: t, calls: []transportCall{
-			{resp: successResponse(MessageNASIndicationRegister)},
-			{resp: successResponse(MessageNASIndicationRegister)},
-		}},
+	tests := []struct {
+		name string
+		tlvs tlv.TLVs
+		want NASServingSystem
+	}{
+		{name: "mandatory fields"},
+		{
+			name: "optional indication fields",
+			tlvs: tlv.TLVs{
+				tlv.Bytes(0x12, []byte{0xCC, 0x01, 1, 0, 0}),
+				tlv.Bytes(0x1C, []byte{0xEA, 7, 9, 29, 10, 25, 0, 32}),
+				tlv.Uint(0x1D, uint16(0x1234)), tlv.Uint(0x1E, uint32(0x12345678)),
+				tlv.Uint(0x24, uint8(1)), tlv.Uint(0x25, uint16(0xABCD)),
+				tlv.Uint(0x27, uint8(1)), tlv.Bytes(0x29, []byte{0xCC, 0x01, 1, 0, 1}),
+				tlv.Uint(0x2B, uint32(3)),
+			},
+			want: NASServingSystem{
+				PLMN: NASPLMN{MCC: 460, MNC: 1, MNCThreeDigits: true, MNCThreeDigitsKnown: true}, PLMNKnown: true,
+				LocationAreaCode: 0x1234, LocationAreaKnown: true,
+				CellID: 0x12345678, CellIDKnown: true,
+				TrackingAreaCode: 0xABCD, TrackingAreaKnown: true,
+				NetworkNameSource: NASNetworkNameSourceNITZ, NetworkNameSourceKnown: true,
+			},
+		},
 	}
-	client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceNAS: 7}}
-	out, err := client.NASWatchServingSystem(ctx)
-	if err != nil {
-		t.Fatalf("NASWatchServingSystem() error = %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			transport := &nasIndicationTransport{
+				fakeTransport: fakeTransport{t: t, calls: []transportCall{
+					{resp: successResponse(MessageNASIndicationRegister)},
+					{resp: successResponse(MessageNASIndicationRegister)},
+				}},
+			}
+			client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceNAS: 7}}
+			out, err := client.NASWatchServingSystem(ctx)
+			if err != nil {
+				t.Fatalf("NASWatchServingSystem() error = %v", err)
+			}
+			transport.emit(Indication{Service: ServiceNAS, ClientID: 7, MessageID: MessageNASGetServingSystem, TLVs: tlv.TLVs{tlv.Bytes(0x01, []byte{1})}})
+			transport.emit(Indication{
+				Service: ServiceNAS, ClientID: 7, MessageID: MessageNASGetServingSystem,
+				TLVs: append(tlv.TLVs{tlv.Bytes(0x01, []byte{1, 1, 1, 2, 1, 8})}, tt.tlvs...),
+			})
+			select {
+			case serving := <-out:
+				want := tt.want
+				want.RegistrationState = NASRegistrationRegistered
+				want.CSAttachState = NASAttachAttached
+				want.PSAttachState = NASAttachAttached
+				want.SelectedNetwork = NASSelectedNetwork3GPP
+				want.RadioInterfaces = []NASRadioInterface{NASRadioInterfaceLTE}
+				checkNASServingSystem(t, serving, want)
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for serving-system indication")
+			}
+			cancel()
+			transport.waitCalls(t, 2)
+		})
 	}
-	transport.emit(Indication{Service: ServiceNAS, MessageID: MessageNASGetServingSystem, TLVs: tlv.TLVs{{Type: 0x01, Value: []byte{1}}}})
-	transport.emit(Indication{
-		Service: ServiceNAS, ClientID: 7, MessageID: MessageNASGetServingSystem,
-		TLVs: tlv.TLVs{tlv.Bytes(nasTLVServingSystem, []byte{1, 1, 1, 2, 1, 8})},
-	})
-	select {
-	case serving := <-out:
-		if serving.RegistrationState != NASRegistrationRegistered ||
-			len(serving.RadioInterfaces) != 1 || serving.RadioInterfaces[0] != NASRadioInterfaceLTE {
-			t.Fatalf("serving system = %+v", serving)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for serving-system indication")
+}
+
+func TestNASWatchSystemInfoDecodesIndication(t *testing.T) {
+	tests := []struct {
+		name string
+		tlvs tlv.TLVs
+		want NASSysInfo
+	}{
+		{
+			name: "LTE IMS voice",
+			tlvs: tlv.TLVs{tlv.Uint(0x2A, uint8(1)), tlv.Uint(0x2B, uint32(1))},
+			want: NASSysInfo{
+				LTE:       NASRadioSystemInfo{IMSVoiceAvailable: true, IMSVoiceKnown: true, VoiceDomain: NASVoiceDomainIMS, VoiceDomainKnown: true},
+				VoPSKnown: true, VoPSSupported: true,
+			},
+		},
+		{
+			name: "HDR and LTE SMS domains",
+			tlvs: tlv.TLVs{tlv.Uint(0x38, uint32(2)), tlv.Uint(0x39, uint32(3))},
+			want: NASSysInfo{
+				HDR: NASRadioSystemInfo{SMSDomain: NASSMSDomainOneX, SMSDomainKnown: true},
+				LTE: NASRadioSystemInfo{SMSDomain: NASSMSDomain3GPP, SMSDomainKnown: true},
+			},
+		},
 	}
-	cancel()
-	transport.waitCalls(t, 2)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			transport := &nasIndicationTransport{
+				fakeTransport: fakeTransport{t: t, calls: []transportCall{
+					{resp: successResponse(MessageNASIndicationRegister)},
+					{resp: successResponse(MessageNASIndicationRegister)},
+				}},
+			}
+			client := &Client{transport: transport, slot: 1, clientIDs: map[ServiceType]uint8{ServiceNAS: 7}}
+			out, err := client.NASWatchSystemInfo(ctx)
+			if err != nil {
+				t.Fatalf("NASWatchSystemInfo() error = %v", err)
+			}
+			transport.emit(Indication{Service: ServiceNAS, ClientID: 7, MessageID: MessageNASSysInfo, TLVs: tlv.TLVs{tlv.Bytes(0x14, []byte{1})}})
+			transport.emit(Indication{Service: ServiceNAS, ClientID: 7, MessageID: MessageNASSysInfo, TLVs: tt.tlvs})
+			select {
+			case got := <-out:
+				if got != tt.want {
+					t.Fatalf("system info = %+v, want %+v", got, tt.want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for system-info indication")
+			}
+			cancel()
+			transport.waitCalls(t, 2)
+		})
+	}
 }
 
 func TestNASWatchNetworkRejectDecodesIndication(t *testing.T) {
