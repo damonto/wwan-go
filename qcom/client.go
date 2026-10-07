@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -120,69 +121,64 @@ func NewClient(transport Transport, opts ...Option) (*Client, error) {
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		c.startClose()
-
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
-		transport := c.transport
-		if transport == nil {
-			c.clientIDs = nil
-			c.allocatedClientIDs = nil
-			c.catService = 0
-			c.closed = true
-			return
+		if c.transport != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
+			defer cancel()
+			releaseErr := c.releaseClientIDs(ctx)
+			c.closeErr = errors.Join(releaseErr, c.transport.Close())
 		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
-		defer cancel()
-
-		var releaseErr error
-		if !transportManagesClientIDs(transport) && transportTerminalError(transport) == nil {
-			allocated := make(map[allocatedClientID]struct{}, len(c.allocatedClientIDs)+len(c.clientIDs))
-			for clientID := range c.allocatedClientIDs {
-				allocated[clientID] = struct{}{}
-			}
-			for service, clientID := range c.clientIDs {
-				allocated[allocatedClientID{service: service, clientID: clientID}] = struct{}{}
-			}
-			clientIDs := make([]allocatedClientID, 0, len(allocated))
-			for clientID := range allocated {
-				clientIDs = append(clientIDs, clientID)
-			}
-			slices.SortFunc(clientIDs, func(a, b allocatedClientID) int {
-				if a.service != b.service {
-					return int(a.service) - int(b.service)
-				}
-				return int(a.clientID) - int(b.clientID)
-			})
-			for _, allocated := range clientIDs {
-				if transportTerminalError(transport) != nil {
-					break
-				}
-				err := c.releaseServiceClientIDForCloseLocked(ctx, allocated.service, allocated.clientID)
-				if err == nil {
-					continue
-				}
-				if transportTerminalError(transport) != nil {
-					break
-				}
-				releaseErr = errors.Join(releaseErr, err)
-			}
-		}
+		c.transport = nil
 		c.clientIDs = nil
 		c.allocatedClientIDs = nil
 		c.catService = 0
-
-		closeErr := transport.Close()
-		c.transport = nil
 		c.closed = true
-		if releaseErr == nil {
-			c.closeErr = closeErr
-			return
-		}
-		c.closeErr = errors.Join(releaseErr, closeErr)
 	})
 	return c.closeErr
+}
+
+// releaseClientIDs requires c.mu and a live transport. Remote cleanup failures
+// must not prevent Close from releasing the local transport.
+func (c *Client) releaseClientIDs(ctx context.Context) error {
+	if transportManagesClientIDs(c.transport) || transportTerminalError(c.transport) != nil {
+		return nil
+	}
+	allocated := make(map[allocatedClientID]struct{}, len(c.allocatedClientIDs)+len(c.clientIDs))
+	maps.Copy(allocated, c.allocatedClientIDs)
+	for service, clientID := range c.clientIDs {
+		allocated[allocatedClientID{service: service, clientID: clientID}] = struct{}{}
+	}
+	clientIDs := slices.Collect(maps.Keys(allocated))
+	slices.SortFunc(clientIDs, func(a, b allocatedClientID) int {
+		if a.service != b.service {
+			return int(a.service) - int(b.service)
+		}
+		return int(a.clientID) - int(b.clientID)
+	})
+	var result error
+	for _, allocated := range clientIDs {
+		if transportTerminalError(c.transport) != nil {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return errors.Join(result, fmt.Errorf("release remaining QMI client IDs: %w", err))
+		}
+		err := c.releaseServiceClientIDForCloseLocked(ctx, allocated.service, allocated.clientID)
+		if err == nil {
+			continue
+		}
+		if transportTerminalError(c.transport) != nil {
+			break
+		}
+		result = errors.Join(result, fmt.Errorf("release QMI client ID (service=%#x, client_id=%d): %w", allocated.service, allocated.clientID, err))
+		// The same expired budget must not produce a timeout for every ID.
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return result
 }
 
 // startClose rejects new requests before waiting for the request mutex. The

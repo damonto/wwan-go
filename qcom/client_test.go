@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/damonto/wwan-go/qcom/tlv"
@@ -1518,6 +1519,64 @@ func TestClientCloseAcceptsAlreadyInvalidClientID(t *testing.T) {
 			if transport.closeCalls != 1 {
 				t.Fatalf("transport Close() calls = %d, want 1", transport.closeCalls)
 			}
+		})
+	}
+}
+
+type expiredReleaseTransport struct {
+	fakeTransport
+}
+
+func (t *expiredReleaseTransport) Do(ctx context.Context, req Request) (Response, error) {
+	t.t.Helper()
+	if req.Service != ServiceControl || req.MessageID != MessageReleaseClientID {
+		t.t.Fatalf("unexpected close request: %+v", req)
+	}
+	t.idx++
+	<-ctx.Done()
+	return Response{}, ctx.Err()
+}
+
+func TestClientCloseStopsReleasingAfterDeadline(t *testing.T) {
+	transportErr := errors.New("transport close")
+	tests := []struct {
+		name     string
+		closeErr error
+	}{
+		{name: "release timeout"},
+		{name: "release timeout preserves transport error", closeErr: transportErr},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				transport := &expiredReleaseTransport{fakeTransport: fakeTransport{t: t, closeErr: tt.closeErr}}
+				client := &Client{
+					transport: transport,
+					clientIDs: map[ServiceType]uint8{ServiceDMS: 1, ServiceNAS: 2, ServiceUIM: 3},
+				}
+				err := client.Close()
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("Close() = %v, want deadline exceeded", err)
+				}
+				if tt.closeErr != nil && !errors.Is(err, tt.closeErr) {
+					t.Errorf("Close() = %v, want transport error %v", err, tt.closeErr)
+				}
+				if got := strings.Count(err.Error(), context.DeadlineExceeded.Error()); got != 1 {
+					t.Errorf("deadline errors = %d, want 1: %v", got, err)
+				}
+				if !strings.Contains(err.Error(), "service=") || !strings.Contains(err.Error(), "client_id=1") {
+					t.Errorf("Close() lacks QMI client identity: %v", err)
+				}
+				if transport.idx != 1 || transport.closeCalls != 1 {
+					t.Errorf("release calls = %d, transport close calls = %d, want 1 each", transport.idx, transport.closeCalls)
+				}
+				if client.transport != nil || len(client.clientIDs) != 0 {
+					t.Error("client retains resources after timeout")
+				}
+				if again := client.Close(); again != err {
+					t.Errorf("repeated Close() = %v, want original error %v", again, err)
+				}
+			})
 		})
 	}
 }
