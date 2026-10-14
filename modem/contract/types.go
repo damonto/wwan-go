@@ -365,6 +365,7 @@ type Status struct {
 }
 
 type SIMInfo struct {
+	PINStatus    SIMPINStatus
 	State        SIMState
 	Slot         uint8
 	ICCID        string

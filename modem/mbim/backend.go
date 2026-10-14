@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	mbimproto "github.com/damonto/wwan-go/mbim"
+	"github.com/damonto/wwan-go/modem/contract"
 	wwansim "github.com/damonto/wwan-go/sim"
 	simcard "github.com/damonto/wwan-go/sim/card"
 )
@@ -240,6 +241,10 @@ func (b *Backend) SIMInfo(ctx context.Context) (SIMInfo, error) {
 	result.State = state
 	if pinValid {
 		applyPINRetries(&result, pin)
+		result.PINStatus = simPINStatus(pin)
+		if pin.Type == mbimproto.PINTypeNone && state == SIMStateLocked {
+			result.PINStatus.Lock = contract.SIMLockUnknown
+		}
 	}
 	result.ATR = readSIMATR(ctx, ready.ReadyState, b.client)
 	if result.State == SIMStateAbsent {
@@ -419,17 +424,13 @@ func (b *Backend) SetPrimarySIMSlot(ctx context.Context, slot uint8) error {
 }
 
 func (b *Backend) SendPIN(ctx context.Context, pin string) error {
-	if _, err := b.client.SetPIN(ctx, mbimproto.PINTypePIN1, mbimproto.PINOperationEnter, pin, ""); err != nil {
-		return err
-	}
-	return nil
+	result, err := b.client.SetPIN(ctx, mbimproto.PINTypePIN1, mbimproto.PINOperationEnter, pin, "")
+	return pinOperationError(result, err)
 }
 
 func (b *Backend) SendPUK(ctx context.Context, puk, newPIN string) error {
-	if _, err := b.client.SetPIN(ctx, mbimproto.PINTypePUK1, mbimproto.PINOperationEnter, puk, newPIN); err != nil {
-		return err
-	}
-	return nil
+	result, err := b.client.SetPIN(ctx, mbimproto.PINTypePUK1, mbimproto.PINOperationEnter, puk, newPIN)
+	return pinOperationError(result, err)
 }
 
 func (b *Backend) EnablePIN(ctx context.Context, pin string, enabled bool) error {
@@ -437,17 +438,13 @@ func (b *Backend) EnablePIN(ctx context.Context, pin string, enabled bool) error
 	if enabled {
 		operation = mbimproto.PINOperationEnable
 	}
-	if _, err := b.client.SetPIN(ctx, mbimproto.PINTypePIN1, operation, pin, ""); err != nil {
-		return err
-	}
-	return nil
+	result, err := b.client.SetPIN(ctx, mbimproto.PINTypePIN1, operation, pin, "")
+	return pinOperationError(result, err)
 }
 
 func (b *Backend) ChangePIN(ctx context.Context, oldPIN, newPIN string) error {
-	if _, err := b.client.SetPIN(ctx, mbimproto.PINTypePIN1, mbimproto.PINOperationChange, oldPIN, newPIN); err != nil {
-		return err
-	}
-	return nil
+	result, err := b.client.SetPIN(ctx, mbimproto.PINTypePIN1, mbimproto.PINOperationChange, oldPIN, newPIN)
+	return pinOperationError(result, err)
 }
 
 func (b *Backend) PreferredNetworks(ctx context.Context) ([]PreferredNetwork, error) {
