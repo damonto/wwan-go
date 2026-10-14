@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/damonto/wwan-go/modem/contract"
 	"github.com/damonto/wwan-go/modem/sms"
 	"github.com/damonto/wwan-go/qcom"
 	wwansim "github.com/damonto/wwan-go/sim"
@@ -309,34 +310,14 @@ func (b *Backend) simInfoFromCardStatus(ctx context.Context, status qcom.CardSta
 }
 
 func simIdentityReady(status qcom.CardStatus) bool {
-	if len(status.Cards) == 0 || status.Cards[0].State != qcom.CardStatePresent {
-		return false
-	}
-	for _, app := range status.Cards[0].Applications {
-		if (app.Type == qcom.ApplicationTypeSIM || app.Type == qcom.ApplicationTypeUSIM) && app.State == qcom.ApplicationStateReady {
-			return true
-		}
-	}
-	return false
+	_, app, ok := primarySIMApplication(status)
+	return ok && app.State == qcom.ApplicationStateReady
 }
 
 func basicSIMInfo(status qcom.CardStatus, slot uint8) SIMInfo {
-	result := SIMInfo{Slot: slot, State: simStateFromCardStatus(status)}
-	if len(status.Cards) == 0 {
-		return result
-	}
-	card := status.Cards[0]
-	result.PINRetries = card.UPINRetries
-	result.PUKRetries = card.UPUKRetries
-	for _, app := range card.Applications {
-		if app.Type != qcom.ApplicationTypeSIM && app.Type != qcom.ApplicationTypeUSIM {
-			continue
-		}
-		result.PINRetries = app.PIN1Retries
-		result.PUKRetries = app.PUK1Retries
-		break
-	}
-	return result
+	pin := simPINStatus(status)
+	return SIMInfo{Slot: slot, State: simStateFromCardStatus(status), PINStatus: pin,
+		PINRetries: uint8(min(pin.PINRetries, 255)), PUKRetries: uint8(min(pin.PUKRetries, 255))}
 }
 
 func (b *Backend) readSIMICCID(ctx context.Context) (string, error) {
@@ -486,35 +467,39 @@ func (b *Backend) SetPrimarySIMSlot(ctx context.Context, slot uint8) error {
 }
 
 func (b *Backend) SendPIN(ctx context.Context, pin string) error {
-	_, err := b.client.VerifyPIN(ctx, qcom.PINVerifyRequest{Session: qcom.SessionPrimaryGWProvisioning, ID: qcom.PINIDPIN1, PIN: pin})
+	id, err := b.simPINID(ctx)
 	if err != nil {
 		return err
 	}
-	return nil
+	result, err := b.client.VerifyPIN(ctx, qcom.PINVerifyRequest{Session: qcom.SessionPrimaryGWProvisioning, ID: id, PIN: pin})
+	return pinOperationError(result, err)
 }
 
 func (b *Backend) SendPUK(ctx context.Context, puk, newPIN string) error {
-	_, err := b.client.UnblockPIN(ctx, qcom.PINUnblockRequest{Session: qcom.SessionPrimaryGWProvisioning, ID: qcom.PINIDPIN1, PUK: puk, NewPIN: newPIN})
+	id, err := b.simPINID(ctx)
 	if err != nil {
 		return err
 	}
-	return nil
+	result, err := b.client.UnblockPIN(ctx, qcom.PINUnblockRequest{Session: qcom.SessionPrimaryGWProvisioning, ID: id, PUK: puk, NewPIN: newPIN})
+	return pinOperationError(result, err)
 }
 
 func (b *Backend) EnablePIN(ctx context.Context, pin string, enabled bool) error {
-	_, err := b.client.SetPINProtection(ctx, qcom.PINProtectionRequest{Session: qcom.SessionPrimaryGWProvisioning, ID: qcom.PINIDPIN1, PIN: pin, Enable: enabled})
+	id, err := b.simPINID(ctx)
 	if err != nil {
 		return err
 	}
-	return nil
+	result, err := b.client.SetPINProtection(ctx, qcom.PINProtectionRequest{Session: qcom.SessionPrimaryGWProvisioning, ID: id, PIN: pin, Enable: enabled})
+	return pinOperationError(result, err)
 }
 
 func (b *Backend) ChangePIN(ctx context.Context, oldPIN, newPIN string) error {
-	_, err := b.client.ChangePIN(ctx, qcom.PINChangeRequest{Session: qcom.SessionPrimaryGWProvisioning, ID: qcom.PINIDPIN1, OldPIN: oldPIN, NewPIN: newPIN})
+	id, err := b.simPINID(ctx)
 	if err != nil {
 		return err
 	}
-	return nil
+	result, err := b.client.ChangePIN(ctx, qcom.PINChangeRequest{Session: qcom.SessionPrimaryGWProvisioning, ID: id, OldPIN: oldPIN, NewPIN: newPIN})
+	return pinOperationError(result, err)
 }
 
 func (b *Backend) PreferredNetworks(ctx context.Context) ([]PreferredNetwork, error) {
@@ -1195,20 +1180,36 @@ func technologyFromNASRadio(radio qcom.NASRadioInterface) Technology {
 }
 
 func simStateFromCardStatus(status qcom.CardStatus) SIMState {
-	if len(status.Cards) == 0 || status.Cards[0].State == qcom.CardStateAbsent {
+	if len(status.Cards) == 0 {
 		return SIMStateAbsent
 	}
-	card := status.Cards[0]
+	if int(status.IndexGWPrimary>>8) >= len(status.Cards) {
+		for _, card := range status.Cards {
+			if card.State != qcom.CardStateAbsent {
+				return SIMStateUnknown
+			}
+		}
+		return SIMStateAbsent
+	}
+	card, app, ok := primarySIMApplication(status)
+	if card.State == qcom.CardStateAbsent {
+		return SIMStateAbsent
+	}
 	if card.State == qcom.CardStateError {
 		return SIMStateFailure
 	}
-	for _, app := range card.Applications {
-		switch app.State {
-		case qcom.ApplicationStateReady:
-			return SIMStateReady
-		case qcom.ApplicationStatePIN1OrUPINRequired, qcom.ApplicationStatePUK1OrUPINRequired, qcom.ApplicationStateCheckPersonalization, qcom.ApplicationStatePIN1Blocked:
-			return SIMStateLocked
-		}
+	if !ok {
+		return SIMStateUnknown
+	}
+	switch simPINStatus(status).Lock {
+	case contract.SIMLockPIN, contract.SIMLockPUK, contract.SIMLockBlocked, contract.SIMLockOther:
+		return SIMStateLocked
+	}
+	if app.State == qcom.ApplicationStateReady {
+		return SIMStateReady
+	}
+	if app.State == qcom.ApplicationStateCheckPersonalization {
+		return SIMStateLocked
 	}
 	return SIMStateUnknown
 }

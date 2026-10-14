@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/damonto/wwan-go/modem/contract"
 	"github.com/damonto/wwan-go/qcom"
 	"github.com/damonto/wwan-go/qcom/tlv"
 )
@@ -641,6 +642,7 @@ func TestSIMInfoFromCardStatus(t *testing.T) {
 				}},
 			}}}
 
+			tt.want.PINStatus = contract.SIMPINStatus{Supported: true, Lock: contract.SIMLockUnknown, PINRetries: 3, PUKRetries: 10}
 			got := backend.simInfoFromCardStatus(context.Background(), status)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("simInfoFromCardStatus() = %+v, want %+v", got, tt.want)
