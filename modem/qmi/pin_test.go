@@ -155,3 +155,14 @@ func TestPINCommandsKeepRetryResultAndNeverReplay(t *testing.T) {
 		})
 	}
 }
+
+func TestAbsentSIMWithoutProvisioningSession(t *testing.T) {
+	status := qcom.CardStatus{IndexGWPrimary: 0xffff, Cards: []qcom.Card{{State: qcom.CardStateAbsent}}}
+	if got := simStateFromCardStatus(status); got != SIMStateAbsent {
+		t.Fatalf("absent SIM = %v", got)
+	}
+	status.Cards[0].State = qcom.CardStatePresent
+	if got := simStateFromCardStatus(status); got != SIMStateUnknown {
+		t.Fatalf("unprovisioned SIM = %v", got)
+	}
+}

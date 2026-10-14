@@ -1184,7 +1184,12 @@ func simStateFromCardStatus(status qcom.CardStatus) SIMState {
 		return SIMStateAbsent
 	}
 	if int(status.IndexGWPrimary>>8) >= len(status.Cards) {
-		return SIMStateUnknown
+		for _, card := range status.Cards {
+			if card.State != qcom.CardStateAbsent {
+				return SIMStateUnknown
+			}
+		}
+		return SIMStateAbsent
 	}
 	card, app, ok := primarySIMApplication(status)
 	if card.State == qcom.CardStateAbsent {

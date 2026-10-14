@@ -60,6 +60,7 @@ func TestProtectionIsIndependentOfUnlock(t *testing.T) {
 	}{
 		{"enabled and verified", pinStatusReader{mode: mbimproto.PINModeEnabled}, true, true, contract.SIMLockNone},
 		{"disabled", pinStatusReader{mode: mbimproto.PINModeDisabled}, false, true, contract.SIMLockNone},
+		{"unknown mode", pinStatusReader{mode: mbimproto.PINMode(99)}, false, false, contract.SIMLockNone},
 		{"list unavailable", pinStatusReader{listErr: errors.New("unavailable")}, false, false, contract.SIMLockNone},
 		{"PIN required without descriptor", pinStatusReader{pinErr: mbimproto.StatusPINRequired, mode: mbimproto.PINModeEnabled}, true, true, contract.SIMLockUnknown},
 	}

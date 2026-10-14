@@ -10,7 +10,10 @@ import (
 )
 
 func simPINStatus(pin mbimproto.PINInfo) contract.SIMPINStatus {
-	result := contract.SIMPINStatus{Supported: true, Lock: contract.SIMLockNone}
+	result := contract.SIMPINStatus{Supported: true, Lock: contract.SIMLockUnknown}
+	if pin.State == mbimproto.PINStateUnlocked {
+		result.Lock = contract.SIMLockNone
+	}
 	if pin.State == mbimproto.PINStateLocked {
 		switch pin.Type {
 		case mbimproto.PINTypePIN1:
@@ -63,10 +66,14 @@ func readSIMPINStatus(ctx context.Context, reader simPINStatusReader) (contract.
 	}
 	list, listErr := reader.PINList(ctx)
 	if listErr == nil {
-		result.Supported = list.PIN1.Mode != mbimproto.PINModeNotSupported
-		if result.Supported {
+		switch list.PIN1.Mode {
+		case mbimproto.PINModeNotSupported:
+			result.Supported = false
+			result.EnabledKnown = false
+		case mbimproto.PINModeEnabled, mbimproto.PINModeDisabled:
 			result.EnabledKnown, result.Enabled = true, list.PIN1.Mode == mbimproto.PINModeEnabled
 		}
+
 	} else if ctx.Err() != nil {
 		return contract.SIMPINStatus{}, ctx.Err()
 	}
