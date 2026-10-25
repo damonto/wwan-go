@@ -562,4 +562,4 @@ GOCACHE=/tmp/wwan-go-build go mod tidy -diff
 
 ## License
 
-No license file is currently included.
+This repository, is released under the [MIT License](LICENSE).
