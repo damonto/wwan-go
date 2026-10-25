@@ -34,8 +34,6 @@ scripts/
 
 # AI
 .codex
-AGENTS.md
-CLAUDE.md
 
 # Linux Mobile Broadband
 libqmi/
