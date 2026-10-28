@@ -26,7 +26,6 @@ type Client struct {
 	pdcMu              sync.Mutex
 	locMu              sync.Mutex
 	pbmMu              sync.Mutex
-	wmsMu              sync.Mutex
 	transport          Transport
 	slot               uint8
 	logicalSlot        atomic.Uint32
@@ -36,7 +35,6 @@ type Client struct {
 	txn                uint16
 	ctlTxn             uint8
 	pdcToken           uint32
-	wmsToken           uint32
 	closeOnce          sync.Once
 	closing            bool
 	closed             bool
@@ -58,7 +56,6 @@ type Client struct {
 	nasIndicationRefs         map[nasIndicationRegistration]int
 	pdcIndicationRefs         map[pdcIndicationRegistration]int
 	wdsProfileEventRefs       map[WDSProfileID]int
-	pbmIndicationRefs         map[PBMEventRegistrationMask]int
 }
 
 type allocatedClientID struct {

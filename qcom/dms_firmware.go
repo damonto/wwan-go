@@ -174,7 +174,7 @@ func (c *Client) FirmwarePreference(ctx context.Context) (DMSFirmwarePreference,
 	if err := c.dmsRead(ctx, MessageDMSGetFirmwarePreference, &result); err != nil {
 		return DMSFirmwarePreference{}, fmt.Errorf("querying QMI DMS firmware preference: %w", err)
 	}
-	return DMSFirmwarePreference{Images: result.Images}, nil
+	return DMSFirmwarePreference(result), nil
 }
 
 // SetFirmwarePreference selects the modem and PRI images used for download.
@@ -262,7 +262,7 @@ func (c *Client) StoredImages(ctx context.Context) (DMSStoredImages, error) {
 	if err := c.dmsRead(ctx, MessageDMSListStoredImages, &result); err != nil {
 		return DMSStoredImages{}, fmt.Errorf("querying QMI DMS stored images: %w", err)
 	}
-	return DMSStoredImages{Images: result.Images}, nil
+	return DMSStoredImages(result), nil
 }
 
 // ListStoredImages is an alias for StoredImages.

@@ -94,10 +94,6 @@ func acquisitionOrderTLV(radios ...qcom.NASRadioInterface) tlv.TLV {
 	return tlv.Bytes(0x1C, value)
 }
 
-func gwAcquisitionOrderTLV(order qcom.NASGWAcquisitionOrder) tlv.TLV {
-	return tlv.Uint(0x19, uint32(order))
-}
-
 func TestCanonicalModeTechnology(t *testing.T) {
 	tests := []struct {
 		name string

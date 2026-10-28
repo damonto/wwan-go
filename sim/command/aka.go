@@ -98,7 +98,7 @@ func (r *Authenticate3GResult) UnmarshalBinary(data []byte) error {
 		if err != nil {
 			return err
 		}
-		parsed.IK, payload, err = readAKAChunk(payload, "IK", original)
+		parsed.IK, _, err = readAKAChunk(payload, "IK", original)
 		if err != nil {
 			return err
 		}
